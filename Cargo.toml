@@ -1,6 +1,6 @@
 [package]
 name = "cme"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "The embedding crate for the Checkmate language"
 license = "Apache-2.0"

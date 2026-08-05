@@ -1,7 +1,10 @@
 [package]
 name = "cme"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-description = "The embedding crate for the Checkmate language"
+description = "Checkmate Embedding: the embedded specification for the Checkmate scripting language."
 license = "Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/checkmatelang/checkmate"
+keywords = ["checkmate", "scripting", "embedding", "language"]
+categories = ["development-tools"]

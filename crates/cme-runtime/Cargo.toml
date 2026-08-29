@@ -1,0 +1,11 @@
+[package]
+name = "cme-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]

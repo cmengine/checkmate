@@ -13,6 +13,10 @@ pub enum Token<'a> {
     KwInfer,
     #[token("return")]
     KwReturn,
+    #[token("str")]
+    KwStr,
+    #[token("bool")]
+    KwBool,
 
     // Symbols
     #[token("=")]
@@ -35,4 +39,8 @@ pub enum Token<'a> {
     // This regex matches digits, and the closure parses it into an i64.
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     IntLit(i64),
+
+    // Float Literals
+    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap())]
+    FloatLit(f64),
 }

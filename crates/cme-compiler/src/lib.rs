@@ -1,5 +1,6 @@
 pub mod lexer;
 pub mod parser;
+pub use logos;
 
 #[cfg(test)]
 mod tests {
@@ -62,6 +63,15 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(Type::Infer, "value", Expr::Ident("other_value".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_declared_string_variable() {
+        let (ast, _) = parse_statement_ok(r#"str message = "OMG WOW!""#);
+        assert_eq!(
+            ast,
+            var_decl(Type::Str, "message", Expr::StrLit("OMG WOW!".to_string()))
         );
     }
 
@@ -194,7 +204,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_type_keyword() {
-        let tokens: Vec<Token> = Token::lexer("str message").map(Result::unwrap).collect();
+        let tokens: Vec<Token> = Token::lexer("bool message").map(Result::unwrap).collect();
         let mut parser = Parser::new(&tokens);
 
         let error = parser.parse_statement().unwrap_err();

@@ -21,6 +21,10 @@ pub enum Token<'a> {
     #[token("bool")]
     KwBool,
 
+    // String Literals
+    #[regex(r#""[^"\r\n]*""#)]
+    StrLit(&'a str),
+
     // Symbols
     #[token("=")]
     Assign,
@@ -189,7 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_string_literals() {
-        assert!(lex("\"text\"").is_err());
+    fn lexes_string_literals() {
+        let source = r#""text" "" "spaces and symbols!""#;
+        assert_eq!(
+            lex_ok(source),
+            vec![
+                Token::StrLit("\"text\""),
+                Token::StrLit("\"\""),
+                Token::StrLit("\"spaces and symbols!\""),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unterminated_string_literals() {
+        assert!(lex("\"text").is_err());
     }
 }

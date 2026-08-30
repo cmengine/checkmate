@@ -18,8 +18,8 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 
 `WHITEPAPER.md` at the repository root is the language specification.
 
-- **Never read `WHITEPAPER.md` directly.** This applies to every reading mechanism: shell tools, scripts, editors, search, source inspection tools, file listing with content output, and any tool or agent that can access file contents.
-- Treat the whitepaper as a human-owned language source of truth.
+- **Read `WHITEPAPER.md` only through `mdpeek`.** This applies to every reading mechanism: shell tools, scripts, editors, search, source inspection tools, file listing with content output, and any tool or agent that can access file contents. Never use `cat`, `read`, `sed`, CodeGraph, or any other method to read it or any Markdown file.
+- Treat the whitepaper as a human-owned language source of truth. Run `mdpeek toc FILENAME.md` to get the ToC of the file with numbers attached to them, then run `mdpeek fetch FILENAME.md [comma-seperated numbers]` to get relative bodies. Try fetching only the parts you need.
 - When a task requires clarification about Checkmate language design, syntax, semantics, precedence, intended compiler behavior, or any other specification detail, **ask the user and stop** until the user answers.
 - Do not infer language behavior from the whitepaper's file metadata, size, or any partial content exposure.
 
@@ -39,6 +39,13 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 - Format: `cargo fmt`
 - Lint: `cargo clippy --workspace --all-targets`
 
+## mdpeek
+
+- `mdpeek toc [PATH]`: list numbered headings. Omitted `PATH` uses `WHITEPAPER.md` or the sole `.md` file.
+- `mdpeek fetch PATH SECTIONS`: print selected sections, comma-separated numbers such as `1,4,23`.
+- Fetch includes subsections, sorts requested sections, and exits `2` if any number is invalid.
+- Always run `toc` first and use its numbers; fenced code headings are ignored.
+
 ## Repository State Notes
 
 - `cme-interp` and `cme-runtime` still expose starter `add` functions and their tests. Treat them as placeholders rather than meaningful language runtime APIs.
@@ -46,6 +53,7 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 - Newline handling is intentionally significant at statement boundaries; do not remove this behavior without explicit user direction.
 
 <!-- CODEGRAPH_START -->
+
 ## CodeGraph
 
 In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:

@@ -8,6 +8,65 @@ pub enum Token<'a> {
     #[regex(r"[\r\n]+")] // one or more line breaks -> one token
     Newline,
 
+    // String Literals
+    #[regex(r#""[^"\r\n]*""#)]
+    StrLit(&'a str),
+
+    // Symbols
+    #[token("||")]
+    Or,
+    #[token("&&")]
+    And,
+    #[token("==")]
+    Eq,
+    #[token("!=")]
+    Ne,
+    #[token("<=")]
+    Le,
+    #[token(">=")]
+    Ge,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
+    #[token("+=")]
+    AddAssign,
+    #[token("-=")]
+    SubAssign,
+    #[token("*=")]
+    MulAssign,
+    #[token("/=")]
+    DivAssign,
+    #[token("%=")]
+    RemAssign,
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Star,
+    #[token("/")]
+    Slash,
+    #[token("%")]
+    Percent,
+    #[token("!")]
+    Not,
+    #[token("=")]
+    Assign,
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+
+    // Identifiers (e.g., variable names, function names)
+    // This regex matches a letter or underscore, followed by any number of letters, numbers, or underscores.
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
+    Ident(&'a str),
+
     // Keywords
     #[token("int")]
     KwInt,
@@ -25,27 +84,6 @@ pub enum Token<'a> {
     KwTrue,
     #[token("false")]
     KwFalse,
-
-    // String Literals
-    #[regex(r#""[^"\r\n]*""#)]
-    StrLit(&'a str),
-
-    // Symbols
-    #[token("=")]
-    Assign,
-    #[token("(")]
-    LParen,
-    #[token(")")]
-    RParen,
-    #[token("{")]
-    LBrace,
-    #[token("}")]
-    RBrace,
-
-    // Identifiers (e.g., variable names, function names)
-    // This regex matches a letter or underscore, followed by any number of letters, numbers, or underscores.
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
-    Ident(&'a str),
 
     // Integer Literals
     // This regex matches digits, and the closure parses it into an i64.
@@ -299,7 +337,6 @@ mod tests {
     #[test]
     fn rejects_unrecognized_characters() {
         assert!(lex("$").is_err());
-        assert!(lex("a + b").is_err());
         assert!(lex("1.2.3").is_err());
     }
 

@@ -4,9 +4,9 @@ pub mod parser;
 #[cfg(test)]
 mod tests {
     use super::lexer::Token;
-    use super::parser::Parser;
-    use cme_core::ast::{Expr, Stmt, Type};
-    use logos::Logos;
+use super::parser::Parser;
+use cme_core::ast::{Expr, Stmt, Type};
+use logos::Logos;
 
     #[test]
     fn test_parse_var_decl() {
@@ -29,5 +29,22 @@ mod tests {
                 expr: Expr::FloatLit(4.5),
             }
         );
+    }
+
+    #[test]
+    fn test_parse_program_rejects_trailing_rbrace() {
+        let source = "infer x = 1\n}";
+        let tokens: Vec<Token> = Token::lexer(source)
+            .map(|result| result.unwrap())
+            .collect();
+        let mut parser = Parser::new(&tokens);
+
+        assert!(parser.parse_program().is_err());
+    }
+
+    #[test]
+    fn test_strip_insignificant_newlines_rejects_unbalanced_brackets() {
+        assert!(Parser::strip_insignificant_newlines(vec![Token::RParen]).is_err());
+        assert!(Parser::strip_insignificant_newlines(vec![Token::LParen]).is_err());
     }
 }

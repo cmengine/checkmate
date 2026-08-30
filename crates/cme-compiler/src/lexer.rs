@@ -1,9 +1,12 @@
 use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
-#[logos(skip r"[ \t\n\f]+")] // For now, skip all whitespace (including newlines)
-#[logos(skip r"//.*")] // Skip single-line comments
+#[logos(skip r"[ \t\f]+")]
+#[logos(skip r"//[^\r\n]*")]
 pub enum Token<'a> {
+    #[regex(r"[\r\n]+")] // one or more line breaks -> one token
+    Newline,
+
     // Keywords
     #[token("int")]
     KwInt,

@@ -203,12 +203,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_type_keyword() {
-        let tokens: Vec<Token> = Token::lexer("bool message").map(Result::unwrap).collect();
-        let mut parser = Parser::new(&tokens);
-
-        let error = parser.parse_statement().unwrap_err();
-        assert!(error.contains("Expected a type"));
+    fn parses_boolean_variable_declaration() {
+        let (ast, _) = parse_statement_ok("bool flag = true");
+        assert_eq!(ast, var_decl(Type::Bool, "flag", Expr::BoolLit(true)));
+        let (ast, _) = parse_statement_ok("infer flag = false");
+        assert_eq!(ast, var_decl(Type::Infer, "flag", Expr::BoolLit(false)));
     }
 
     #[test]

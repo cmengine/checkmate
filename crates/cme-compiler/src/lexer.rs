@@ -69,22 +69,47 @@ pub enum LexError {
 }
 
 pub fn lex(source: &str) -> Result<Vec<SpannedToken<'_>>, LexError> {
+    let (tokens, errors) = lex_with_errors(source);
+    match errors.into_iter().next() {
+        Some(error) => Err(error),
+        None => Ok(tokens),
+    }
+}
+
+pub fn lex_with_errors(source: &str) -> (Vec<SpannedToken<'_>>, Vec<LexError>) {
     let mut tokens = Vec::new();
+    let mut errors = Vec::new();
 
     let mut lexer = Token::lexer(source);
 
     while let Some(result) = lexer.next() {
         let span = lexer.span();
-        let token = result.map_err(|_| LexError::Invalid {
-            span: Span::new(span.start, span.end),
-        })?;
+        if result.is_err() {
+            errors.push(LexError::Invalid {
+                span: Span::new(span.start, span.end),
+            });
+
+            while let Some(skipped) = lexer.next() {
+                if skipped.is_ok()
+                    && lexer.span().end > span.end
+                    && matches!(skipped, Ok(Token::Newline))
+                {
+                    tokens.push(SpannedToken {
+                        token: Token::Newline,
+                        span: Span::new(lexer.span().start, lexer.span().end),
+                    });
+                    break;
+                }
+            }
+            continue;
+        }
         tokens.push(SpannedToken {
-            token,
+            token: result.unwrap(),
             span: Span::new(span.start, span.end),
         });
     }
 
-    Ok(tokens)
+    (tokens, errors)
 }
 
 #[cfg(test)]
@@ -102,6 +127,37 @@ mod tests {
 
     fn lex_ok(source: &str) -> Vec<Token<'_>> {
         lex_tokens(source)
+    }
+
+    #[test]
+    fn recovers_from_invalid_token_at_next_newline() {
+        let source = "infer a = @\nint b = 1\n";
+        let (tokens, errors) = crate::lexer::lex_with_errors(source);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0],
+            crate::lexer::LexError::Invalid {
+                span: cme_core::Span::new(10, 11),
+            }
+        );
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::KwInfer,
+                Token::Ident("a"),
+                Token::Assign,
+                Token::Newline,
+                Token::KwInt,
+                Token::Ident("b"),
+                Token::Assign,
+                Token::IntLit(1),
+                Token::Newline,
+            ]
+        );
     }
 
     #[test]

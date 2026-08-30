@@ -1,3 +1,4 @@
+use cme_core::Span;
 use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
@@ -56,17 +57,51 @@ pub enum Token<'a> {
     FloatLit(f64),
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct SpannedToken<'a> {
+    pub token: Token<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum LexError {
+    Invalid { span: Span },
+}
+
+pub fn lex(source: &str) -> Result<Vec<SpannedToken<'_>>, LexError> {
+    let mut tokens = Vec::new();
+
+    let mut lexer = Token::lexer(source);
+
+    while let Some(result) = lexer.next() {
+        let span = lexer.span();
+        let token = result.map_err(|_| LexError::Invalid {
+            span: Span::new(span.start, span.end),
+        })?;
+        tokens.push(SpannedToken {
+            token,
+            span: Span::new(span.start, span.end),
+        });
+    }
+
+    Ok(tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Token;
-    use logos::Logos;
+    use crate::lexer::lex;
 
-    fn lex(source: &str) -> Result<Vec<Token<'_>>, ()> {
-        Token::lexer(source).collect()
+    fn lex_tokens(source: &str) -> Vec<Token<'_>> {
+        lex(source)
+            .unwrap_or_else(|error| panic!("source should lex: {error:?}"))
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect()
     }
 
     fn lex_ok(source: &str) -> Vec<Token<'_>> {
-        lex(source).unwrap_or_else(|_| panic!("source should lex: {source:?}"))
+        lex_tokens(source)
     }
 
     #[test]

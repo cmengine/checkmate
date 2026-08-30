@@ -4,30 +4,31 @@ pub use logos;
 
 #[cfg(test)]
 mod tests {
-    use super::lexer::Token;
+    use super::lexer::{SpannedToken, Token, lex};
     use super::parser::Parser;
+    use crate::parser::Diagnostic;
     use cme_core::ast::{Expr, Stmt, Type};
-    use logos::Logos;
 
-    fn parse_statement_ok(source: &str) -> (Stmt, Vec<Token<'_>>) {
-        let tokens: Vec<Token> = Token::lexer(source).map(|result| result.unwrap()).collect();
-        let mut parser = Parser::new(&tokens);
-        let statement = parser
-            .parse_statement()
-            .unwrap_or_else(|error| panic!("{source:?} should parse: {error}"));
-        (statement, tokens)
+    fn spanned_tokens(source: &str) -> Vec<SpannedToken<'_>> {
+        lex(source).unwrap_or_else(|error| panic!("{source:?} should lex: {error:?}"))
     }
 
-    fn parse_program(source: &str) -> Result<Vec<Stmt>, String> {
-        let tokens = Token::lexer(source)
-            .map(|result| result.map_err(|_| "lexing failed".to_string()))
-            .collect::<Result<Vec<_>, String>>()?;
-        let tokens = Parser::strip_insignificant_newlines(tokens)?;
-        Parser::new(&tokens).parse_program()
+    fn parse_statement_ok(source: &str) -> Stmt {
+        let tokens = spanned_tokens(source);
+        let mut parser = Parser::new(&tokens, source.len());
+        parser
+            .parse_statement()
+            .unwrap_or_else(|error| panic!("{source:?} should parse: {error:?}"))
+    }
+
+    fn parse_program(source: &str) -> Result<Vec<Stmt>, Diagnostic> {
+        let tokens = spanned_tokens(source);
+        let tokens = Parser::strip_insignificant_newlines(tokens, source.len())?;
+        Parser::new(&tokens, source.len()).parse_program()
     }
 
     fn parse_program_ok(source: &str) -> Vec<Stmt> {
-        parse_program(source).unwrap_or_else(|error| panic!("{source:?} should parse: {error}"))
+        parse_program(source).unwrap_or_else(|error| panic!("{source:?} should parse: {error:?}"))
     }
 
     fn var_decl(ty: Type, name: &str, expr: Expr) -> Stmt {
@@ -40,26 +41,26 @@ mod tests {
 
     #[test]
     fn parses_inferred_float_variable_declaration() {
-        let (ast, _) = parse_statement_ok("infer speed = 4.5");
+        let ast = parse_statement_ok("infer speed = 4.5");
 
         assert_eq!(ast, var_decl(Type::Infer, "speed", Expr::FloatLit(4.5)));
     }
 
     #[test]
     fn parses_declared_integer_variable() {
-        let (ast, _) = parse_statement_ok("int count = 42");
+        let ast = parse_statement_ok("int count = 42");
         assert_eq!(ast, var_decl(Type::Int, "count", Expr::IntLit(42)));
     }
 
     #[test]
     fn parses_declared_float_variable() {
-        let (ast, _) = parse_statement_ok("float ratio = 0.25");
+        let ast = parse_statement_ok("float ratio = 0.25");
         assert_eq!(ast, var_decl(Type::Float, "ratio", Expr::FloatLit(0.25)));
     }
 
     #[test]
     fn parses_identifier_expression() {
-        let (ast, _) = parse_statement_ok("infer value = other_value");
+        let ast = parse_statement_ok("infer value = other_value");
         assert_eq!(
             ast,
             var_decl(Type::Infer, "value", Expr::Ident("other_value".to_string()))
@@ -68,7 +69,7 @@ mod tests {
 
     #[test]
     fn parses_declared_string_variable() {
-        let (ast, _) = parse_statement_ok(r#"str message = "OMG WOW!""#);
+        let ast = parse_statement_ok(r#"str message = "OMG WOW!""#);
         assert_eq!(
             ast,
             var_decl(Type::Str, "message", Expr::StrLit("OMG WOW!".to_string()))
@@ -108,117 +109,108 @@ mod tests {
 
     #[test]
     fn strips_newlines_inside_parentheses() {
-        let tokens = vec![
-            Token::LParen,
-            Token::Newline,
-            Token::Ident("value"),
-            Token::Newline,
-            Token::RParen,
-        ];
+        let source = "(\nvalue\n)";
+        let tokens: Vec<Token> =
+            Parser::strip_insignificant_newlines(spanned_tokens(source), source.len())
+                .unwrap()
+                .into_iter()
+                .map(|spanned| spanned.token)
+                .collect();
         assert_eq!(
-            Parser::strip_insignificant_newlines(tokens).unwrap(),
-            vec![Token::LParen, Token::Ident("value"), Token::RParen]
+            tokens,
+            [Token::LParen, Token::Ident("value"), Token::RParen]
         );
     }
 
     #[test]
     fn preserves_statement_newlines_outside_parentheses() {
-        let tokens = vec![
-            Token::Ident("value"),
-            Token::Newline,
-            Token::Ident("other"),
-            Token::Newline,
-        ];
-        assert_eq!(
-            Parser::strip_insignificant_newlines(tokens).unwrap(),
-            vec![
-                Token::Ident("value"),
-                Token::Newline,
-                Token::Ident("other"),
-                Token::Newline,
-            ]
-        );
+        let source = "value\nother\n";
+        let tokens =
+            Parser::strip_insignificant_newlines(spanned_tokens(source), source.len()).unwrap();
+        let expected = spanned_tokens(source);
+        assert_eq!(tokens, expected);
     }
 
     #[test]
     fn strips_leading_newlines_before_first_complete_statement() {
-        let tokens = vec![
-            Token::Newline,
-            Token::Newline,
-            Token::Ident("value"),
-            Token::Newline,
-        ];
-        assert_eq!(
-            Parser::strip_insignificant_newlines(tokens).unwrap(),
-            vec![Token::Ident("value"), Token::Newline]
-        );
+        let source = "\n\nvalue\n";
+        let tokens: Vec<Token> =
+            Parser::strip_insignificant_newlines(spanned_tokens(source), source.len())
+                .unwrap()
+                .into_iter()
+                .map(|spanned| spanned.token)
+                .collect();
+        assert_eq!(tokens, [Token::Ident("value"), Token::Newline]);
     }
 
     #[test]
     fn rejects_unbalanced_brackets() {
-        assert!(Parser::strip_insignificant_newlines(vec![Token::RParen]).is_err());
-        assert!(Parser::strip_insignificant_newlines(vec![Token::LParen]).is_err());
+        assert!(Parser::strip_insignificant_newlines(spanned_tokens(")"), 1).is_err());
+        assert!(Parser::strip_insignificant_newlines(spanned_tokens("("), 1).is_err());
     }
 
     #[test]
     fn rejects_statement_without_valid_trailing_token() {
         let error = parse_program("int a = 1 }").unwrap_err();
-        assert!(error.contains("expected end of statement"));
+        assert!(error.to_string().contains("expected end of statement"));
     }
 
     #[test]
     fn rejects_missing_variable_name() {
-        let tokens: Vec<Token> = Token::lexer("int =").map(Result::unwrap).collect();
-        let mut parser = Parser::new(&tokens);
+        let source = "int =";
+        let tokens = spanned_tokens(source);
+        let mut parser = Parser::new(&tokens, source.len());
 
         let error = parser.parse_statement().unwrap_err();
-        assert!(error.contains("Expected a variable name"));
+        assert!(error.to_string().contains("Expected a variable name"));
     }
 
     #[test]
     fn rejects_missing_assignment_operator() {
-        let tokens: Vec<Token> = Token::lexer("int count").map(Result::unwrap).collect();
-        let mut parser = Parser::new(&tokens);
+        let source = "int count";
+        let tokens = spanned_tokens(source);
+        let mut parser = Parser::new(&tokens, source.len());
 
         let error = parser.parse_statement().unwrap_err();
-        assert!(error.contains("Expected '='"));
+        assert!(error.to_string().contains("Expected '='"));
     }
 
     #[test]
     fn rejects_missing_expression() {
-        let tokens: Vec<Token> = Token::lexer("int count =").map(Result::unwrap).collect();
-        let mut parser = Parser::new(&tokens);
+        let source = "int count =";
+        let tokens = spanned_tokens(source);
+        let mut parser = Parser::new(&tokens, source.len());
 
         let error = parser.parse_statement().unwrap_err();
-        assert!(error.contains("Expected an expression"));
+        assert!(error.to_string().contains("Expected an expression"));
     }
 
     #[test]
     fn rejects_unknown_statement_start() {
-        let tokens: Vec<Token> = Token::lexer("value").map(Result::unwrap).collect();
-        let mut parser = Parser::new(&tokens);
+        let source = "value";
+        let tokens = spanned_tokens(source);
+        let mut parser = Parser::new(&tokens, source.len());
 
         let error = parser.parse_statement().unwrap_err();
-        assert!(error.contains("Expected a type"));
+        assert!(error.to_string().contains("Expected a type"));
     }
 
     #[test]
     fn parses_boolean_variable_declaration() {
-        let (ast, _) = parse_statement_ok("bool flag = true");
+        let ast = parse_statement_ok("bool flag = true");
         assert_eq!(ast, var_decl(Type::Bool, "flag", Expr::BoolLit(true)));
-        let (ast, _) = parse_statement_ok("infer flag = false");
+        let ast = parse_statement_ok("infer flag = false");
         assert_eq!(ast, var_decl(Type::Infer, "flag", Expr::BoolLit(false)));
     }
 
     #[test]
     fn rejects_unknown_expression_symbol() {
-        let tokens: Vec<Token> = Token::lexer("infer value = }")
-            .map(Result::unwrap)
-            .collect();
-        let mut parser = Parser::new(&tokens);
+        let source = "infer value = }";
+        let tokens = spanned_tokens(source);
+        let mut parser = Parser::new(&tokens, source.len());
 
         let error = parser.parse_statement().unwrap_err();
-        assert!(error.contains("Expected an expression"));
+        assert!(error.to_string().contains("Expected an expression"));
     }
 
     #[test]
@@ -229,7 +221,7 @@ mod tests {
     #[test]
     fn rejects_empty_parenthesized_statement() {
         let error = parse_program("infer value = ()").unwrap_err();
-        assert!(error.contains("Expected an expression"));
+        assert!(error.to_string().contains("Expected an expression"));
     }
 
     #[test]
@@ -240,8 +232,9 @@ mod tests {
 
     #[test]
     fn parse_statement_does_not_require_all_input_to_be_consumed() {
-        let tokens: Vec<Token> = Token::lexer("infer a = 1 }").map(Result::unwrap).collect();
-        let mut parser = Parser::new(&tokens);
+        let source = "infer a = 1 }";
+        let tokens = spanned_tokens(source);
+        let mut parser = Parser::new(&tokens, source.len());
 
         assert_eq!(
             parser.parse_statement().unwrap(),

@@ -1,4 +1,16 @@
 pub mod ast {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Span {
+        pub start: usize,
+        pub end: usize,
+    }
+
+    impl Span {
+        pub fn new(start: usize, end: usize) -> Self {
+            Self { start, end }
+        }
+    }
+
     #[derive(Debug, PartialEq, Clone)]
     pub enum Type {
         Int,
@@ -22,3 +34,5 @@ pub mod ast {
         VarDecl { ty: Type, name: String, expr: Expr },
     }
 }
+
+pub use ast::Span;

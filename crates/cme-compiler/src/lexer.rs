@@ -1,6 +1,6 @@
 use logos::Logos;
 
-#[derive(Logos, Debug, PartialEq)]
+#[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t\n\f]+")] // For now, skip all whitespace (including newlines)
 #[logos(skip r"//.*")] // Skip single-line comments
 pub enum Token<'a> {

@@ -12,7 +12,7 @@ const USAGE: &str = "Usage: cme <lex|ast> <file.cm>";
 enum CliError {
     Usage(String),
     Io(String),
-    Compiler(Diagnostic, String),
+    Compiler(Vec<Diagnostic>, String),
 }
 
 #[cfg(feature = "cli")]
@@ -30,30 +30,40 @@ fn run() -> Result<(), CliError> {
 
     match command.as_str() {
         "lex" => {
-            let tokens = cme_compiler::lexer::lex(&source)
-                .map_err(|error| CliError::Compiler(Diagnostic::Lex(error), source.clone()))?;
+            let (tokens, errors) = cme_compiler::lexer::lex_with_errors(&source);
+            let errors = errors.into_iter().map(Diagnostic::Lex).collect::<Vec<_>>();
             for token in tokens {
                 println!("{token:?}");
             }
+            render_diagnostics(errors, &source)
         }
         "ast" => {
-            let tokens = cme_compiler::lexer::lex(&source)
-                .map_err(|error| CliError::Compiler(Diagnostic::Lex(error), source.clone()))?;
-            let tokens = Parser::strip_insignificant_newlines(tokens, source.len())
-                .map_err(|error| CliError::Compiler(error, source.clone()))?;
-            let ast = Parser::new(&tokens, source.len())
-                .parse_program()
-                .map_err(|error| CliError::Compiler(error, source.clone()))?;
+            let (tokens, lex_errors) = cme_compiler::lexer::lex_with_errors(&source);
+            let mut errors = lex_errors
+                .into_iter()
+                .map(Diagnostic::Lex)
+                .collect::<Vec<_>>();
+            let (tokens, strip_errors) =
+                Parser::strip_insignificant_newlines_with_errors(tokens, source.len());
+            errors.extend(strip_errors);
+            let (ast, parse_errors) =
+                Parser::new(&tokens, source.len()).parse_program_with_errors();
+            errors.extend(parse_errors);
 
             println!("{ast:#?}");
+            render_diagnostics(errors, &source)
         }
-        _ => {
-            return Err(CliError::Usage(format!(
-                "unknown command: {command}\n{USAGE}"
-            )));
-        }
+        _ => Err(CliError::Usage(format!(
+            "unknown command: {command}\n{USAGE}"
+        ))),
     }
+}
 
+#[cfg(feature = "cli")]
+fn render_diagnostics(errors: Vec<Diagnostic>, source: &str) -> Result<(), CliError> {
+    if !errors.is_empty() {
+        return Err(CliError::Compiler(errors, source.to_string()));
+    }
     Ok(())
 }
 
@@ -127,8 +137,10 @@ fn main() -> ExitCode {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
-        Err(CliError::Compiler(error, source)) => {
-            eprintln!("error: {}", render_error(&error, &source, &source_path));
+        Err(CliError::Compiler(errors, source)) => {
+            for error in errors {
+                eprintln!("error: {}", render_error(&error, &source, &source_path));
+            }
             ExitCode::FAILURE
         }
     }

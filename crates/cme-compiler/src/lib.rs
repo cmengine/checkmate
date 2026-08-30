@@ -27,6 +27,20 @@ mod tests {
         Parser::new(&tokens, source.len()).parse_program()
     }
 
+    fn parse_program_parts(source: &str) -> (Vec<Stmt>, Vec<Diagnostic>) {
+        let (tokens, lex_errors) = crate::lexer::lex_with_errors(source);
+        let mut errors = lex_errors
+            .into_iter()
+            .map(Diagnostic::Lex)
+            .collect::<Vec<_>>();
+        let (tokens, strip_errors) =
+            Parser::strip_insignificant_newlines_with_errors(tokens, source.len());
+        errors.extend(strip_errors);
+        let (stmts, parse_errors) = Parser::new(&tokens, source.len()).parse_program_with_errors();
+        errors.extend(parse_errors);
+        (stmts, errors)
+    }
+
     fn parse_program_ok(source: &str) -> Vec<Stmt> {
         parse_program(source).unwrap_or_else(|error| panic!("{source:?} should parse: {error:?}"))
     }
@@ -216,6 +230,24 @@ mod tests {
     #[test]
     fn rejects_trailing_rbrace_after_program_statement() {
         assert!(parse_program("infer x = 1\n}").is_err());
+    }
+
+    #[test]
+    fn recovers_to_next_statement_after_lex_error() {
+        let (stmts, errors) = parse_program_parts("@\nint b = 1\n");
+
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], Diagnostic::Lex(_)));
+        assert_eq!(stmts, vec![var_decl(Type::Int, "b", Expr::IntLit(1))]);
+    }
+
+    #[test]
+    fn recovers_to_next_statement_after_parse_error() {
+        let (stmts, errors) = parse_program_parts("int a = }\nint b = 2\n");
+
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], Diagnostic::Parse { .. }));
+        assert_eq!(stmts, vec![var_decl(Type::Int, "b", Expr::IntLit(2))]);
     }
 
     #[test]

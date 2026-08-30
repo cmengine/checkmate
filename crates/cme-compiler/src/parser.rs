@@ -71,7 +71,16 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     /// Parses a whole file (later: also a `{ ... }` block)
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
+        let (stmts, errors) = self.parse_program_with_errors();
+        match errors.into_iter().next() {
+            Some(error) => Err(error),
+            None => Ok(stmts),
+        }
+    }
+
+    pub fn parse_program_with_errors(&mut self) -> (Vec<Stmt>, Vec<Diagnostic>) {
         let mut stmts = Vec::new();
+        let mut errors = Vec::new();
 
         loop {
             self.skip_newlines();
@@ -79,7 +88,14 @@ impl<'a, 'src> Parser<'a, 'src> {
                 break;
             }
 
-            stmts.push(self.parse_statement()?);
+            match self.parse_statement() {
+                Ok(stmt) => stmts.push(stmt),
+                Err(error) => {
+                    errors.push(error);
+                    self.skip_to_next_statement();
+                    continue;
+                }
+            }
 
             match self.peek() {
                 Some(SpannedToken {
@@ -88,28 +104,43 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }) => self.pos += 1, // separator
                 None => {}
                 Some(other) => {
-                    return Err(Diagnostic::Parse {
+                    errors.push(Diagnostic::Parse {
                         message: format!(
                             "expected end of statement (newline), found {:?}",
                             other.token
                         ),
                         span: other.span,
                     });
+                    self.skip_to_next_statement();
                 }
             }
         }
-        Ok(stmts)
+        (stmts, errors)
     }
 
     pub fn strip_insignificant_newlines(
         tokens: Vec<SpannedToken>,
         source_len: usize,
     ) -> Result<Vec<SpannedToken>, Diagnostic> {
+        let (tokens, errors) = Self::strip_insignificant_newlines_with_errors(tokens, source_len);
+        match errors.into_iter().next() {
+            Some(error) => Err(error),
+            None => Ok(tokens),
+        }
+    }
+
+    pub fn strip_insignificant_newlines_with_errors(
+        tokens: Vec<SpannedToken>,
+        source_len: usize,
+    ) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
         let mut out = Vec::with_capacity(tokens.len());
+        let mut errors = Vec::new();
         let mut bracket_depth = 0usize;
         let mut prev_can_end = false;
 
-        for SpannedToken { token: tok, span } in tokens {
+        let mut index = 0usize;
+        while index < tokens.len() {
+            let SpannedToken { token: tok, span } = tokens[index].clone();
             match tok {
                 Token::Newline => {
                     if bracket_depth == 0 && prev_can_end {
@@ -127,10 +158,16 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 Token::RParen => {
                     if bracket_depth == 0 {
-                        return Err(Diagnostic::Parse {
+                        errors.push(Diagnostic::Parse {
                             message: "unbalanced closing parenthesis".to_string(),
                             span,
                         });
+                        if let Some(token) = skip_to_next_statement(&tokens, &mut index) {
+                            out.push(token.clone());
+                        }
+                        bracket_depth = 0;
+                        prev_can_end = false;
+                        continue;
                     }
                     bracket_depth -= 1;
                     prev_can_end = true;
@@ -141,16 +178,21 @@ impl<'a, 'src> Parser<'a, 'src> {
                     out.push(SpannedToken { token: tok, span });
                 }
             }
+            index += 1;
         }
 
         if bracket_depth != 0 {
-            return Err(Diagnostic::Parse {
+            errors.push(Diagnostic::Parse {
                 message: "unbalanced opening parenthesis".to_string(),
                 span: Span::new(source_len, source_len + 1),
             });
         }
 
-        Ok(out)
+        (out, errors)
+    }
+
+    fn skip_to_next_statement(&mut self) {
+        skip_to_next_statement(self.tokens, &mut self.pos);
     }
 
     /// Parses a single statement like: `infer speed = 4.5`
@@ -262,6 +304,19 @@ impl<'a, 'src> Parser<'a, 'src> {
         // We successfully built a piece of the AST!
         Ok(Stmt::VarDecl { ty, name, expr })
     }
+}
+
+fn skip_to_next_statement<'a>(
+    tokens: &[SpannedToken<'a>],
+    pos: &mut usize,
+) -> Option<SpannedToken<'a>> {
+    while let Some(token) = tokens.get(*pos) {
+        *pos += 1;
+        if matches!(token.token, Token::Newline) {
+            return Some(token.clone());
+        }
+    }
+    None
 }
 
 fn can_end_statement(t: &Token) -> bool {

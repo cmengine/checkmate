@@ -19,7 +19,7 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 `WHITEPAPER.md` at the repository root is the language specification.
 
 - **Read `WHITEPAPER.md` only through `mdpeek`.** This applies to every reading mechanism: shell tools, scripts, editors, search, source inspection tools, file listing with content output, and any tool or agent that can access file contents. Never use `cat`, `read`, `sed`, CodeGraph, or any other method to read it or any Markdown file.
-- Treat the whitepaper as a human-owned language source of truth. Run `mdpeek toc FILENAME.md` to get the ToC of the file with numbers attached to them, then run `mdpeek fetch FILENAME.md [comma-seperated numbers]` to get relative bodies. Try fetching only the parts you need.
+- Treat the whitepaper as a human-owned language source of truth. Run `mdpeek toc FILENAME.md` to get the ToC of the file with numbers attached to them, then run `mdpeek fetch FILENAME.md [comma-seperated numbers]` to get relative bodies. Try fetching only the parts you need. The only exception is `plan.md`; ALWAYS USE CAT TO READ ALL OF IT!
 - When a task requires clarification about Checkmate language design, syntax, semantics, precedence, intended compiler behavior, or any other specification detail, **ask the user and stop** until the user answers.
 - Do not infer language behavior from the whitepaper's file metadata, size, or any partial content exposure.
 

@@ -1,0 +1,268 @@
+// ============================================================================
+// boom.cm — adversarial stress fixture for Checkmate (CME) error recovery
+// ============================================================================
+//
+// The evil twin of test.cm. Where test.cm must produce ZERO diagnostics,
+// boom.cm is broken ON PURPOSE: every recoverable failure mode of the lexer,
+// the newline-strip pass and the parser appears here at least once.
+//
+// The contract under test (see crates/cme-compiler/src/parser.rs):
+//   1. The parser NEVER stops and NEVER panics — it always consumes the file.
+//   2. Every broken region becomes an `Invalid` node carrying its
+//      `SyntaxError`, and the same diagnostic lands in the errors vec.
+//   3. Statements that are recognizable survive even when their pieces are
+//      broken: `int i = str wow how` still yields VarDecl{Int, "i", Invalid},
+//      so a future LSP still sees that `i` is an Int.
+//   4. Source text that was never typed becomes a ZERO-WIDTH `Invalid`
+//      ("missing node") — exactly where an LSP completion would insert.
+//   5. Healthy sibling statements are untouched by their broken neighbors —
+//      including the line BELOW a broken one: the strip pass keeps the
+//      newline after a dangling operator/type when the next line starts a
+//      statement, so recovery cannot fuse two lines into one.
+//
+// Run it (the CLI exits 1 — that is the point; zero diagnostics is a bug):
+//   cargo run --features cli -- ast boom.cm
+//   cargo run --features cli -- lex boom.cm
+//
+// The Rust test `boom_cm_stress_fixture` (cme-compiler/src/lib.rs) pins the
+// exact outcomes documented below. File layout notes:
+//   - ALL comments and blank lines are transparent to the parser — except
+//     that a `"` inside a comment re-opens an unterminated string literal
+//     started in the CODE of the same line (see §9 for the documented case).
+//   - Section 16 is kept LAST on purpose: an unclosed `(` makes every
+//     following newline insignificant, so it would swallow the whole rest
+//     of the file (see §16 for why that is the honest current behavior).
+//   - One diagnostic per marked line unless noted otherwise.
+//
+// Sections:
+//   1.  Broken code as the very first statement
+//   2.  Flagship: broken initializers, surviving declarations
+//   3.  Missing pieces: zero-width Invalid (missing `=` / initializer)
+//   4.  Healthy siblings survive broken neighbors
+//   5.  Assignment / compound-assignment RHS failures
+//   6.  Garbage statement heads
+//   7.  Missing / invalid variable names
+//   8.  Bare identifiers without an operator
+//   9.  Lexer errors: bad chars, unterminated strings, `1.2.3`
+//   10. Unbalanced closing parenthesis (strip-pass recovery)
+//   11. Empty and broken (but balanced) parenthesized groups
+//   12. Operator-grammar violations (mixed &&/||, chained comparisons)
+//   13. Continuation lines and multi-line paren groups gone wrong
+//   14. Trailing garbage after a complete statement (same-line loss)
+//   15. The LSP simulation: half-broken program that still knows everything
+//   16. EOF: the unclosed parenthesis that swallows the world (kept last)
+// ============================================================================
+
+
+// ----------------------------------------------------------------------------
+// 1. Broken code as the very first statement — no healthy context needed
+//    before recovery kicks in. One diagnostic, then a healthy statement that
+//    references the survivor.
+// ----------------------------------------------------------------------------
+
+int first = }                    // VarDecl{Int, "first", Invalid "}"}
+infer second = first + 1         // healthy
+
+
+// ----------------------------------------------------------------------------
+// 2. Flagship — the motivating case. Every declared type survives with an
+//    Invalid initializer covering the skipped region; one diagnostic per
+//    line ("Expected an expression, but found <token>").
+// ----------------------------------------------------------------------------
+
+int i = str wow how              // VarDecl{Int, "i", Invalid "str wow how"}
+float f = }                      // VarDecl{Float, "f", Invalid "}"}
+str s = *                        // VarDecl{Str, "s", Invalid "*"}
+bool b = %                       // VarDecl{Bool, "b", Invalid "%"}
+infer v = +                      // VarDecl{Infer, "v", Invalid "+"}
+
+
+// ----------------------------------------------------------------------------
+// 3. Missing pieces — nothing was typed where an expression belongs, so the
+//    Invalid is ZERO-WIDTH at exactly the position an LSP would complete at.
+//    The strip pass keeps every newline here (the next line always starts
+//    with a type keyword), so no line fuses with its neighbor.
+// ----------------------------------------------------------------------------
+
+int count =                      // VarDecl{Int, "count", Invalid zero-width}
+int k                            // VarDecl{Int, "k", Invalid zero-width} ("Expected '='")
+int k2 5                         // Stmt::Invalid ("Expected '=', but found IntLit(5)")
+infer draft =                    // VarDecl{Infer, "draft", Invalid zero-width}
+
+
+// ----------------------------------------------------------------------------
+// 4. Healthy siblings survive — broken neighbors change nothing around them,
+//    even three failures in a row.
+// ----------------------------------------------------------------------------
+
+int left = 1                     // healthy
+int middle = str boom boom       // VarDecl{Int, "middle", Invalid "str boom boom"}
+int right = 2                    // healthy
+int brokenA = str a              // broken
+int brokenB = str b              // broken
+int brokenC = str c              // broken
+int after = 3                    // healthy
+
+
+// ----------------------------------------------------------------------------
+// 5. Assignment and compound assignment with broken RHS — the target survives
+//    in every form. `score *=` proves the newline after a dangling operator
+//    survives when the next line starts a declaration; `score /= )` stacks
+//    TWO recovery layers: the strip pass reports the unbalanced `)` AND the
+//    parser plants a zero-width Invalid.
+// ----------------------------------------------------------------------------
+
+int score = 10                   // healthy
+score = str nope                 // Assign{"score", Invalid "str nope"}
+score += }                       // CompoundAssign{+, Invalid "}"}
+score -= str y z                 // CompoundAssign{-, Invalid "str y z"}
+score *=                         // CompoundAssign{*, Invalid zero-width}
+int fence = 20                   // healthy — the newline after `*=` was NOT eaten
+score /= )                       // CompoundAssign{/, Invalid zero-width} + 1 strip diagnostic
+score %= 2                       // healthy
+
+
+// ----------------------------------------------------------------------------
+// 6. Garbage statement heads — nothing recognizable at the head, so the whole
+//    line becomes one Stmt::Invalid ("Expected a type or assignment target").
+//    `) straggler` is dropped by the STRIP pass before the parser ever sees
+//    it: one diagnostic, zero statements.
+// ----------------------------------------------------------------------------
+
+}                                // Stmt::Invalid (RBrace)
+* 5                              // Stmt::Invalid (Star)
+true                             // Stmt::Invalid (KwTrue — keywords are not statements)
+42                               // Stmt::Invalid (IntLit(42))
++ + +                            // Stmt::Invalid (Plus)
+) straggler                      // NO statement — strip-level drop, 1 diagnostic
+
+
+// ----------------------------------------------------------------------------
+// 7. Missing / invalid variable names — the declaration head cannot even be
+//    recognized, so the statement becomes Stmt::Invalid (the name itself was
+//    never learned, which is the honest outcome). The bare `float` keeps its
+//    newline (a dangling type keyword can never continue a line).
+// ----------------------------------------------------------------------------
+
+int = 5                          // Stmt::Invalid ("Expected a variable name, but found Assign")
+int return = 1                   // Stmt::Invalid (KwReturn is a keyword, not a name)
+int 5 = 1                        // Stmt::Invalid (IntLit(5))
+float                            // Stmt::Invalid ("Expected a variable name, but found Newline")
+
+
+// ----------------------------------------------------------------------------
+// 8. Bare identifiers — an identifier alone cannot form a statement without
+//    an assignment operator.
+// ----------------------------------------------------------------------------
+
+lonely                           // Stmt::Invalid ("Expected assignment operator, but found Newline")
+x y                              // Stmt::Invalid ("...but found Ident(\"y\")")
+
+
+// ----------------------------------------------------------------------------
+// 9. Lexer errors — the lexer records the bad region and skips to the next
+//    newline, so the damaged line degrades but the FILE continues.
+//    NOTE on `str oops`: the comment below deliberately avoids `"` characters
+//    — a quote inside a comment after an unterminated string in the code
+//    re-opens the literal (the string regex wins over the comment skip), a
+//    documented lexer sharp edge.
+// ----------------------------------------------------------------------------
+
+int cursed = 1 @ 2               // 1 lex diagnostic; the 2 is dropped; VarDecl{Int, cursed, 1} survives
+@                                // 1 lex diagnostic; no statement at all
+@ $                              // STILL 1 lex diagnostic — everything after the first bad char on the line is swallowed
+str oops = "unterminated         // 1 lex + 1 parse; VarDecl{Str, oops, Invalid zero-width}
+infer fragile = 1.2.3            // 1 lex diagnostic; VarDecl{Infer, fragile, FloatLit(1.2)} survives
+infer afterAt = @ 5              // 1 lex + 1 parse; VarDecl{Infer, afterAt, Invalid zero-width}
+                                 // (the zero-width diagnostic reports at the next surviving newline,
+                                 //  because blank/comment lines collapse into one newline token)
+int huge = 99999999999999999999999
+                                 // 1 lex + 1 parse; a 23-digit literal overflows i64 — the digit
+                                 // run itself is the invalid token (no panic!), the declaration
+                                 // survives as VarDecl{Int, huge, Invalid zero-width}
+
+
+// ----------------------------------------------------------------------------
+// 10. Unbalanced CLOSING parenthesis — the strip pass reports it and skips to
+//     the next newline; whatever preceded it on the line still parses.
+// ----------------------------------------------------------------------------
+
+infer q = 1 + 2)                 // 1 strip diagnostic; VarDecl{Infer, q, 1 + 2} survives
+int q2 = (3 * 4)) extra dropped  // 1 strip diagnostic; VarDecl{Int, q2, (3 * 4)} survives
+
+
+// ----------------------------------------------------------------------------
+// 11. Empty and broken (but BALANCED) parenthesized groups — recovery happens
+//     inside the statement, which survives whole.
+// ----------------------------------------------------------------------------
+
+infer empty = ()                 // VarDecl{Infer, empty, Invalid "()"}
+infer mixed = (str boom)         // VarDecl{Infer, mixed, Invalid "(str boom)"}
+
+
+// ----------------------------------------------------------------------------
+// 12. Operator-grammar violations — the violation is diagnosed mid-expression
+//     and the whole RHS becomes Invalid. Known limitation: the mixed &&/||
+//     diagnostic's span is the expr_span (0,0) stub until spans land on all
+//     AST nodes (renders at 1:1); the chained-comparison span correctly
+//     points at the second operator.
+// ----------------------------------------------------------------------------
+
+infer mixedBad = alive && ready || armed   // Invalid covers the whole RHS ("mixed && and || require parentheses")
+infer chained = 1 < 2 < 3                  // Invalid covers "1 < 2 < 3" ("comparisons are non-associative")
+
+
+// ----------------------------------------------------------------------------
+// 13. Continuations and multi-line paren groups gone wrong. `int cont = 1 +`
+//     ends dangling before a NEW DECLARATION — the newline survives, so cont
+//     gets its own Invalid and boom2 keeps existing with a missing `=`.
+// ----------------------------------------------------------------------------
+
+int cont = 1 +
+str boom2                        // VarDecl{Int, cont, Invalid "1 +"} + VarDecl{Str, boom2, Invalid zero-width}
+
+infer multi = (
+    1 +
+    str boom3
+)                                // VarDecl{Infer, multi, Invalid spanning the whole group}
+
+int afterMulti = 4               // healthy
+
+
+// ----------------------------------------------------------------------------
+// 14. Trailing garbage after a COMPLETE statement — the statement survives
+//     with a diagnostic; same-line recovery is line-granular, so `int late`
+//     sharing the damaged line is dropped (documented limitation), while the
+//     next line is untouched.
+// ----------------------------------------------------------------------------
+
+int ok = 1 }                     // VarDecl{Int, ok, 1} survives + 1 diagnostic
+int ok2 = 2 } int late = 3       // 1 diagnostic; int late = 3 is dropped with the damaged line
+int survivor = 5                 // healthy
+
+
+// ----------------------------------------------------------------------------
+// 15. The LSP simulation — a symbol-table pass walking this tree still sees
+//     hp: Int, mp: Int, total, name, flag, brokenFlag: Bool. Completions keep
+//     working on the broken lines because the declarations survived.
+// ----------------------------------------------------------------------------
+
+int hp = 100                     // healthy
+int mp = str not even close      // VarDecl{Int, mp, Invalid "str not even close"}
+infer total = hp + 1             // healthy — references the survivor above
+str name = "player"              // healthy
+bool flag = mp == 1              // healthy syntactically
+bool brokenFlag = str no && true // VarDecl{Bool, brokenFlag, Invalid "str no && true"}
+
+
+// ----------------------------------------------------------------------------
+// 16. EOF — the unclosed parenthesis. KEPT LAST: an unclosed `(` makes every
+//     following newline insignificant (they are stripped as inside parens),
+//     so everything after this line would be swallowed into one statement.
+//     Placed at the end, the damage is contained: two diagnostics (strip +
+//     parse, both pointing at EOF) and a surviving declaration whose Invalid
+//     covers the whole "(1 + 2" region. No trailing newline: this is the
+//     exact byte stream an LSP sees while the user is still typing.
+// ----------------------------------------------------------------------------
+
+infer unterminated = (1 + 2

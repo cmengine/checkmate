@@ -86,8 +86,11 @@ pub enum Token<'a> {
     KwFalse,
 
     // Integer Literals
-    // This regex matches digits, and the closure parses it into an i64.
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
+    // This regex matches digits, and the closure parses it into an i64. A
+    // digit run too large for i64 fails the callback, which turns the token
+    // into a lexing error instead of panicking — recovery then skips the
+    // literal like any other invalid region.
+    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().map_err(|_| ()))]
     IntLit(i64),
 
     // Float Literals
@@ -338,6 +341,46 @@ mod tests {
     fn rejects_unrecognized_characters() {
         assert!(lex("$").is_err());
         assert!(lex("1.2.3").is_err());
+    }
+
+    #[test]
+    fn digit_run_overflowing_i64_is_an_error_not_a_panic() {
+        // 23 digits cannot fit an i64; the callback must fail the token
+        // (recovery skips it) instead of panicking on unwrap.
+        let source = "int huge = 99999999999999999999999\nint ok = 1\n";
+        let (tokens, errors) = crate::lexer::lex_with_errors(source);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0],
+            crate::lexer::LexError::Invalid {
+                span: cme_core::Span::new(11, 34), // the 23-digit run
+            }
+        );
+        let kinds: Vec<_> = tokens
+            .iter()
+            .map(|spanned| spanned.token.clone())
+            .collect();
+        assert!(matches!(
+            kinds.as_slice(),
+            [
+                Token::KwInt,
+                Token::Ident("huge"),
+                Token::Assign,
+                Token::Newline,
+                Token::KwInt,
+                Token::Ident("ok"),
+                Token::Assign,
+                Token::IntLit(1),
+                Token::Newline,
+            ]
+        ));
+
+        // The i64 boundary itself must keep lexing.
+        let source = "9223372036854775807";
+        let (tokens, errors) = crate::lexer::lex_with_errors(source);
+        assert!(errors.is_empty());
+        assert_eq!(tokens[0].token, Token::IntLit(i64::MAX));
     }
 
     #[test]

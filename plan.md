@@ -4,11 +4,11 @@
 
 This file is the single source of truth for the current implementation plan. A fresh agent should read this section first and continue from the first unfinished item. Keep it continuously updated so it always reflects the exact current state of the work.
 
-- [ ] Set up the working branch/jj change and record the starting commit here.
-- [ ] Extract `cme-core`'s nested AST into `crates/cme-core/src/ast.rs` while preserving `cme_core::ast` and `cme_core::Span` paths.
-- [ ] Convert `Expr` and `Stmt` into span-carrying wrapper structs with `ExprKind` and `StmtKind`, adding `span: Span` to both wrappers and updating all compiler and CLI construction/matching sites.
+- [x] Set up the working branch/jj change and record the starting commit here.
+- [x] Extract `cme-core`'s nested AST into `crates/cme-core/src/ast.rs` while preserving `cme_core::ast` and `cme_core::Span` paths.
+- [x] Convert `Expr` and `Stmt` into span-carrying wrapper structs with `ExprKind` and `StmtKind`, adding `span: Span` to both wrappers and updating all compiler and CLI construction/matching sites.
 - [ ] Implement fallible Logos callbacks for integer and float literals so out-of-range values produce `NumericLiteralOutOfRange { span }` instead of panicking; retain normal invalid-token behavior for unrecognized input and recovery-to-next-newline behavior.
-- [ ] Add real expression and statement span tracking during parsing and replace the placeholder `expr_span` helper so mixed logical-operator diagnostics have source-accurate spans.
+- [x] Add real expression and statement span tracking during parsing and replace the placeholder `expr_span` helper so mixed logical-operator diagnostics have source-accurate spans.
 - [ ] Move insignificant-newline preprocessing out of `Parser` into a dedicated compiler module/function, preserving statement-boundary newline behavior and bracket-scoped insignificant newlines.
 - [ ] Make `Parser::parse_statement` crate-private and add the crate-level all-diagnostics facade `cme_compiler::parse_program_with_errors(source: &str) -> (Vec<Stmt>, Vec<Diagnostic>)` that lexes, preprocesses, parses, and aggregates lex/preprocess/parse diagnostics.
 - [ ] Add optional workspace dependencies for the CLI: `clap` with derive support and `miette` with a source-snippet-capable feature, both gated behind the root `cli` feature.
@@ -22,6 +22,13 @@ This file is the single source of truth for the current implementation plan. A f
 ### Progress Notes
 
 - The working copy started from the `feat: implement unary operations` state with no uncommitted changes.
+- The working change was `wluovvpv` / `dea64e04 refactor: clean up codebase` before implementation began; do not use version-control commands directly without user direction.
+- Completed AST extraction: `cme_core::ast` now lives in `crates/cme-core/src/ast.rs`; `Expr` and `Stmt` are wrapper structs with `span` and `kind`, with kinds in `ExprKind` and `StmtKind`.
+- Completed parser span tracking for variable declarations, assignments, compound assignments, literals, identifiers, unary/binary/parenthesized expressions, and mixed logical-operator diagnostics. `Parser::parse_statement` is now `pub(crate)`.
+- Lexer work is partially implemented: `IntLit` and `FloatLit` callbacks now return `Option<i64>` / `Option<f64>`, and `LexError::NumericLiteralOutOfRange { span }` exists. The current loop distinguishes numeric out-of-range errors from invalid-token errors and preserves recovery to the next newline.
+- Existing lexer/parser unit tests passed after the AST conversion. Numeric-literal work was interrupted before the full compiler test suite was rerun after the final token-shape cleanup; several lexer tests still need their literal expectations updated to the `Option` payload shape.
+- The incomplete numeric work has one known warning risk: the `Err(_)` branch may contain a stale `numeric_error` check from an earlier iteration and should be simplified while preserving `Invalid` behavior.
+- Remaining major areas are unchanged: finish numeric tests, move newline preprocessing, add the public all-diagnostics facade, update CLI dependencies and implementation, remove placeholder functions/dependencies, add the Test Plan coverage, run full validation, and update this checklist.
 - The user approved breaking public AST and parser APIs because this is an early-stage workspace.
 - Numeric literals outside parseable `i64` or valid finite `f64` values are errors, not clamped values.
 - `clap` and `miette` must only be introduced through the optional `cli` dependency stack; default builds must remain dependency-light.

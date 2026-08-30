@@ -2,3 +2,4 @@ int i = 10
 infer x = "OMG WOW!"
 str how = "Whow!"
 float bow = 6.9
+bool wth = true

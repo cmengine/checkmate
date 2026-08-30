@@ -20,6 +20,10 @@ pub enum Token<'a> {
     KwStr,
     #[token("bool")]
     KwBool,
+    #[token("true")]
+    KwTrue,
+    #[token("false")]
+    KwFalse,
 
     // String Literals
     #[regex(r#""[^"\r\n]*""#)]
@@ -67,7 +71,7 @@ mod tests {
 
     #[test]
     fn lexes_keywords() {
-        let source = "int float infer return str bool";
+        let source = "int float infer return str bool true false";
         assert_eq!(
             lex_ok(source),
             vec![
@@ -77,6 +81,22 @@ mod tests {
                 Token::KwReturn,
                 Token::KwStr,
                 Token::KwBool,
+                Token::KwTrue,
+                Token::KwFalse,
+            ]
+        );
+    }
+
+    #[test]
+    fn keywords_take_precedence_over_boolean_identifiers() {
+        let source = "true_x false_x trueish falseish";
+        assert_eq!(
+            lex_ok(source),
+            vec![
+                Token::Ident("true_x"),
+                Token::Ident("false_x"),
+                Token::Ident("trueish"),
+                Token::Ident("falseish"),
             ]
         );
     }

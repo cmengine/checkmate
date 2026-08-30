@@ -106,6 +106,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::KwFloat => Type::Float,
             Token::KwStr => Type::Str,
             Token::KwInfer => Type::Infer,
+            Token::KwBool => Type::Bool,
             _ => {
                 return Err(format!(
                     "Expected a type (int, float, infer), but found {:?}",
@@ -133,6 +134,8 @@ impl<'a, 'src> Parser<'a, 'src> {
             Some(Token::IntLit(val)) => Expr::IntLit(*val),
             Some(Token::FloatLit(val)) => Expr::FloatLit(*val),
             Some(Token::StrLit(value)) => Expr::StrLit(value[1..value.len() - 1].to_string()),
+            Some(Token::KwTrue) => Expr::BoolLit(true),
+            Some(Token::KwFalse) => Expr::BoolLit(false),
             Some(Token::Ident(name)) => Expr::Ident(name.to_string()),
             Some(other) => return Err(format!("Expected an expression, but found {:?}", other)),
             None => return Err("Expected an expression, but reached end of file".to_string()),
@@ -150,12 +153,14 @@ fn can_end_statement(t: &Token) -> bool {
             | Token::IntLit(_)
             | Token::FloatLit(_)
             | Token::StrLit(_)
+            | Token::KwTrue
+            | Token::KwFalse
             | Token::KwInt
             | Token::KwFloat
             | Token::KwStr
             | Token::KwBool
             | Token::RParen
             | Token::RBrace
-            | Token::KwReturn // later: bool literals, `]`, ...
+            | Token::KwReturn // later: `]`, ...
     )
 }

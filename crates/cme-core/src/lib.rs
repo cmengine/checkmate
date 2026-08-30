@@ -3,6 +3,8 @@ pub mod ast {
     pub enum Type {
         Int,
         Float,
+        Bool,
+        Str,
         Infer,
     }
 
@@ -10,6 +12,8 @@ pub mod ast {
     pub enum Expr {
         IntLit(i64),
         FloatLit(f64),
+        StrLit(String),
+        BoolLit(bool),
         Ident(String),
     }
 

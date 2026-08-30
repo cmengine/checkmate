@@ -1,33 +1,33 @@
 pub mod lexer;
+pub mod parser;
 
 #[cfg(test)]
 mod tests {
     use super::lexer::Token;
+    use super::parser::Parser;
+    use cme_core::ast::{Expr, Stmt, Type};
     use logos::Logos;
 
     #[test]
-    fn test_basic_lexing() {
-        let source = r#"
-            // This is a checkmate script
-            int score = 10
-            infer name = 42
-        "#;
+    fn test_parse_var_decl() {
+        let source = "infer speed = 4.5";
 
-        // Logos creates an iterator over the tokens
-        let mut lexer = Token::lexer(source);
+        // 1. Lexing
+        let lexer = Token::lexer(source);
+        let tokens: Vec<Token> = lexer.map(|res| res.unwrap()).collect();
 
-        // Assert the tokens are exactly what we expect
-        assert_eq!(lexer.next(), Some(Ok(Token::KwInt)));
-        assert_eq!(lexer.next(), Some(Ok(Token::Ident("score"))));
-        assert_eq!(lexer.next(), Some(Ok(Token::Assign)));
-        assert_eq!(lexer.next(), Some(Ok(Token::IntLit(10))));
+        // 2. Parsing
+        let mut parser = Parser::new(&tokens);
+        let ast = parser.parse_statement().expect("Failed to parse statement");
 
-        assert_eq!(lexer.next(), Some(Ok(Token::KwInfer)));
-        assert_eq!(lexer.next(), Some(Ok(Token::Ident("name"))));
-        assert_eq!(lexer.next(), Some(Ok(Token::Assign)));
-        assert_eq!(lexer.next(), Some(Ok(Token::IntLit(42))));
-
-        // We should be at the end of the file
-        assert_eq!(lexer.next(), None);
+        // 3. Validation
+        assert_eq!(
+            ast,
+            Stmt::VarDecl {
+                ty: Type::Infer,
+                name: "speed".to_string(),
+                expr: Expr::FloatLit(4.5),
+            }
+        );
     }
 }

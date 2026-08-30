@@ -9,4 +9,5 @@ repository.workspace = true
 publish = true
 
 [dependencies]
+cme-core = { path = "../cme-core" }
 logos = "0.15.1"

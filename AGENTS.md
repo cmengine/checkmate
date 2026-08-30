@@ -30,6 +30,18 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 - Preserve the feature-gated structure of the root facade. Adding functionality to a workspace crate should not require enabling that crate by default in the root package.
 - Lexer and parser changes must respect `cme-core` AST ownership: language data models belong in `cme-core`, while recognition/parsing remains in `cme-compiler`.
 - Update lexer, parser, and AST pieces together when language-facing changes require it, and add focused unit tests in the relevant crate.
+- Use `plan.md` at the repository root as the canonical, continuously updated plan for multi-step implementation work.
+  - Before beginning or continuing such work, read `plan.md` and resume from its first unfinished checklist item.
+  - Keep the progress checklist and progress notes current after every completed, changed, or materially constrained task, with enough detail that a fresh agent can continue without prior conversation context.
+  - Do not restate obsolete progress as current work; update or replace stale entries rather than accumulating contradictory history.
+
+## Code Review Process
+
+- Perform code review in report-first mode: inspect the affected source and produce findings before changing code.
+- For each finding, present remediation options with a recommended option first and an explicit discard option last; do not implement remediation until the user chooses.
+- Keep review findings tied to concrete source locations and distinguish correctness issues from style-level changes.
+- After review decisions are approved, create or update `plan.md` with the accepted work, then implement against that plan.
+- Run `cargo fmt --check` (or `cargo fmt` when preparing changes), `cargo test --workspace`, and `cargo clippy --workspace --all-targets` as part of validation. Use the complete facade with `--features cli` when CLI-facing behavior changes.
 
 ## Commands
 

@@ -1,0 +1,185 @@
+// ============================================================================
+// test2.cm - error-handling gauntlet for the Checkmate front-end
+// ============================================================================
+//
+// Unlike test.cm (which must parse with ZERO diagnostics), this file is
+// deliberately full of broken code. The goal is to observe:
+//   1. that every error is REPORTED (never swallowed),
+//   2. that recovery continues (valid code after bad code still parses),
+//   3. where diagnostics point, and whether the messages actually help.
+//
+// Run:
+//   cme lex test2.cm   -> token dump + 7 lex diagnostics, exit 1
+//   cme ast test2.cm   -> 20 surviving statements, then 28 diagnostics, exit 1
+//
+// Markers used below:
+//   [EATEN]      the statement is destroyed by recovery (no AST entry)
+//   [EATEN x2]   the statement AND the following line are destroyed
+//   [SURVIVES]   the statement (or a truncated prefix) appears in the AST
+// ============================================================================
+
+
+// ----------------------------------------------------------------------------
+// 0. Clean baseline - must all parse, no diagnostics
+// ----------------------------------------------------------------------------
+
+int low = 5
+int high = 9
+int top = 30
+int base = 10
+bool alive = true
+bool ready = false
+bool armed = true
+infer cleanInfer = low + high
+infer cleanLogic = alive && (ready || armed)
+infer cleanCmp = (low < high) == alive
+
+
+// ----------------------------------------------------------------------------
+// 1. Lexer-level failures - invalid characters and malformed literals
+//
+// Lexer recovery is LINE-GRANULAR and LOSSY: at an unlexable character,
+// everything from that character to the end of the line is discarded.
+//
+// 1a) [EATEN]     bad char first -> the whole declaration vanishes.
+//                 One lex error, no parse error, no AST entry.
+// 1b) [SURVIVES]  prefix `int truncated = 1` is a complete statement, so the
+//                 AST contains `truncated = 1` and the `@ 2` tail is silently
+//                 gone. One lex error. The AST statement is SHORTER than the
+//                 source line - check for this in the output.
+// 1c) [SURVIVES]  `1.2` lexes, the second `.` is invalid, `.3` is discarded.
+//                 AST contains `badFloat = 1.2`. One lex error.
+// 1d) [EATEN x2]  the unterminated string is eaten, leaving a line that ends
+//                 in `=` - which (per the continuation rule) FUSES with the
+//                 next line. The parse error fires on collatC's first token
+//                 and collatC is destroyed with it. 1 lex + 1 parse error.
+// 1e) [SURVIVES]  no hex literals exist: `0x10` lexes as `0` then identifier
+//                 `x10`. Parses as `hexAttempt = 0`, plus a trailing-garbage
+//                 parse error naming Ident("x10").
+// 1f) [SURVIVES]  `007` is silently accepted as the integer 7. NO diagnostic
+//                 at all - the opposite failure mode: too permissive.
+// ----------------------------------------------------------------------------
+
+@ int vanished = 1
+int truncated = 1 @ 2
+infer badFloat = 1.2.3
+infer unterminated = "no closing quote
+int collatC = 3
+infer hexAttempt = 0x10
+infer octalish = 007
+
+
+// ----------------------------------------------------------------------------
+// 2. Structural failures - valid tokens, invalid statement shapes
+//
+// 2a) [EATEN]      "Expected a variable name, but found Assign"
+// 2b) [EATEN x2]   "Expected '=', but found Newline" - the newline was
+//                  already consumed, so recovery eats the ENTIRE next line
+//                  (collatA) with NO diagnostic for it. Silent data loss.
+// 2c) [EATEN x2]   line ends in `=`, so it fuses with collatB; the error
+//                  ("Expected an expression, but found KwInt") points at
+//                  collatB's `int`, and collatB dies too.
+// 2d) [EATEN]      keyword as name: "Expected a variable name, but found KwInt"
+// 2e) [EATEN]      split operator: "Expected assignment operator, but found
+//                  Plus" - NOTE: caret points at `splitOp` (the target),
+//                  NOT at the offending `+`.
+// 2f) [EATEN]      "Expected an expression, but found RParen"
+// 2g) [SURVIVES]   `survives = 1` parses, then:
+//                  "expected end of statement (newline), found RBrace"
+// 2h) [EATEN]      `return` is lexed but not yet a statement:
+//                  "Expected a type or assignment target, but found KwReturn"
+// ----------------------------------------------------------------------------
+
+int = 5
+int missingEq
+int collatA = 1
+int missingInit =
+int collatB = 2
+int int = 1
+splitOp + = 1
+infer emptyParens = ()
+int survives = 1 }
+return 5
+
+
+// ----------------------------------------------------------------------------
+// 3. Operator-rule failures (whitepaper Appendix A)
+//
+// 3a) [EATEN]  "mixed && and || require parentheses"
+//              KNOWN ROUGH EDGE: the span is a stub (0,0), so the CLI renders
+//              this at test2.cm:1:1 - pointing at the header comment, NOT at
+//              this line. Message right, location lying.
+// 3b) [EATEN]  same stub-span problem, other mixing direction.
+// 3c) [EATEN]  "comparisons are non-associative; add parentheses" - this one
+//              HAS a correct span: it points at the second `<`.
+// 3d) [EATEN]  leading binary operator: `leadingOp = base` parses, then
+//              "expected end of statement (newline), found Plus" and the
+//              whole `+ bonus` continuation line is discarded.
+// ----------------------------------------------------------------------------
+
+infer mixedAndOr = alive && ready || armed
+infer mixedOrAnd = alive || ready && armed
+infer chainedCmp = low < high < top
+int leadingOp = base
+    + bonus
+
+
+// ----------------------------------------------------------------------------
+// 4. Recovery inside parentheses (newlines insignificant inside brackets)
+//
+// 4a) [SURVIVES]  the bad char sits alone on a continuation line; the lexer's
+//                 line-based recovery turns that line into a bare newline,
+//                 which is insignificant inside brackets - so the expression
+//                 reassembles perfectly: `rescued = 1 + 2`. One lex error.
+// 4b) [EATEN x2]  here the bad char eats the rest of its line INCLUDING `2)`,
+//                 so the `+` loses its right-hand side: one lex error plus
+//                 "Expected an expression, but found RParen".
+// 4c) [SURVIVES]  the second `)` is unbalanced; recovery keeps everything
+//                 before it, so `extraParen = (low)` survives, plus
+//                 "unbalanced closing parenthesis" at the second `)`.
+// ----------------------------------------------------------------------------
+
+infer rescued = (1 +
+@
+2)
+infer rhsMissing = (1 +
+@ 2)
+infer extraParen = (low) )
+
+
+// ----------------------------------------------------------------------------
+// 5. Resilience - four broken lines in a row must not stop the parser.
+//    `good1` and `good2` must BOTH appear in the AST.
+//
+// 5b) [EATEN]     one lex error
+// 5c) [EATEN]     "Expected a variable name, but found Assign"
+// 5d) [EATEN x2]  "Expected '=', but found Newline" - collatD is silently
+//                 swallowed (same collateral pattern as 2b).
+// 5e) [SURVIVES]  `fiveFive = 5` parses, then:
+//                 "expected end of statement (newline), found IntLit(5)"
+// ----------------------------------------------------------------------------
+
+infer good1 = 7
+@ garbage line
+infer = 3
+int noEqHere
+int collatD = 4
+infer fiveFive = 5 5
+infer good2 = good1 + 1
+
+
+// ----------------------------------------------------------------------------
+// 6. CASCADE WARNING - intentionally the LAST section.
+//
+//    The unclosed `(` makes every following newline insignificant, so the
+//    newline-stripper glues the rest of the file into one giant expression
+//    attempt. Expect exactly two diagnostics and ZERO surviving statements:
+//      - "unbalanced opening parenthesis" (at the end-of-file span)
+//      - "Expected ')', but found KwInt" (pointing at the next line's `int`)
+//    `cascade` and `neverReached` are both lost. One unclosed bracket
+//    nukes everything after it - the largest graceful-degradation gap in
+//    the current front-end.
+// ----------------------------------------------------------------------------
+
+infer cascade = (1 + 2
+int neverReached = 99

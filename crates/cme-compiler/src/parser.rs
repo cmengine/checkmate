@@ -104,6 +104,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let ty = match token {
             Token::KwInt => Type::Int,
             Token::KwFloat => Type::Float,
+            Token::KwStr => Type::Str,
             Token::KwInfer => Type::Infer,
             _ => {
                 return Err(format!(
@@ -131,6 +132,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let expr = match self.advance() {
             Some(Token::IntLit(val)) => Expr::IntLit(*val),
             Some(Token::FloatLit(val)) => Expr::FloatLit(*val),
+            Some(Token::StrLit(value)) => Expr::StrLit(value[1..value.len() - 1].to_string()),
             Some(Token::Ident(name)) => Expr::Ident(name.to_string()),
             Some(other) => return Err(format!("Expected an expression, but found {:?}", other)),
             None => return Err("Expected an expression, but reached end of file".to_string()),
@@ -147,12 +149,13 @@ fn can_end_statement(t: &Token) -> bool {
         Token::Ident(_)
             | Token::IntLit(_)
             | Token::FloatLit(_)
+            | Token::StrLit(_)
             | Token::KwInt
             | Token::KwFloat
             | Token::KwStr
             | Token::KwBool
             | Token::RParen
             | Token::RBrace
-            | Token::KwReturn // later: string/bool literals, `]`, ...
+            | Token::KwReturn // later: bool literals, `]`, ...
     )
 }

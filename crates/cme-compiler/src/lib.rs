@@ -7,7 +7,7 @@ mod tests {
     use super::lexer::{SpannedToken, Token, lex};
     use super::parser::Parser;
     use crate::parser::Diagnostic;
-    use cme_core::ast::{Expr, Stmt, Type};
+    use cme_core::ast::{BinaryOp, CompoundOp, Expr, Stmt, Type, UnaryOp};
 
     fn spanned_tokens(source: &str) -> Vec<SpannedToken<'_>> {
         lex(source).unwrap_or_else(|error| panic!("{source:?} should lex: {error:?}"))
@@ -19,6 +19,29 @@ mod tests {
         parser
             .parse_statement()
             .unwrap_or_else(|error| panic!("{source:?} should parse: {error:?}"))
+    }
+
+    fn bin(op: cme_core::ast::BinaryOp, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    }
+
+    fn unary(op: cme_core::ast::UnaryOp, expr: Expr) -> Expr {
+        Expr::Unary {
+            op,
+            expr: Box::new(expr),
+        }
+    }
+
+    fn compound(target: &str, op: cme_core::ast::CompoundOp, expr: Expr) -> Stmt {
+        Stmt::CompoundAssign {
+            target: target.to_string(),
+            op,
+            expr,
+        }
     }
 
     fn parse_program(source: &str) -> Result<Vec<Stmt>, Diagnostic> {
@@ -50,6 +73,19 @@ mod tests {
             ty,
             name: name.to_string(),
             expr,
+        }
+    }
+
+    trait DeclarationExpr {
+        fn declaration_expr(self) -> Expr;
+    }
+
+    impl DeclarationExpr for Stmt {
+        fn declaration_expr(self) -> Expr {
+            match self {
+                Stmt::VarDecl { expr, .. } => expr,
+                _ => panic!("expected a variable declaration"),
+            }
         }
     }
 
@@ -113,6 +149,85 @@ mod tests {
                 var_decl(Type::Infer, "b", Expr::Ident("a".to_string())),
             ]
         );
+    }
+
+    #[test]
+    fn parses_precedence_and_associativity() {
+        assert_eq!(
+            parse_statement_ok("infer value = 1 + 2 * 3").declaration_expr(),
+            bin(
+                BinaryOp::Add,
+                Expr::IntLit(1),
+                bin(BinaryOp::Mul, Expr::IntLit(2), Expr::IntLit(3))
+            )
+        );
+        assert_eq!(
+            parse_statement_ok("infer value = 10 - 4 - 3").declaration_expr(),
+            bin(
+                BinaryOp::Sub,
+                bin(BinaryOp::Sub, Expr::IntLit(10), Expr::IntLit(4)),
+                Expr::IntLit(3)
+            )
+        );
+        assert_eq!(
+            parse_statement_ok("infer value = -x * y").declaration_expr(),
+            bin(
+                BinaryOp::Mul,
+                unary(UnaryOp::Neg, Expr::Ident("x".into())),
+                Expr::Ident("y".into())
+            )
+        );
+        assert_eq!(
+            parse_statement_ok("infer value = !!flag").declaration_expr(),
+            unary(
+                UnaryOp::Not,
+                unary(UnaryOp::Not, Expr::Ident("flag".into()))
+            )
+        );
+        assert_eq!(
+            parse_statement_ok("infer value = --x").declaration_expr(),
+            unary(UnaryOp::Neg, unary(UnaryOp::Neg, Expr::Ident("x".into())))
+        );
+    }
+
+    #[test]
+    fn parses_assignment_and_compound_assignment() {
+        assert_eq!(
+            parse_statement_ok("x = 1"),
+            Stmt::Assign {
+                name: "x".into(),
+                expr: Expr::IntLit(1)
+            }
+        );
+        assert_eq!(
+            parse_statement_ok("x += 1"),
+            compound("x", CompoundOp::Add, Expr::IntLit(1))
+        );
+        assert_eq!(
+            parse_statement_ok("x -= 1"),
+            compound("x", CompoundOp::Sub, Expr::IntLit(1))
+        );
+        assert_eq!(
+            parse_statement_ok("x *= 1"),
+            compound("x", CompoundOp::Mul, Expr::IntLit(1))
+        );
+        assert_eq!(
+            parse_statement_ok("x /= 1"),
+            compound("x", CompoundOp::Div, Expr::IntLit(1))
+        );
+        assert_eq!(
+            parse_statement_ok("x %= 1"),
+            compound("x", CompoundOp::Rem, Expr::IntLit(1))
+        );
+    }
+
+    #[test]
+    fn enforces_logical_parenthesization() {
+        assert!(parse_program("infer x = a && b && c").is_ok());
+        assert!(parse_program("infer x = a || b || c").is_ok());
+        assert!(parse_program("infer x = a || (b && c)").is_ok());
+        assert!(parse_program("infer x = (a || b) && c").is_ok());
+        assert!(parse_program("infer x = a || b && c").is_err());
     }
 
     #[test]
@@ -201,12 +316,16 @@ mod tests {
 
     #[test]
     fn rejects_unknown_statement_start() {
-        let source = "value";
+        let source = "}";
         let tokens = spanned_tokens(source);
         let mut parser = Parser::new(&tokens, source.len());
 
         let error = parser.parse_statement().unwrap_err();
-        assert!(error.to_string().contains("Expected a type"));
+        assert!(
+            error
+                .to_string()
+                .contains("Expected a type or assignment target")
+        );
     }
 
     #[test]
@@ -215,6 +334,23 @@ mod tests {
         assert_eq!(ast, var_decl(Type::Bool, "flag", Expr::BoolLit(true)));
         let ast = parse_statement_ok("infer flag = false");
         assert_eq!(ast, var_decl(Type::Infer, "flag", Expr::BoolLit(false)));
+    }
+
+    #[test]
+    fn enforces_non_associative_comparisons() {
+        assert!(parse_program("infer x = a < b").is_ok());
+        assert!(parse_program("infer x = a == b").is_ok());
+        assert!(parse_program("infer x = (a < b) == c").is_ok());
+        assert!(parse_program("infer x = a < b < c").is_err());
+        assert!(parse_program("infer x = a == b < c").is_err());
+    }
+
+    #[test]
+    fn continues_expressions_after_trailing_operators() {
+        assert!(parse_program("int total = base +\n    bonus").is_ok());
+        assert!(parse_program("int d = a +\n    -b").is_ok());
+        assert!(parse_program("infer x = (a +\n    b)").is_ok());
+        assert!(parse_program("int total = base\n    + bonus").is_err());
     }
 
     #[test]

@@ -1104,3 +1104,222 @@ Checkmate establishes a balanced design space for embeddable scripting:
 - Through modular crate architecture and an isolated `core`-only trait boundary, it spans effortlessly from high-performance game engines down to bare-metal microcontrollers.
 
 Checkmate gives host applications complete control over execution, resources, and concurrency, delivering on a singular design mandate: **the scripting language where the host calls the shots.**
+
+## Appendix A — Operators and Expressions
+
+This appendix is normative. It defines the complete inventory of binary and unary
+operators, their precedence and associativity, operand typing, evaluation semantics,
+the compound assignment statement forms, and the interaction between operators and
+significant newlines. Constructs deliberately left out of the language are listed in
+§A.9.
+
+### A.1. Operator Table
+
+Precedence is listed from loosest to tightest. All binary operators are
+left-associative, except the comparison operators, which are non-associative (§A.3).
+
+| Level | Operators                   | Category       | Associativity   |
+| ----- | --------------------------- | -------------- | --------------- |
+| 1     | `\|\|`                      | logical or     | left            |
+| 2     | `&&`                        | logical and    | left            |
+| 3     | `==` `!=` `<` `<=` `>` `>=` | comparison     | non-associative |
+| 4     | `+` `-`                     | additive       | left            |
+| 5     | `*` `/` `%`                 | multiplicative | left            |
+| 6     | `-` `!` (prefix)            | unary          | prefix          |
+
+Parenthesized expressions override precedence and bind tighter than every operator
+in this table.
+
+Note: because §A.3 requires parentheses when `&&` and `||` are mixed, the relative
+precedence of levels 1 and 2 is deliberately unobservable.
+
+### A.2. Grammar
+
+```ebnf
+expr           → logic_or
+logic_or       → logic_and { "||" logic_and }
+logic_and      → comparison { "&&" comparison }
+comparison     → additive [ cmp_op additive ]    ; at most one — see §A.3
+cmp_op         → "==" | "!=" | "<" | "<=" | ">" | ">="
+additive       → multiplicative { ("+" | "-") multiplicative }
+multiplicative → unary { ("*" | "/" | "%") unary }
+unary          → ( "-" | "!" ) unary | primary
+primary        → literal | identifier | "(" expr ")"
+```
+
+`{ }` means zero or more repetitions; `[ ]` means an optional part. The grammar alone
+permits mixing `&&` with `||`; the parenthesization rules in §A.3 reject it at compile
+time.
+
+Unary operators nest freely: `!!flag` and `-(-x)` are valid, and since `--` is not a
+token, `--x` is identical to `-(-x)`.
+
+Worked examples of tree shape:
+
+```text
+1 + 2 * 3          10 - 4 - 3        -x * y
+     +                  -              *
+    / \                / \            / \
+   1   *              -   3        (-x)  y
+      / \            / \
+     2   3         10   4
+```
+
+`1 + 2 * 3` is `7`; `10 - 4 - 3` is `3` (left-associative); `-x * y` is `(-x) * y`.
+
+### A.3. Mandatory Parenthesization
+
+Two constructs are compile-time errors unless explicitly parenthesized. Both rules
+exist because the unparenthesized form is a well-known source of silent mistakes.
+
+**Rule 1 — Mixing logical operators.** An expression containing both `&&` and `||`
+must parenthesize the mixing:
+
+```checkmate
+a || b && c       // error: mixed && and ||
+a || (b && c)     // ok
+(a || b) && c     // ok
+a && b && c       // ok: same operator, left-associative
+a || b || c       // ok: same operator, left-associative
+```
+
+**Rule 2 — Comparisons are non-associative.** An operand of a comparison operator may
+not itself be a comparison expression unless parenthesized:
+
+```checkmate
+a < b < c         // error: chained comparison; write a < b && b < c
+a == b < c        // error; write a == (b < c)
+(a < b) == c      // ok (c must be bool)
+```
+
+### A.4. Operand Typing
+
+Operators are strict about operand types. There are no implicit coercions between
+types (§2.4), including through operators.
+
+| Operators         | Operand types                                                          | Result      |
+| ----------------- | ---------------------------------------------------------------------- | ----------- |
+| `+`               | both `int`, or both `float`                                            | as operands |
+| `+`               | at least one `str`; other side `str`, `int`, `float`, or `bool` (§A.6) | `str`       |
+| `-` `*`           | both `int`, or both `float`                                            | as operands |
+| `/`               | both `int`, or both `float`                                            | as operands |
+| `%`               | both `int`                                                             | `int`       |
+| `<` `<=` `>` `>=` | both `int`, or both `float`                                            | `bool`      |
+| `==` `!=`         | both operands of the same type                                         | `bool`      |
+| `&&` `\|\|`       | both `bool`                                                            | `bool`      |
+| `-` (unary)       | `int` or `float`                                                       | as operand  |
+| `!` (unary)       | `bool`                                                                 | `bool`      |
+
+Additional rules:
+
+- `+` is numeric addition only when both operands are numeric. If either operand is
+  `str`, `+` is string concatenation (§A.6). The meaning of each `+` node is
+  determined entirely by its operand types — never by context.
+- No operator other than `+` accepts a `str` operand. In particular `"ab" * 3` is a
+  type error; there is no string repetition.
+- `==` and `!=` are strict same-type, value equality: `str` compares by content,
+  `float` follows IEEE 754 (so `NaN == NaN` is false), `bool` and `int` compare by
+  value. Cross-type equality is never permitted: `1 == "1"` is a type error, not
+  `true`. Equality for structs and enums will be defined structurally when those
+  types are introduced; the same-type rule will not change.
+- The stringification described in §A.6 applies only within concatenation. It is not
+  a general coercion, and a `str` is never converted to a numeric type.
+
+### A.5. Evaluation Semantics
+
+- **Short-circuiting.** `lhs && rhs` evaluates `rhs` only when `lhs` is `true`;
+  `lhs || rhs` evaluates `rhs` only when `lhs` is `false`.
+- **Integer division.** `int / int` truncates toward zero and yields an `int`:
+  `7 / 2` is `3`, `-7 / 2` is `-3`. `a % b` is the remainder of that truncated
+  division, with the sign of `a`: `-7 % 2` is `-1`, `7 % -2` is `1`.
+- **Float division.** `float / float` is ordinary IEEE 754 division.
+- **Division and remainder by zero** terminate the invocation at runtime, consistent
+  with the overflow policy of §2.4.
+- **Overflow** follows §2.4: checked, terminating the invocation. Behavior at numeric
+  literal boundaries (e.g., the most negative `int` value written as a negated
+  literal) is unspecified in this version and will be pinned down together with the
+  overflow-checking implementation.
+
+### A.6. String Concatenation
+
+When either operand of `+` is a `str`, the other operand is converted to its
+canonical string form and concatenated:
+
+- `int` — decimal digits, prefixed by `-` when negative
+- `bool` — `true` or `false`
+- `float` — the shortest decimal representation that round-trips to the same value
+- `str` — used as-is
+
+```checkmate
+"HP: " + 100      // "HP: 100"
+"ok: " + true     // "ok: true"
+1.5 + "x"         // "1.5x"
+"a" + 1 + 2       // "a12"   — parsed as ("a" + 1) + 2
+1 + 2 + "a"       // "3a"    — parsed as (1 + 2) + "a"
+```
+
+The two final examples are the left-associativity consequence: the mixed forms are
+deterministic, but mixing numeric and string operands across a chain is discouraged
+style. There is no conversion in the other direction: a `str` operand never becomes a
+number.
+
+### A.7. Compound Assignment
+
+The compound assignment operators are `+=`, `-=`, `*=`, `/=`, and `%=`. Each is a
+**statement**, exactly equivalent to expanding the operator:
+
+```checkmate
+x += 10           // identical to: x = x + 10
+s += "!"          // identical to: s = s + "!"
+s += 100          // identical to: s = s + 100  → uses §A.6 stringification
+```
+
+- Compound assignment yields no value. It cannot be chained or embedded in an
+  expression: `x += y += 1` and `a = (b += 1)` are compile-time errors.
+- Plain `=` remains a statement as well (§2.10); `a = b = c` is a compile-time error.
+- The assignment target is evaluated exactly once. (Significant once indexable
+  targets such as arrays are introduced.)
+
+### A.8. Operators and Newlines
+
+Statement delimiting follows the established newline rule: a line break is
+significant after a token that can end a statement, and insignificant otherwise.
+Since no operator can end a statement, an expression continues across a line break
+when the line ends with a binary operator or an open parenthesis:
+
+```checkmate
+int total = base +
+    bonus          // ok: trailing operator continues the expression
+```
+
+A line that _begins_ with a binary operator is a compile-time error:
+
+```checkmate
+int total = base
+    + bonus        // error: leading binary operator
+```
+
+After a trailing operator, the continuation line may begin with a unary operator;
+the leading `-` below is unary, applied to `b`, not a statement-starting binary
+operator:
+
+```checkmate
+int d = a +
+    -b             // ok: a + (-b)
+```
+
+As illustrated in §2.6 and §2.12, newlines inside parentheses are insignificant, so
+bracketed expressions wrap freely regardless of operator position.
+
+### A.9. Deliberately Absent
+
+The following constructs do not exist in this version of Checkmate:
+
+- **Bitwise operators** (`&` `|` `^` `<<` `>>` `~`) — reserved for a future appendix.
+- **Ternary conditional** (`?:`) — use `if`/`else`.
+- **Exponentiation** — expected to arrive as a host math capability, not an operator.
+- **Increment/decrement** (`++` `--`) — value semantics make them pointless; write
+  `x += 1`.
+- **Assignment as an expression** — assignment and compound assignment yield no
+  value and cannot chain (§A.7).
+- **Cross-type arithmetic, comparison, or equality** — never permitted (§A.4).

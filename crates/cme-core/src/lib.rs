@@ -27,11 +27,65 @@ pub mod ast {
         StrLit(String),
         BoolLit(bool),
         Ident(String),
+        Binary {
+            op: BinaryOp,
+            lhs: Box<Expr>,
+            rhs: Box<Expr>,
+        },
+        Unary {
+            op: UnaryOp,
+            expr: Box<Expr>,
+        },
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub enum BinaryOp {
+        Or,
+        And,
+        Eq,
+        Ne,
+        Lt,
+        Le,
+        Gt,
+        Ge,
+        Add,
+        Sub,
+        Mul,
+        Div,
+        Rem,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub enum UnaryOp {
+        Neg,
+        Not,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub enum CompoundOp {
+        Add,
+        Sub,
+        Mul,
+        Div,
+        Rem,
     }
 
     #[derive(Debug, PartialEq, Clone)]
     pub enum Stmt {
-        VarDecl { ty: Type, name: String, expr: Expr },
+        VarDecl {
+            ty: Type,
+            name: String,
+            expr: Expr,
+        },
+        Assign {
+            name: String,
+            expr: Expr,
+        },
+        CompoundAssign {
+            target: String,
+            op: CompoundOp,
+            expr: Expr,
+        },
     }
 }
 

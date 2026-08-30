@@ -1,5 +1,333 @@
-infer x = 1 ?? 2
-int x = 10
-str y = 20
-infer z = 3i43j0djx0dj308djx038jd038j d083j d03j8 dx03j8 d08j
-int i = 20
+// ============================================================================
+// test.cm — comprehensive front-end fixture for Checkmate (CME)
+// ============================================================================
+//
+// Exercises every token, statement form, operator, precedence rule and
+// newline rule implemented in the compiler right now (lexer + parser).
+//
+// Must produce ZERO diagnostics:
+//   cargo run --features cli -- lex test.cm
+//   cargo run --features cli -- ast test.cm
+//
+// Deliberately ABSENT (not implemented yet — adding any of these today must
+// error): `return` statements, `{}` blocks, function calls, if/while/for,
+// match, structs/enums, block comments /* */, string escape sequences.
+//
+// Sections:
+//   1. Variable declarations (every type + infer)   9. Logical && / ||
+//   2. Integer literals                            10. Unary - and !
+//   3. Float literals                              11. String concatenation
+//   4. String literals                             12. Plain assignment
+//   5. Boolean literals                            13. Compound assignment
+//   6. Identifiers                                 14. Newline handling
+//   7. Arithmetic precedence                       15. Whitespace robustness
+//   8. Comparisons                                 16. Combined stress test
+// ============================================================================
+
+
+// ----------------------------------------------------------------------------
+// 1. Variable declarations — every declared type plus `infer` crystallization
+// ----------------------------------------------------------------------------
+
+int score = 0
+float speed = 4.5
+str title = "Checkmate"
+str label = "auto"
+bool active = true
+bool paused = false
+
+infer intAuto = 10
+infer floatAuto = 0.25
+infer strAuto = "auto"
+infer boolAuto = true
+infer identAuto = score
+infer fromIdent = speed
+infer fromParens = (1 + 2)
+
+
+// ----------------------------------------------------------------------------
+// 2. Integer literals — zero, plain, i64 boundary, unary-minus forms
+// ----------------------------------------------------------------------------
+
+int zero = 0
+int answer = 42
+int i64Max = 9223372036854775807
+int negativeLiteral = -1
+int negativeExpr = -zero
+
+
+// ----------------------------------------------------------------------------
+// 3. Float literals — digits-dot-digits only (no exponent syntax exists yet)
+// ----------------------------------------------------------------------------
+
+float fZero = 0.0
+float fWhole = 42.0
+float fFrac = 0.25
+float fPrecise = 123.0001
+float fBig = 123456.789
+float fNegative = -2.75
+
+
+// ----------------------------------------------------------------------------
+// 4. String literals — no escapes yet, so `"` and line breaks never appear
+//    inside a literal. Brackets, braces and `//` inside a string must stay
+//    string content, not tokens.
+// ----------------------------------------------------------------------------
+
+str empty = ""
+str plain = "Checkmate"
+str padded = "  padded  "
+str symbols = "HP: 100! ? [ok] {brace} (paren) %/"
+str commentLike = "not a comment // really"
+str unicode = "héllo wörld ✓"
+
+
+// ----------------------------------------------------------------------------
+// 5. Boolean literals used directly in expressions
+// ----------------------------------------------------------------------------
+
+infer t = true
+infer f = false
+infer notT = !true
+infer notF = !false
+infer notNotT = !!true
+
+
+// ----------------------------------------------------------------------------
+// 6. Identifiers — underscore/letter start, digits inside, and keyword-prefix
+//    forms that must stay identifiers (longest-match wins)
+// ----------------------------------------------------------------------------
+
+int x = 1
+int _leading = 2
+int trailing_ = 3
+int value1 = 4
+int value_2 = 5
+int snakeCase = 6
+int CamelCase = 7
+int intx = 8
+int infer_ = 9
+int returnX = 10
+int trueish = 11
+int falseish = 12
+int strata = 13
+int boolean = 14
+int floaty = 15
+
+infer usesIdents = x + _leading + trailing_ + value1 + snakeCase + CamelCase
+infer usesKeywordish = intx + infer_ + returnX + trueish + falseish
+infer usesSuffixes = strata + boolean + floaty
+
+
+// ----------------------------------------------------------------------------
+// 7. Arithmetic — precedence levels 4/5, left associativity, `%` (Appendix A)
+// ----------------------------------------------------------------------------
+
+int base = 10
+int bonus = 4
+int mult = 3
+
+infer prec1 = 1 + 2 * 3
+infer prec2 = 10 - 4 - 3
+infer prec3 = 100 / 10 / 2
+infer prec4 = 2 * 3 % 4
+infer prec5 = 7 % 3 + 1
+infer prec6 = 1 + 2 - 3 + 4
+infer prec7 = 2 * 3 + 4 * 5
+infer prec8 = 10 / 2 * 5
+infer prec9 = 1 - 2 + 3
+infer prec10 = 12 % 5 % 2
+infer prec11 = base + bonus % 2 * mult
+
+infer withIdents = base + bonus * mult
+infer withParens = (base + bonus) * mult
+infer doubleParens = ((base + bonus)) * mult
+infer negatedOperand = -base * bonus
+
+
+// ----------------------------------------------------------------------------
+// 8. Comparisons — all six operators; non-associative, so chains and
+//    comparison operands must be parenthesized (Appendix A.3 rule 2)
+// ----------------------------------------------------------------------------
+
+int low = 5
+int high = 9
+
+infer lt = low < high
+infer le = low <= high
+infer gt = low > high
+infer ge = low >= high
+infer eq = low == high
+infer ne = low != high
+
+infer eqBool = active == true
+infer neBool = active != paused
+infer eqStr = title == "Checkmate"
+infer eqIdents = label == title
+infer eqParens = (low < high) == active
+infer cmpOverAdd = low + 1 < high * 2
+infer cmpOverUnary = -low < high
+infer cmpParensArith = (base + 1) + (bonus * 2) < high
+infer cmpRhsParens = low < (high + 1)
+
+
+// ----------------------------------------------------------------------------
+// 9. Logical && and || — same-operator chains are fine; the mixed side of a
+//    || / && pair must be a parenthesized group (Appendix A.3 rule 1)
+// ----------------------------------------------------------------------------
+
+bool alive = true
+bool ready = false
+bool armed = true
+
+infer andSimple = alive && armed
+infer orSimple = alive || ready
+infer andChain = alive && armed && ready
+infer orChain = alive || ready || armed
+infer orOfNots = !alive || !ready
+infer andOfNots = !alive && !ready
+infer mixedRight = alive || (ready && armed)
+infer mixedLeft = (alive || ready) && armed
+infer mixedNested = (alive && armed) || !(ready && armed)
+infer logicOverCmp = low < high && alive
+infer logicParensCmp = (low < high) && (low != high)
+infer logicAuto = (alive && ready)
+
+
+// ----------------------------------------------------------------------------
+// 10. Unary operators — prefix `-` and `!`, freely nestable; `--` is not a
+//     token, so `--x` is `-(-x)` (Appendix A.2)
+// ----------------------------------------------------------------------------
+
+int depth = 7
+float balance = 12.5
+
+infer negLit = -42
+infer negFloatLit = -0.5
+infer negIdent = -depth
+infer negFloatIdent = -balance
+infer negParens = -(depth + 1)
+infer negNestedParens = -(-depth)
+infer doubleNeg = --depth
+infer tripleNeg = ---depth // three prefix minuses; no `--` token exists
+infer negTimes = -depth * bonus
+infer negFloatTimes = -balance * 2.0
+infer notIdent = !alive
+infer notParens = !(low < high)
+infer notGroup = !(alive && ready)
+infer notChain = !!alive
+infer mixedUnary = !(-depth < 0) || (title == "Checkmate" && active)
+
+
+// ----------------------------------------------------------------------------
+// 11. String concatenation through `+` — the §A.6 examples, parsed as
+//     left-associative chains
+// ----------------------------------------------------------------------------
+
+str concatLit = "HP: " + 100
+str concatBool = "ok: " + true
+str concatFloat = 1.5 + "x"
+str chain1 = "a" + 1 + 2
+str chain2 = 1 + 2 + "a"
+str concatIdent = title + "!"
+str concatMulti = title + " / " + label
+
+
+// ----------------------------------------------------------------------------
+// 12. Plain assignment statements (§2.10 — variables are mutable by default)
+// ----------------------------------------------------------------------------
+
+score = score + 10
+speed = 2.0
+title = title + "!"
+active = !active
+x = value1
+depth = depth - 1
+base = base % mult
+intAuto = intAuto * 2
+depth = (base - bonus) * mult
+
+
+// ----------------------------------------------------------------------------
+// 13. Compound assignment statements — += -= *= /= %= (§A.7)
+// ----------------------------------------------------------------------------
+
+score += 5
+score -= 3
+score *= 2
+score /= 4
+score %= 7
+balance += 0.25
+balance -= 1.5
+balance *= 2.0
+balance /= 4.0
+title += "!"
+title += label
+score += bonus * 2
+depth -= base / 2
+
+
+// ----------------------------------------------------------------------------
+// 14. Newlines — significant at statement ends; a trailing operator
+//     continues the expression; a continuation line may open with a unary
+//     operator; newlines inside parentheses are insignificant (§A.8, §2.6)
+// ----------------------------------------------------------------------------
+
+int total = base +
+    bonus
+
+int diff = base +
+    -bonus
+
+int folded = base +
+    bonus +
+    mult
+
+int wrapped = (
+    base
+    + bonus
+)
+
+int grouped = (
+    1 + 2 * 3
+)
+
+int nestedWrap = (
+    (base + bonus) *
+        mult
+)
+
+infer wrappedInfer = (
+    speed
+    +
+    fFrac
+)
+
+int afterBlanks = 1
+
+
+// comment-only lines between statements must be transparent
+// second comment line
+int afterComments = 2
+
+int trailingComment = 1 // comment after code on the same line
+
+
+// ----------------------------------------------------------------------------
+// 15. Whitespace robustness — tabs and trailing spaces are insignificant
+//     (the next line contains literal tab characters)
+// ----------------------------------------------------------------------------
+
+int	tabbedName	=	8
+int spacedName = 9
+
+
+// ----------------------------------------------------------------------------
+// 16. Combined stress test — several features per statement
+// ----------------------------------------------------------------------------
+
+infer report = "score: " + score + " speed: " + speed
+infer verdict = ((score < base) && (bonus != 0)) || !(active && paused)
+infer computation = -(base + bonus) * (mult % 2) + depth / 2
+infer gate = !(low > high) && (title == "Checkmate" || speed == 4.5)
+infer chained = 1 + 2 * 3 - 4 / 2 % 3 + -low * -mult

@@ -2,7 +2,7 @@ use crate::lexer::{LexError, SpannedToken, Token};
 use std::fmt;
 
 use cme_core::Span;
-use cme_core::ast::{Expr, Stmt, Type};
+use cme_core::ast::{BinaryOp, CompoundOp, Expr, Stmt, Type, UnaryOp};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Diagnostic {
@@ -29,7 +29,6 @@ impl fmt::Display for Diagnostic {
 }
 
 pub struct Parser<'a, 'src> {
-    // A borrowed slice of tokens. 'src is the lifetime of the original string.
     tokens: &'a [SpannedToken<'src>],
     pos: usize,
     eof_span: Span,
@@ -44,13 +43,10 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
-    /// Looks at the next token without consuming it
-    #[allow(dead_code)]
     fn peek(&self) -> Option<&SpannedToken<'src>> {
         self.tokens.get(self.pos)
     }
 
-    /// Consumes the next token and returns it, moving the parser forward
     fn advance(&mut self) -> Option<&SpannedToken<'src>> {
         let token = self.tokens.get(self.pos);
         self.pos += 1;
@@ -69,7 +65,13 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
-    /// Parses a whole file (later: also a `{ ... }` block)
+    fn parse_error(message: impl Into<String>, span: Span) -> Diagnostic {
+        Diagnostic::Parse {
+            message: message.into(),
+            span,
+        }
+    }
+
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
         let (stmts, errors) = self.parse_program_with_errors();
         match errors.into_iter().next() {
@@ -101,7 +103,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 Some(SpannedToken {
                     token: Token::Newline,
                     ..
-                }) => self.pos += 1, // separator
+                }) => self.pos += 1,
                 None => {}
                 Some(other) => {
                     errors.push(Diagnostic::Parse {
@@ -115,6 +117,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
             }
         }
+
         (stmts, errors)
     }
 
@@ -144,10 +147,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             match tok {
                 Token::Newline => {
                     if bracket_depth == 0 && prev_can_end {
-                        out.push(SpannedToken {
-                            token: Token::Newline,
-                            span,
-                        });
+                        out.push(SpannedToken { token: tok, span });
                         prev_can_end = false;
                     }
                 }
@@ -158,12 +158,9 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 Token::RParen => {
                     if bracket_depth == 0 {
-                        errors.push(Diagnostic::Parse {
-                            message: "unbalanced closing parenthesis".to_string(),
-                            span,
-                        });
+                        errors.push(Self::parse_error("unbalanced closing parenthesis", span));
                         if let Some(token) = skip_to_next_statement(&tokens, &mut index) {
-                            out.push(token.clone());
+                            out.push(token);
                         }
                         bracket_depth = 0;
                         prev_can_end = false;
@@ -182,10 +179,10 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
 
         if bracket_depth != 0 {
-            errors.push(Diagnostic::Parse {
-                message: "unbalanced opening parenthesis".to_string(),
-                span: Span::new(source_len, source_len + 1),
-            });
+            errors.push(Self::parse_error(
+                "unbalanced opening parenthesis",
+                Span::new(source_len, source_len + 1),
+            ));
         }
 
         (out, errors)
@@ -195,33 +192,49 @@ impl<'a, 'src> Parser<'a, 'src> {
         skip_to_next_statement(self.tokens, &mut self.pos);
     }
 
-    /// Parses a single statement like: `infer speed = 4.5`
-    pub fn parse_statement(&mut self) -> Result<Stmt, Diagnostic> {
-        let eof_span = self.eof_span;
-        let token = self.advance().ok_or(Diagnostic::Parse {
-            message: "unexpected end of file".to_string(),
-            span: eof_span,
-        })?;
+    fn require_token(&mut self, message: &str) -> Result<SpannedToken<'src>, Diagnostic> {
+        self.advance().cloned().ok_or(Diagnostic::Parse {
+            message: message.to_string(),
+            span: self.eof_span,
+        })
+    }
 
-        // 1. Parse the Type
-        let ty = match &token.token {
+    pub fn parse_statement(&mut self) -> Result<Stmt, Diagnostic> {
+        let first = self.require_token("unexpected end of file")?;
+
+        if matches!(
+            first.token,
+            Token::KwInt | Token::KwFloat | Token::KwStr | Token::KwBool | Token::KwInfer
+        ) {
+            return self.parse_variable_declaration(first);
+        }
+
+        if let Token::Ident(name) = &first.token {
+            return self.parse_assignment_statement(first.clone(), name.to_string());
+        }
+
+        Err(Diagnostic::Parse {
+            message: format!(
+                "Expected a type or assignment target, but found {:?}",
+                first.token
+            ),
+            span: first.span,
+        })
+    }
+
+    fn parse_variable_declaration(
+        &mut self,
+        type_token: SpannedToken<'src>,
+    ) -> Result<Stmt, Diagnostic> {
+        let ty = match type_token.token {
             Token::KwInt => Type::Int,
             Token::KwFloat => Type::Float,
             Token::KwStr => Type::Str,
-            Token::KwInfer => Type::Infer,
             Token::KwBool => Type::Bool,
-            _ => {
-                return Err(Diagnostic::Parse {
-                    message: format!(
-                        "Expected a type (int, float, infer), but found {:?}",
-                        token.token
-                    ),
-                    span: token.span,
-                });
-            }
+            Token::KwInfer => Type::Infer,
+            _ => unreachable!("the caller only dispatches type keywords"),
         };
 
-        // 2. Parse the Identifier (variable name)
         let name = match self.advance() {
             Some(SpannedToken {
                 token: Token::Ident(name),
@@ -241,68 +254,297 @@ impl<'a, 'src> Parser<'a, 'src> {
             }
         };
 
-        // 3. Parse the '=' symbol
-        match self.advance() {
-            Some(SpannedToken {
-                token: Token::Assign,
-                ..
-            }) => {}
-            Some(other) => {
-                return Err(Diagnostic::Parse {
-                    message: format!("Expected '=', but found {:?}", other.token),
-                    span: other.span,
-                });
-            }
-            None => {
-                return Err(Diagnostic::Parse {
-                    message: "Expected '=', but reached end of file".to_string(),
-                    span: self.eof_span,
-                });
-            }
+        let operator = self
+            .require_token("Expected '=', but reached end of file")?
+            .clone();
+        if operator.token != Token::Assign {
+            return Err(Diagnostic::Parse {
+                message: format!("Expected '=', but found {:?}", operator.token),
+                span: operator.span,
+            });
         }
 
-        // 4. Parse the Expression
-        let expr = match self.advance() {
-            Some(SpannedToken {
-                token: Token::IntLit(val),
-                ..
-            }) => Expr::IntLit(*val),
-            Some(SpannedToken {
-                token: Token::FloatLit(val),
-                ..
-            }) => Expr::FloatLit(*val),
-            Some(SpannedToken {
-                token: Token::StrLit(value),
-                ..
-            }) => Expr::StrLit(value[1..value.len() - 1].to_string()),
-            Some(SpannedToken {
-                token: Token::KwTrue,
-                ..
-            }) => Expr::BoolLit(true),
-            Some(SpannedToken {
-                token: Token::KwFalse,
-                ..
-            }) => Expr::BoolLit(false),
-            Some(SpannedToken {
-                token: Token::Ident(name),
-                ..
-            }) => Expr::Ident(name.to_string()),
-            Some(other) => {
-                return Err(Diagnostic::Parse {
-                    message: format!("Expected an expression, but found {:?}", other.token),
-                    span: other.span,
-                });
+        let expr = self.parse_expression()?;
+        Ok(Stmt::VarDecl { ty, name, expr })
+    }
+
+    fn parse_assignment_statement(
+        &mut self,
+        target: SpannedToken<'src>,
+        name: String,
+    ) -> Result<Stmt, Diagnostic> {
+        let operator = self
+            .require_token("Expected assignment operator, but reached end of file")?
+            .clone();
+
+        let op = match operator.token {
+            Token::Assign => {
+                let expr = self.parse_expression()?;
+                return Ok(Stmt::Assign { name, expr });
             }
-            None => {
+            Token::AddAssign => CompoundOp::Add,
+            Token::SubAssign => CompoundOp::Sub,
+            Token::MulAssign => CompoundOp::Mul,
+            Token::DivAssign => CompoundOp::Div,
+            Token::RemAssign => CompoundOp::Rem,
+            other => {
                 return Err(Diagnostic::Parse {
-                    message: "Expected an expression, but reached end of file".to_string(),
-                    span: self.eof_span,
+                    message: format!("Expected assignment operator, but found {:?}", other),
+                    span: target.span,
                 });
             }
         };
 
-        // We successfully built a piece of the AST!
-        Ok(Stmt::VarDecl { ty, name, expr })
+        let expr = self.parse_expression()?;
+        Ok(Stmt::CompoundAssign {
+            target: name,
+            op,
+            expr,
+        })
+    }
+
+    fn parse_expression(&mut self) -> Result<Expr, Diagnostic> {
+        Ok(self.parse_logic_or()?.0)
+    }
+
+    fn parse_logic_or(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+        let mut expr = self.parse_logic_and()?;
+
+        while matches!(
+            self.peek(),
+            Some(SpannedToken {
+                token: Token::Or,
+                ..
+            })
+        ) {
+            self.advance();
+            let rhs = self.parse_logic_and()?;
+            if matches!(expr.1, LogicalKind::And) || matches!(rhs.1, LogicalKind::And) {
+                return Err(Self::parse_error(
+                    "mixed && and || require parentheses",
+                    expr_span(&expr.0),
+                ));
+            }
+            expr = (
+                Expr::Binary {
+                    op: BinaryOp::Or,
+                    lhs: Box::new(expr.0),
+                    rhs: Box::new(rhs.0),
+                },
+                LogicalKind::Or,
+            );
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_logic_and(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+        let mut expr = self.parse_comparison()?;
+
+        while matches!(
+            self.peek(),
+            Some(SpannedToken {
+                token: Token::And,
+                ..
+            })
+        ) {
+            self.advance();
+            let rhs = self.parse_comparison()?;
+            if matches!(expr.1, LogicalKind::Or) || matches!(rhs.1, LogicalKind::Or) {
+                return Err(Self::parse_error(
+                    "mixed && and || require parentheses",
+                    expr_span(&expr.0),
+                ));
+            }
+            expr = (
+                Expr::Binary {
+                    op: BinaryOp::And,
+                    lhs: Box::new(expr.0),
+                    rhs: Box::new(rhs.0),
+                },
+                LogicalKind::And,
+            );
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_comparison(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+        let lhs = self.parse_additive()?;
+        let Some(op_token) = self.peek().cloned() else {
+            return Ok(lhs);
+        };
+        let Some(op) = comparison_operator(&op_token.token) else {
+            return Ok(lhs);
+        };
+        self.advance();
+        let rhs = self.parse_additive()?;
+
+        if let Some(next) = self.peek()
+            && comparison_operator(&next.token).is_some()
+        {
+            return Err(Diagnostic::Parse {
+                message: "comparisons are non-associative; add parentheses".to_string(),
+                span: next.span,
+            });
+        }
+
+        Ok((
+            Expr::Binary {
+                op,
+                lhs: Box::new(lhs.0),
+                rhs: Box::new(rhs.0),
+            },
+            LogicalKind::None,
+        ))
+    }
+
+    fn parse_additive(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+        let mut expr = self.parse_multiplicative()?;
+
+        while let Some(op) = self
+            .peek()
+            .and_then(|token| additive_operator(&token.token))
+        {
+            self.advance();
+            let rhs = self.parse_multiplicative()?;
+            expr = (
+                Expr::Binary {
+                    op,
+                    lhs: Box::new(expr.0),
+                    rhs: Box::new(rhs.0),
+                },
+                combine_operand_kind(expr.1, rhs.1),
+            );
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_multiplicative(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+        let mut expr = self.parse_unary()?;
+
+        while let Some(op) = self
+            .peek()
+            .and_then(|token| multiplicative_operator(&token.token))
+        {
+            self.advance();
+            let rhs = self.parse_unary()?;
+            expr = (
+                Expr::Binary {
+                    op,
+                    lhs: Box::new(expr.0),
+                    rhs: Box::new(rhs.0),
+                },
+                combine_operand_kind(expr.1, rhs.1),
+            );
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_unary(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+        let unary_op = match self.peek().map(|token| token.token.clone()) {
+            Some(Token::Minus) => UnaryOp::Neg,
+            Some(Token::Not) => UnaryOp::Not,
+            _ => return self.parse_primary(),
+        };
+
+        self.advance();
+        let expr = self.parse_unary()?;
+        let kind = expr.1;
+
+        Ok((
+            Expr::Unary {
+                op: unary_op,
+                expr: Box::new(expr.0),
+            },
+            kind,
+        ))
+    }
+
+    fn parse_primary(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+        let token = self.require_token("Expected an expression, but reached end of file")?;
+        match &token.token {
+            Token::IntLit(value) => Ok((Expr::IntLit(*value), LogicalKind::None)),
+            Token::FloatLit(value) => Ok((Expr::FloatLit(*value), LogicalKind::None)),
+            Token::StrLit(value) => Ok((
+                Expr::StrLit(value[1..value.len() - 1].to_string()),
+                LogicalKind::None,
+            )),
+            Token::KwTrue => Ok((Expr::BoolLit(true), LogicalKind::None)),
+            Token::KwFalse => Ok((Expr::BoolLit(false), LogicalKind::None)),
+            Token::Ident(name) => Ok((Expr::Ident(name.to_string()), LogicalKind::None)),
+            Token::LParen => {
+                let expr = self.parse_logic_or()?;
+                let closing = self.require_token("Expected ')', but reached end of file")?;
+                if closing.token != Token::RParen {
+                    return Err(Diagnostic::Parse {
+                        message: format!("Expected ')', but found {:?}", closing.token),
+                        span: closing.span,
+                    });
+                }
+                Ok((expr.0, LogicalKind::Parenthesized))
+            }
+            other => Err(Diagnostic::Parse {
+                message: format!("Expected an expression, but found {:?}", other),
+                span: token.span,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogicalKind {
+    None,
+    Or,
+    And,
+    Parenthesized,
+}
+
+fn combine_operand_kind(lhs: LogicalKind, rhs: LogicalKind) -> LogicalKind {
+    match (lhs, rhs) {
+        (LogicalKind::Parenthesized, _) | (_, LogicalKind::Parenthesized) => {
+            LogicalKind::Parenthesized
+        }
+        _ => LogicalKind::None,
+    }
+}
+
+fn comparison_operator(token: &Token) -> Option<BinaryOp> {
+    match token {
+        Token::Eq => Some(BinaryOp::Eq),
+        Token::Ne => Some(BinaryOp::Ne),
+        Token::Lt => Some(BinaryOp::Lt),
+        Token::Le => Some(BinaryOp::Le),
+        Token::Gt => Some(BinaryOp::Gt),
+        Token::Ge => Some(BinaryOp::Ge),
+        _ => None,
+    }
+}
+
+fn additive_operator(token: &Token) -> Option<BinaryOp> {
+    match token {
+        Token::Plus => Some(BinaryOp::Add),
+        Token::Minus => Some(BinaryOp::Sub),
+        _ => None,
+    }
+}
+
+fn multiplicative_operator(token: &Token) -> Option<BinaryOp> {
+    match token {
+        Token::Star => Some(BinaryOp::Mul),
+        Token::Slash => Some(BinaryOp::Div),
+        Token::Percent => Some(BinaryOp::Rem),
+        _ => None,
+    }
+}
+
+fn expr_span(expr: &Expr) -> Span {
+    match expr {
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StrLit(_) | Expr::BoolLit(_) => Span::new(0, 0),
+        Expr::Ident(_) => Span::new(0, 0),
+        Expr::Binary { .. } | Expr::Unary { .. } => Span::new(0, 0),
     }
 }
 
@@ -328,12 +570,8 @@ fn can_end_statement(t: &Token) -> bool {
             | Token::StrLit(_)
             | Token::KwTrue
             | Token::KwFalse
-            | Token::KwInt
-            | Token::KwFloat
-            | Token::KwStr
-            | Token::KwBool
             | Token::RParen
             | Token::RBrace
-            | Token::KwReturn // later: `]`, ...
+            | Token::KwReturn
     )
 }

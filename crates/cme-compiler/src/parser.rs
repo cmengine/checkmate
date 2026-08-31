@@ -234,7 +234,11 @@ impl<'a, 'src> Parser<'a, 'src> {
                     prev_can_end = can_end_statement(&tok);
                     prev_was_type_kw = matches!(
                         tok,
-                        Token::KwInt | Token::KwFloat | Token::KwStr | Token::KwBool | Token::KwInfer
+                        Token::KwInt
+                            | Token::KwFloat
+                            | Token::KwStr
+                            | Token::KwBool
+                            | Token::KwInfer
                     );
                     out.push(SpannedToken { token: tok, span });
                 }

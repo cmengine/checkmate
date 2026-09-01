@@ -70,7 +70,7 @@ fn render_diagnostics(errors: Vec<Diagnostic>, source: &str) -> Result<(), CliEr
 #[cfg(feature = "cli")]
 fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
     let span = match error {
-        Diagnostic::Lex(LexError::Invalid { span }) => *span,
+        Diagnostic::Lex(error) => error.span(),
         Diagnostic::Parse { span, .. } => *span,
     };
     let (line, column) = line_column(source, span.start);

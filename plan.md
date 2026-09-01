@@ -190,7 +190,7 @@ pinned tests in `crates/cme-compiler/src/lib.rs`, `boom.cm` (§9 comments only).
 
 ### Steps
 
-- [ ] **B.1 — Float literal guard (review item 10, parts A+B).**
+- [x] **B.1 — Float literal guard (review item 10, parts A+B).**
       Replace the `FloatLit` callback:
 
   ```rust
@@ -204,7 +204,7 @@ pinned tests in `crates/cme-compiler/src/lib.rs`, `boom.cm` (§9 comments only).
   `"float huge = " + "9".repeat(400) + ".0\n"` via `lex_with_errors`, assert exactly 1
   error classified `FloatOverflow` (see B.2) and that the next line still lexes.
 
-- [ ] **B.2 — `LexError` variants + classification (review item 6, option A).**
+- [x] **B.2 — `LexError` variants + classification (review item 6, option A).**
       Replace the single-variant enum:
 
   ```rust
@@ -289,7 +289,7 @@ pinned tests in `crates/cme-compiler/src/lib.rs`, `boom.cm` (§9 comments only).
     strings begin to die).
     Add `use std::fmt;` at the top of `lexer.rs`.
 
-- [ ] **B.3 — Honest, readable recovery loop (review item 11 — "most future-proof and
+- [x] **B.3 — Honest, readable recovery loop (review item 11 — "most future-proof and
       idiomatic", which the owner delegated; the chosen design is (a)+(b): one documented
       helper + record every error seen while resyncing, so **no error is ever swallowed** —
       matching test2.cm's own stated contract. Valid tokens between the error and the
@@ -366,7 +366,7 @@ pinned tests in `crates/cme-compiler/src/lib.rs`, `boom.cm` (§9 comments only).
     present in `errors` and the `int b = 1` line still lexes. Write the assertion
     against the observed count once, and pin it.
 
-- [ ] **B.4 — Update the one downstream match in the CLI.**
+- [x] **B.4 — Update the one downstream match in the CLI.**
       `src/main.rs:72-75` matches `Diagnostic::Lex(LexError::Invalid { span })`, which no
       longer compiles. Change the arm to:
 
@@ -377,7 +377,7 @@ pinned tests in `crates/cme-compiler/src/lib.rs`, `boom.cm` (§9 comments only).
   (The `"invalid token"` message fallback in `main.rs` stays for now — it is removed in
   Phase D.)
 
-- [ ] **B.5 — Update lexer unit tests for the new shape.**
+- [x] **B.5 — Update lexer unit tests for the new shape.**
   - `recovers_from_invalid_token_at_next_newline`: `errors[0]` is now
     `LexError::InvalidCharacter { span: Span::new(10, 11) }`.
   - `digit_run_overflowing_i64_is_an_error_not_a_panic`: error is

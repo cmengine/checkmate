@@ -24,7 +24,7 @@ impl Diagnostic {
     /// position where something was expected).
     fn span(&self) -> Span {
         match self {
-            Diagnostic::Lex(LexError::Invalid { span }) => *span,
+            Diagnostic::Lex(error) => error.span(),
             Diagnostic::Parse { span, .. } => *span,
         }
     }

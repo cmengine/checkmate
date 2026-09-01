@@ -1,3 +1,5 @@
+use std::fmt;
+
 use cme_core::Span;
 use logos::Logos;
 
@@ -94,7 +96,10 @@ pub enum Token<'a> {
     IntLit(i64),
 
     // Float Literals
-    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap())]
+    #[regex(
+        r"[0-9]+\.[0-9]+",
+        |lex| lex.slice().parse::<f64>().ok().filter(|v| v.is_finite()).ok_or(())
+    )]
     FloatLit(f64),
 }
 
@@ -104,9 +109,69 @@ pub struct SpannedToken<'a> {
     pub span: Span,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+/// A lexer failure. Each variant points at the offending source region.
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum LexError {
-    Invalid { span: Span },
+    /// A character that cannot begin any token (e.g. `@`, `$`, a stray `.`).
+    InvalidCharacter { span: Span },
+    /// A `"` with no closing `"` before the end of the line/file.
+    UnterminatedString { span: Span },
+    /// An integer literal whose digit run does not fit in `i64`.
+    IntegerOverflow { span: Span },
+    /// A float literal that would parse to infinity.
+    FloatOverflow { span: Span },
+}
+
+impl LexError {
+    pub fn span(&self) -> Span {
+        match self {
+            LexError::InvalidCharacter { span }
+            | LexError::UnterminatedString { span }
+            | LexError::IntegerOverflow { span }
+            | LexError::FloatOverflow { span } => *span,
+        }
+    }
+}
+
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            LexError::InvalidCharacter { .. } => "invalid character",
+            LexError::UnterminatedString { .. } => "unterminated string literal",
+            LexError::IntegerOverflow { .. } => "integer literal is too large",
+            LexError::FloatOverflow { .. } => "float literal is too large",
+        };
+        f.write_str(msg)
+    }
+}
+
+/// Chooses the `LexError` variant for a failed region by inspecting the source
+/// text: a leading `"` means an unterminated string; an all-digit run is integer
+/// overflow; a `digits.digits` shape is float overflow; anything else is a bad
+/// character.
+fn classify_error(source: &str, span: Span) -> LexError {
+    let text = &source[span.start..span.end];
+    if text.starts_with('"') {
+        LexError::UnterminatedString { span }
+    } else if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+        LexError::IntegerOverflow { span }
+    } else if is_float_shape(text) {
+        LexError::FloatOverflow { span }
+    } else {
+        LexError::InvalidCharacter { span }
+    }
+}
+
+fn is_float_shape(text: &str) -> bool {
+    match text.split_once('.') {
+        Some((int_part, frac_part)) => {
+            !int_part.is_empty()
+                && !frac_part.is_empty()
+                && int_part.bytes().all(|b| b.is_ascii_digit())
+                && frac_part.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
 }
 
 pub fn lex(source: &str) -> Result<Vec<SpannedToken<'_>>, LexError> {
@@ -124,39 +189,52 @@ pub fn lex_with_errors(source: &str) -> (Vec<SpannedToken<'_>>, Vec<LexError>) {
     let mut lexer = Token::lexer(source);
 
     while let Some(result) = lexer.next() {
-        let span = lexer.span();
-        if result.is_err() {
-            errors.push(LexError::Invalid {
-                span: Span::new(span.start, span.end),
-            });
-
-            while let Some(skipped) = lexer.next() {
-                if skipped.is_ok()
-                    && lexer.span().end > span.end
-                    && matches!(skipped, Ok(Token::Newline))
-                {
+        let span = Span::new(lexer.span().start, lexer.span().end);
+        match result {
+            Ok(token) => tokens.push(SpannedToken { token, span }),
+            Err(()) => {
+                errors.push(classify_error(source, span));
+                if let Some(newline_span) = skip_to_line_end(&mut lexer, source, &mut errors) {
                     tokens.push(SpannedToken {
                         token: Token::Newline,
-                        span: Span::new(lexer.span().start, lexer.span().end),
+                        span: newline_span,
                     });
-                    break;
                 }
             }
-            continue;
         }
-        tokens.push(SpannedToken {
-            token: result.unwrap(),
-            span: Span::new(span.start, span.end),
-        });
     }
 
     (tokens, errors)
 }
 
+/// Resynchronizes after a lexing error: consumes tokens up to and including the
+/// next newline so the damaged line stays line-granular, and records every lexer
+/// error encountered on the way — errors are never swallowed. Valid tokens inside
+/// the damaged region are dropped (recovery keeps statement boundaries only).
+/// Returns the newline's span if the region ended at a line break.
+fn skip_to_line_end<'src>(
+    lexer: &mut logos::Lexer<'src, Token<'src>>,
+    source: &'src str,
+    errors: &mut Vec<LexError>,
+) -> Option<Span> {
+    while let Some(result) = lexer.next() {
+        let span = Span::new(lexer.span().start, lexer.span().end);
+        match result {
+            Ok(Token::Newline) => return Some(span),
+            Ok(_) => {}
+            Err(()) => errors.push(classify_error(source, span)),
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::Token;
+    use crate::lexer::LexError;
     use crate::lexer::lex;
+    use crate::lexer::lex_with_errors;
+    use cme_core::Span;
 
     fn lex_tokens(source: &str) -> Vec<Token<'_>> {
         lex(source)
@@ -178,8 +256,8 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(
             errors[0],
-            crate::lexer::LexError::Invalid {
-                span: cme_core::Span::new(10, 11),
+            LexError::InvalidCharacter {
+                span: Span::new(10, 11),
             }
         );
         assert_eq!(
@@ -353,8 +431,8 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(
             errors[0],
-            crate::lexer::LexError::Invalid {
-                span: cme_core::Span::new(11, 34), // the 23-digit run
+            LexError::IntegerOverflow {
+                span: Span::new(11, 34), // the 23-digit run
             }
         );
         let kinds: Vec<_> = tokens.iter().map(|spanned| spanned.token.clone()).collect();
@@ -396,5 +474,55 @@ mod tests {
     #[test]
     fn rejects_unterminated_string_literals() {
         assert!(lex("\"text").is_err());
+        let (_, errors) = lex_with_errors("\"text");
+        assert_eq!(
+            errors,
+            vec![LexError::UnterminatedString {
+                span: Span::new(0, 5)
+            }]
+        );
+    }
+
+    #[test]
+    fn float_digit_run_overflowing_f64_is_an_error_not_infinity() {
+        let source = format!("float huge = {}.0\nint ok = 1\n", "9".repeat(400));
+        let (tokens, errors) = lex_with_errors(&source);
+
+        assert_eq!(
+            errors,
+            vec![LexError::FloatOverflow {
+                span: Span::new(13, 415)
+            }]
+        );
+        assert!(matches!(
+            tokens.last().map(|spanned| &spanned.token),
+            Some(Token::Newline)
+        ));
+    }
+
+    #[test]
+    fn multiple_bad_chars_on_one_line_are_all_reported() {
+        let (tokens, errors) = lex_with_errors("@ $\nint b = 1\n");
+
+        assert_eq!(errors.len(), 2);
+        assert_eq!(
+            errors,
+            vec![
+                LexError::InvalidCharacter {
+                    span: Span::new(0, 1)
+                },
+                LexError::InvalidCharacter {
+                    span: Span::new(2, 3)
+                },
+            ]
+        );
+        assert!(matches!(
+            tokens.first().map(|spanned| &spanned.token),
+            Some(Token::Newline)
+        ));
+        assert!(matches!(
+            tokens.last().map(|spanned| &spanned.token),
+            Some(Token::Newline)
+        ));
     }
 }

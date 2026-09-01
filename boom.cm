@@ -170,7 +170,7 @@ x y                              // Stmt::Invalid ("...but found Ident(\"y\")")
 
 int cursed = 1 @ 2               // 1 lex diagnostic; the 2 is dropped; VarDecl{Int, cursed, 1} survives
 @                                // 1 lex diagnostic; no statement at all
-@ $                              // STILL 1 lex diagnostic — everything after the first bad char on the line is swallowed
+@ $                              // 2 lex diagnostics — every bad character is recorded, not swallowed
 str oops = "unterminated         // 1 lex + 1 parse; VarDecl{Str, oops, Invalid zero-width}
 infer fragile = 1.2.3            // 1 lex diagnostic; VarDecl{Infer, fragile, FloatLit(1.2)} survives
 infer afterAt = @ 5              // 1 lex + 1 parse; VarDecl{Infer, afterAt, Invalid zero-width}

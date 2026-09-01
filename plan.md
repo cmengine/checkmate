@@ -405,7 +405,7 @@ strings are preserved in this phase** (message overhaul is Phase D).
 
 ### Steps
 
-- [ ] **C.1 — `Token` becomes `Copy`; add `Token::Eof` (review items 5 and 2).**
+- [x] **C.1 — `Token` becomes `Copy`; add `Token::Eof` (review items 5 and 2).**
   - `#[derive(Logos, Debug, PartialEq, Eq, Clone, Copy)]` on `Token` (all payloads —
     `&str`, `i64`, `f64`, unit — are `Copy`; logos supports `Copy` tokens).
     Also `#[derive(Debug, PartialEq, Eq, Clone, Copy)]` on `SpannedToken`.
@@ -424,7 +424,7 @@ strings are preserved in this phase** (message overhaul is Phase D).
     Note the zero-width span — the old fabricated `(len, len+1)` span violated the
     "spans are valid byte ranges" invariant. The CLI caret already does `.max(1)`.
 
-- [ ] **C.2 — Remove the speculative brace tokens (review item 20).**
+- [x] **C.2 — Remove the speculative brace tokens (review item 20).**
   - Delete `LBrace` and `RBrace` from `Token`.
   - **Intended behavior change:** `{` and `}` are now lex errors
     (`InvalidCharacter`), so every bare-brace fixture line changes from a parse error
@@ -437,7 +437,7 @@ strings are preserved in this phase** (message overhaul is Phase D).
     entries (`Ident`, `IntLit`, `FloatLit`, `StrLit`, `KwTrue`, `KwFalse`, `RParen`)
     are all reachable today.
 
-- [ ] **C.3 — One home for the type-keyword set (review item 4).**
+- [x] **C.3 — One home for the type-keyword set (review item 4).**
 
   ```rust
   impl<'a> Token<'a> {
@@ -456,7 +456,7 @@ strings are preserved in this phase** (message overhaul is Phase D).
   (`parse_variable_declaration`'s keyword→`Type` mapping) is a conversion, not a
   membership test — it stays a `match`.
 
-- [ ] **C.4 — Cursor helpers on `Parser` (review items 2 and 5).**
+- [x] **C.4 — Cursor helpers on `Parser` (review items 2 and 5).**
       New `Parser::new` and helpers:
 
   ```rust
@@ -578,7 +578,7 @@ strings are preserved in this phase** (message overhaul is Phase D).
     "Expected an expression, but reached end of file" string with the Eof span —
     Phase D unifies the wording.
 
-- [ ] **C.5 — Strip pass loses `source_len` (review item 2 ripple).**
+- [x] **C.5 — Strip pass loses `source_len` (review item 2 ripple).**
   - `Parser::strip_insignificant_newlines(tokens)` and
     `..._with_errors(tokens)` drop the `source_len: usize` parameter.
   - The "unbalanced opening parenthesis" error used `Span::new(source_len, source_len + 1)`;
@@ -593,7 +593,7 @@ strings are preserved in this phase** (message overhaul is Phase D).
     helpers/cases in `crates/cme-compiler/src/lib.rs` (mechanical: remove the
     `, source.len()` argument).
 
-- [ ] **C.6 — Verify no behavior changed beyond the intended brace removal.**
+- [x] **C.6 — Verify no behavior changed beyond the intended brace removal.**
       Run the suite. Expected diffs and only these:
   - Brace lines in boom.cm shift from parse to lex diagnostics; pins updated.
   - The "unbalanced opening parenthesis" span becomes `(len, len)` instead of
@@ -619,7 +619,7 @@ for everything error-reporting (preparing Phase E/F).
 
 ### Steps
 
-- [ ] **D.1 — Create `diagnostics.rs` and move `Diagnostic` there (review item 7,
+- [x] **D.1 — Create `diagnostics.rs` and move `Diagnostic` there (review item 7,
       option B).**
 
   ```rust
@@ -705,7 +705,7 @@ String`, the private `span()`, and the old `Display` — all dead or replaced), 
   - Note the deliberate `kind`/`span` duplication for lex errors
     (`Diagnostic::span() == kind.lex.span()`): the constructor maintains the invariant.
 
-- [ ] **D.2 — `Token::describe()` (review item 8, part A).**
+- [x] **D.2 — `Token::describe()` (review item 8, part A).**
       Add to `lexer.rs` (full table in Appendix A):
 
   ```rust
@@ -730,7 +730,7 @@ String`, the private `span()`, and the old `Display` — all dead or replaced), 
   Add a unit test covering every variant (exhaustive match guarantees the compiler
   reminds you when a variant is added — that is the point).
 
-- [ ] **D.3 — The `expected()` message builder (review item 8, part B).**
+- [x] **D.3 — The `expected()` message builder (review item 8, part B).**
       In `parser.rs`:
 
   ```rust
@@ -758,7 +758,7 @@ String`, the private `span()`, and the old `Display` — all dead or replaced), 
     the validator in Phase E — text unchanged), "comparisons are non-associative; add
     parentheses", "unexpected end of file".
 
-- [ ] **D.4 — Update every pinned string.**
+- [x] **D.4 — Update every pinned string.**
       All tests asserting message substrings (`"Expected a variable name"`, `"Expected '='"`,
       `"reached end of file"`, `"expected end of statement (newline)"`, ...) get the new
       strings from Appendix B. Also update the boom.cm **comment lines** that quote message
@@ -766,7 +766,7 @@ String`, the private `span()`, and the old `Display` — all dead or replaced), 
       Sweep: `rg -n "Expected" crates/` and `rg -n "reached end of file"` must return
       nothing user-facing afterwards.
 
-- [ ] **D.5 — Delete the leftovers.**
+- [x] **D.5 — Delete the leftovers.**
   - Dead `From<Diagnostic> for String` — already deleted in D.1; verify.
   - `parser.rs::parse_error` free function: fold into `expected`/`Diagnostic::parse`
     (its two remaining call sites in the strip pass become `Diagnostic::parse`
@@ -1771,3 +1771,85 @@ cme (root facade, feature-gated)
 cme-cli (workspace crate, binary `cme`, publish = false)
   commands: lex | ast <file.cm>    LineIndex-based diagnostics rendering
 ```
+
+## Agent state — Phases C and D complete
+
+### Current status
+
+- Phase D is complete.
+- Phase C is complete. The resource-exhaustion root cause was
+  `skip_to_statement_end()`: the saturating cursor never moved at `Token::Eof`,
+  while the recovery loop broke only on newline. It now breaks on both newline
+  and EOF, terminating immediately.
+- Phase C pins were updated for `Token::Eof`, braces-as-lex-errors, and the
+  zero-width `(len, len)` unbalanced-opening-parenthesis span. The `cme-compiler`
+  suite is green after bounded testing.
+- Phase C validation gate passed:
+  `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace`, and
+  `cargo test --workspace --features cli` are all green.
+
+### Already implemented
+
+Phase C edits currently in the working tree:
+
+- `Token` derives `Copy`; `SpannedToken` derives `Debug, PartialEq, Clone, Copy`.
+- Added synthetic `Token::Eof`; `lex_with_errors` appends it with zero-width span
+  `(source.len(), source.len())`.
+- Removed speculative `LBrace` and `RBrace`; brace symbols are expected to become
+  `InvalidCharacter` lex errors.
+- Added `Token::describe()` coverage for `Eof`.
+- Added `Token::is_type_keyword()` and used it in the parser/strip pass.
+- Reworked `Parser` to non-optional cursor helpers:
+  `peek`, `eof_span`, `at`, `eat`, `advance`, `at_eof`.
+- Removed `Parser::source_len` and `eof_span` field; strip-pass variants no longer
+  take `source_len`; Eof span is used for unbalanced opening parentheses.
+- Converted most parser sites to `Copy` accessors and saturating `advance`.
+- Updated CLI/test call sites mechanically for the new signatures.
+- Added/adjusted basic lexer tests for symbol set and exhaustive `describe`.
+
+### Immediate issue
+
+Running the cme-compiler test suite after these changes causes runaway CPU and
+RAM. The likely suspect is a parser recovery loop that no longer advances because
+of the new saturating `advance()` semantics, especially around `Eof`:
+
+1. `advance()` intentionally does not increment at `Eof`.
+2. Several loops call `advance()` unconditionally where the old implementation
+   always incremented, including at EOF.
+3. A statement/program loop may therefore stay positioned at `Eof`, repeatedly
+   record diagnostics/plant nodes, and never terminate or reach a fixed point.
+
+Do **not** assume the lexer is the cause first. Confirm the hot loop before
+changing code. Candidates include:
+
+- `parse_program_with_errors`
+- `parse_statement`
+- `parse_recovered_expression`
+- `skip_to_statement_end`
+- `skip_to_next_statement`
+
+Also verify that all strips/tests construct token streams ending in `Eof`; the
+new `Parser::new` debug assertion depends on it.
+
+### Safe investigation plan
+
+1. Do not run `cargo test --workspace` or broad compiler tests.
+2. Inspect parser loop termination first using source-only review.
+3. Add temporary bounded loop guards only if needed to locate the loop; remove
+   them before finalizing.
+4. Isolate with a single ignored/tiny test or a standalone binary using an empty
+   or tiny source such as `""`, `"x"`, `"int"` only, with a hard timeout.
+5. ~~Once the runaway is fixed, update Phase C pins incrementally and tick C.1–C.6.~~
+6. ~~Only then run the validation gate in short, bounded commands.~~
+
+### Remaining Phase C checklist
+
+- [x] Fix the parser recovery/EOF loop causing unbounded resource use.
+- [x] Verify empty and EOF-only token streams parse immediately.
+- [x] Update pins for intended behavior:
+  - lexer streams now end with `Token::Eof`;
+  - braces become lex errors;
+  - unbalanced opening parenthesis span becomes `(len, len)`.
+- [x] Update `boom.cm` comments/counters for brace behavior only.
+- [x] Tick C.1–C.6 and run the Phase C validation gate carefully.

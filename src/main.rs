@@ -1,7 +1,8 @@
 #[cfg(feature = "cli")]
-use cme_compiler::lexer::LexError;
 #[cfg(feature = "cli")]
-use cme_compiler::parser::{Diagnostic, Parser};
+use cme_compiler::diagnostics::Diagnostic;
+#[cfg(feature = "cli")]
+use cme_compiler::parser::Parser;
 #[cfg(feature = "cli")]
 use std::process::ExitCode;
 #[cfg(feature = "cli")]
@@ -31,7 +32,7 @@ fn run() -> Result<(), CliError> {
     match command.as_str() {
         "lex" => {
             let (tokens, errors) = cme_compiler::lexer::lex_with_errors(&source);
-            let errors = errors.into_iter().map(Diagnostic::Lex).collect::<Vec<_>>();
+            let errors = errors.into_iter().map(Diagnostic::lex).collect::<Vec<_>>();
             for token in tokens {
                 println!("{token:?}");
             }
@@ -41,13 +42,11 @@ fn run() -> Result<(), CliError> {
             let (tokens, lex_errors) = cme_compiler::lexer::lex_with_errors(&source);
             let mut errors = lex_errors
                 .into_iter()
-                .map(Diagnostic::Lex)
+                .map(Diagnostic::lex)
                 .collect::<Vec<_>>();
-            let (tokens, strip_errors) =
-                Parser::strip_insignificant_newlines_with_errors(tokens, source.len());
+            let (tokens, strip_errors) = Parser::strip_insignificant_newlines_with_errors(tokens);
             errors.extend(strip_errors);
-            let (ast, parse_errors) =
-                Parser::new(&tokens, source.len()).parse_program_with_errors();
+            let (ast, parse_errors) = Parser::new(&tokens).parse_program_with_errors();
             errors.extend(parse_errors);
 
             println!("{ast:#?}");
@@ -69,10 +68,7 @@ fn render_diagnostics(errors: Vec<Diagnostic>, source: &str) -> Result<(), CliEr
 
 #[cfg(feature = "cli")]
 fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
-    let span = match error {
-        Diagnostic::Lex(error) => error.span(),
-        Diagnostic::Parse { span, .. } => *span,
-    };
+    let span = error.span();
     let (line, column) = line_column(source, span.start);
     let line_text = source
         .split_inclusive(['\n'])
@@ -90,10 +86,7 @@ fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
     caret.push_str(&"^".repeat(width));
     format!(
         "{path}:{line}:{column}: {message}\n{line_text}\n{caret}",
-        message = match error {
-            Diagnostic::Lex(_) => "invalid token".to_string(),
-            Diagnostic::Parse { message, .. } => message.clone(),
-        }
+        message = error.message()
     )
 }
 

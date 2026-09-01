@@ -1,12 +1,14 @@
+pub mod diagnostics;
 pub mod lexer;
 pub mod parser;
+pub use diagnostics::{Diagnostic, DiagnosticKind};
 pub use logos;
 
 #[cfg(test)]
 mod tests {
     use super::lexer::{SpannedToken, Token, lex};
     use super::parser::Parser;
-    use crate::parser::Diagnostic;
+    use crate::diagnostics::Diagnostic;
     use cme_core::Span;
     use cme_core::ast::{BinaryOp, CompoundOp, Expr, Stmt, Type, UnaryOp};
 
@@ -16,7 +18,7 @@ mod tests {
 
     fn parse_statement_ok(source: &str) -> Stmt {
         let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
+        let mut parser = Parser::new(&tokens);
         let stmt = parser.parse_statement();
         assert!(
             parser.take_errors().is_empty(),
@@ -50,26 +52,32 @@ mod tests {
 
     fn parse_program(source: &str) -> Result<Vec<Stmt>, Diagnostic> {
         let tokens = spanned_tokens(source);
-        let tokens = Parser::strip_insignificant_newlines(tokens, source.len())?;
-        Parser::new(&tokens, source.len()).parse_program()
+        let tokens = Parser::strip_insignificant_newlines(tokens)?;
+        Parser::new(&tokens).parse_program()
     }
 
     fn parse_program_parts(source: &str) -> (Vec<Stmt>, Vec<Diagnostic>) {
         let (tokens, lex_errors) = crate::lexer::lex_with_errors(source);
         let mut errors = lex_errors
             .into_iter()
-            .map(Diagnostic::Lex)
+            .map(Diagnostic::lex)
             .collect::<Vec<_>>();
-        let (tokens, strip_errors) =
-            Parser::strip_insignificant_newlines_with_errors(tokens, source.len());
+        let (tokens, strip_errors) = Parser::strip_insignificant_newlines_with_errors(tokens);
         errors.extend(strip_errors);
-        let (stmts, parse_errors) = Parser::new(&tokens, source.len()).parse_program_with_errors();
+        let (stmts, parse_errors) = Parser::new(&tokens).parse_program_with_errors();
         errors.extend(parse_errors);
         (stmts, errors)
     }
 
     fn parse_program_ok(source: &str) -> Vec<Stmt> {
         parse_program(source).unwrap_or_else(|error| panic!("{source:?} should parse: {error:?}"))
+    }
+
+    fn parse_statement_parts(source: &str) -> (Stmt, Vec<Diagnostic>) {
+        let (tokens, _) = crate::lexer::lex_with_errors(source);
+        let mut parser = Parser::new(&tokens);
+        let stmt = parser.parse_statement();
+        (stmt, parser.take_errors())
     }
 
     fn var_decl(ty: Type, name: &str, expr: Expr) -> Stmt {
@@ -243,23 +251,26 @@ mod tests {
     #[test]
     fn strips_newlines_inside_parentheses() {
         let source = "(\nvalue\n)";
-        let tokens: Vec<Token> =
-            Parser::strip_insignificant_newlines(spanned_tokens(source), source.len())
-                .unwrap()
-                .into_iter()
-                .map(|spanned| spanned.token)
-                .collect();
+        let tokens: Vec<Token> = Parser::strip_insignificant_newlines(spanned_tokens(source))
+            .unwrap()
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect();
         assert_eq!(
             tokens,
-            [Token::LParen, Token::Ident("value"), Token::RParen]
+            [
+                Token::LParen,
+                Token::Ident("value"),
+                Token::RParen,
+                Token::Eof
+            ]
         );
     }
 
     #[test]
     fn preserves_statement_newlines_outside_parentheses() {
         let source = "value\nother\n";
-        let tokens =
-            Parser::strip_insignificant_newlines(spanned_tokens(source), source.len()).unwrap();
+        let tokens = Parser::strip_insignificant_newlines(spanned_tokens(source)).unwrap();
         let expected = spanned_tokens(source);
         assert_eq!(tokens, expected);
     }
@@ -267,46 +278,48 @@ mod tests {
     #[test]
     fn strips_leading_newlines_before_first_complete_statement() {
         let source = "\n\nvalue\n";
-        let tokens: Vec<Token> =
-            Parser::strip_insignificant_newlines(spanned_tokens(source), source.len())
-                .unwrap()
-                .into_iter()
-                .map(|spanned| spanned.token)
-                .collect();
-        assert_eq!(tokens, [Token::Ident("value"), Token::Newline]);
+        let tokens: Vec<Token> = Parser::strip_insignificant_newlines(spanned_tokens(source))
+            .unwrap()
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect();
+        assert_eq!(tokens, [Token::Ident("value"), Token::Newline, Token::Eof]);
     }
 
     #[test]
     fn rejects_unbalanced_brackets() {
-        assert!(Parser::strip_insignificant_newlines(spanned_tokens(")"), 1).is_err());
-        assert!(Parser::strip_insignificant_newlines(spanned_tokens("("), 1).is_err());
+        assert!(Parser::strip_insignificant_newlines(spanned_tokens(")")).is_err());
+        assert!(Parser::strip_insignificant_newlines(spanned_tokens("(")).is_err());
     }
 
     #[test]
     fn rejects_statement_without_valid_trailing_token() {
-        let error = parse_program("int a = 1 }").unwrap_err();
-        assert!(error.to_string().contains("expected end of statement"));
+        let source = "int a = 1\n*";
+        let (tokens, _) = crate::lexer::lex_with_errors(source);
+        let tokens = Parser::strip_insignificant_newlines(tokens).unwrap();
+        let mut parser = Parser::new(&tokens);
+        assert!(parser.parse_program().is_err());
     }
 
     #[test]
     fn records_invalid_statement_for_missing_variable_name() {
         let source = "int =";
         let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
+        let mut parser = Parser::new(&tokens);
 
         let stmt = parser.parse_statement();
         let errors = parser.take_errors();
 
         assert!(matches!(stmt, Stmt::Invalid { span, .. } if span == Span::new(0, source.len())));
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].to_string().contains("Expected a variable name"));
+        assert!(errors[0].to_string().contains("expected a variable name"));
     }
 
     #[test]
     fn keeps_declaration_missing_assignment_operator() {
         let source = "int count";
         let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
+        let mut parser = Parser::new(&tokens);
 
         let stmt = parser.parse_statement();
         let errors = parser.take_errors();
@@ -324,14 +337,14 @@ mod tests {
             other => panic!("expected a surviving declaration, got {other:?}"),
         }
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].to_string().contains("Expected '='"));
+        assert!(errors[0].to_string().contains("expected `=`"));
     }
 
     #[test]
     fn plants_zero_width_invalid_for_missing_expression() {
         let source = "int count =";
         let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
+        let mut parser = Parser::new(&tokens);
 
         let stmt = parser.parse_statement();
         let errors = parser.take_errors();
@@ -348,14 +361,14 @@ mod tests {
             other => panic!("expected a surviving declaration, got {other:?}"),
         }
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].to_string().contains("Expected an expression"));
+        assert!(errors[0].to_string().contains("expected an expression"));
     }
 
     #[test]
     fn records_invalid_statement_for_unknown_start() {
-        let source = "}";
+        let source = "*";
         let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
+        let mut parser = Parser::new(&tokens);
 
         let stmt = parser.parse_statement();
         let errors = parser.take_errors();
@@ -365,14 +378,14 @@ mod tests {
         assert!(
             errors[0]
                 .to_string()
-                .contains("Expected a type or assignment target")
+                .contains("expected a type or assignment target")
         );
     }
 
     #[test]
     fn parse_statement_at_eof_records_invalid() {
-        let tokens: Vec<SpannedToken> = Vec::new();
-        let mut parser = Parser::new(&tokens, 0);
+        let tokens = spanned_tokens("");
+        let mut parser = Parser::new(&tokens);
 
         let stmt = parser.parse_statement();
         let errors = parser.take_errors();
@@ -409,12 +422,8 @@ mod tests {
 
     #[test]
     fn keeps_declaration_with_invalid_initializer_region() {
-        let source = "infer value = }";
-        let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
-
-        let stmt = parser.parse_statement();
-        let errors = parser.take_errors();
+        let source = "infer value = $";
+        let (stmt, errors) = parse_statement_parts(source);
 
         match stmt {
             Stmt::VarDecl {
@@ -423,18 +432,18 @@ mod tests {
                 ..
             } => {
                 assert_eq!(name, "value");
-                assert_eq!(span, Span::new(14, 15)); // the skipped `}`
-                assert!(error.message.contains("Expected an expression"));
+                assert_eq!(span, Span::missing(source.len()));
+                assert!(error.message.contains("expected an expression"));
             }
             other => panic!("expected a surviving declaration, got {other:?}"),
         }
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].to_string().contains("Expected an expression"));
+        assert!(errors[0].to_string().contains("expected an expression"));
     }
 
     #[test]
-    fn rejects_trailing_rbrace_after_program_statement() {
-        assert!(parse_program("infer x = 1\n}").is_err());
+    fn rejects_trailing_brace_after_program_statement() {
+        assert!(parse_program("infer x = 1\n*").is_err());
     }
 
     #[test]
@@ -442,16 +451,22 @@ mod tests {
         let (stmts, errors) = parse_program_parts("@\nint b = 1\n");
 
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], Diagnostic::Lex(_)));
+        assert!(matches!(
+            errors[0].kind(),
+            crate::diagnostics::DiagnosticKind::Lex(_)
+        ));
         assert_eq!(stmts, vec![var_decl(Type::Int, "b", Expr::IntLit(1))]);
     }
 
     #[test]
     fn recovers_to_next_statement_after_parse_error() {
-        let (stmts, errors) = parse_program_parts("int a = }\nint b = 2\n");
+        let (stmts, errors) = parse_program_parts("int a = str x\nint b = 2\n");
 
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0], Diagnostic::Parse { .. }));
+        assert!(matches!(
+            errors[0].kind(),
+            crate::diagnostics::DiagnosticKind::Parse
+        ));
         assert_eq!(stmts.len(), 2);
         assert!(matches!(
             &stmts[0],
@@ -472,7 +487,7 @@ mod tests {
         let (stmts, errors) = parse_program_parts("int i = str wow how\nint j = 2\n");
 
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].to_string().contains("Expected an expression"));
+        assert!(errors[0].to_string().contains("expected an expression"));
         assert_eq!(stmts.len(), 2);
 
         match &stmts[0] {
@@ -484,7 +499,7 @@ mod tests {
                 assert_eq!(name, "i");
                 assert_eq!(*span, Span::new(8, 19)); // covers "str wow how"
                 assert_eq!(error.span, Span::new(8, 11)); // points at the `str` token
-                assert!(error.message.contains("Expected an expression"));
+                assert!(error.message.contains("expected an expression"));
             }
             other => panic!("expected a surviving declaration, got {other:?}"),
         }
@@ -496,7 +511,7 @@ mod tests {
         let (stmts, errors) = parse_program_parts("int count =");
 
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].to_string().contains("Expected an expression"));
+        assert!(errors[0].to_string().contains("expected an expression"));
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
             Stmt::VarDecl {
@@ -517,8 +532,7 @@ mod tests {
         // missing initializer is planted at the newline position and the next
         // statement survives untouched.
         let source = "int i = \nint j = 2\n";
-        let (stmts, errors) =
-            Parser::new(&spanned_tokens(source), source.len()).parse_program_with_errors();
+        let (stmts, errors) = Parser::new(&spanned_tokens(source)).parse_program_with_errors();
 
         assert_eq!(errors.len(), 1);
         assert_eq!(stmts.len(), 2);
@@ -539,11 +553,10 @@ mod tests {
     #[test]
     fn keeps_declaration_missing_assignment_operator_before_newline() {
         let source = "int i\nint j = 2\n";
-        let (stmts, errors) =
-            Parser::new(&spanned_tokens(source), source.len()).parse_program_with_errors();
+        let (stmts, errors) = Parser::new(&spanned_tokens(source)).parse_program_with_errors();
 
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].to_string().contains("Expected '='"));
+        assert!(errors[0].to_string().contains("expected `=`"));
         assert_eq!(stmts.len(), 2);
         assert!(matches!(
             &stmts[0],
@@ -558,16 +571,16 @@ mod tests {
 
     #[test]
     fn records_invalid_statement_for_garbage_head() {
-        // `}` cannot start a statement and (unlike an operator line) the
+        // `*` cannot start a statement and (unlike an operator line) the
         // strip pass keeps the following newline, so the next statement
         // survives as its own entry.
-        let (stmts, errors) = parse_program_parts("}\nint j = 2\n");
+        let (stmts, errors) = parse_program_parts("*\nint j = 2\n");
 
         assert_eq!(errors.len(), 1);
         assert!(
             errors[0]
                 .to_string()
-                .contains("Expected a type or assignment target")
+                .contains("expected a type or assignment target")
         );
         assert_eq!(stmts.len(), 2);
         assert!(matches!(
@@ -585,7 +598,7 @@ mod tests {
         assert!(
             errors[0]
                 .to_string()
-                .contains("Expected assignment operator")
+                .contains("expected an assignment operator")
         );
         assert_eq!(stmts.len(), 2);
         assert!(matches!(&stmts[0], Stmt::Invalid { .. }));
@@ -596,7 +609,7 @@ mod tests {
     fn keeps_compound_assignment_with_invalid_rhs() {
         let source = "x += str y";
         let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
+        let mut parser = Parser::new(&tokens);
 
         let stmt = parser.parse_statement();
         let errors = parser.take_errors();
@@ -642,7 +655,7 @@ mod tests {
     #[test]
     fn rejects_empty_parenthesized_statement() {
         let error = parse_program("infer value = ()").unwrap_err();
-        assert!(error.to_string().contains("Expected an expression"));
+        assert!(error.to_string().contains("expected an expression"));
     }
 
     #[test]
@@ -654,8 +667,8 @@ mod tests {
     #[test]
     fn parse_statement_does_not_require_all_input_to_be_consumed() {
         let source = "infer a = 1 }";
-        let tokens = spanned_tokens(source);
-        let mut parser = Parser::new(&tokens, source.len());
+        let (tokens, _) = crate::lexer::lex_with_errors(source);
+        let mut parser = Parser::new(&tokens);
 
         assert_eq!(
             parser.parse_statement(),
@@ -673,7 +686,7 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(
             errors[0].to_string(),
-            "Expected an expression, but found end of statement"
+            "expected an expression, but found end of statement"
         );
         assert_eq!(stmts.len(), 2);
         match &stmts[0] {
@@ -699,7 +712,7 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(
             errors[0].to_string(),
-            "Expected a variable name, but found Newline"
+            "expected a variable name, but found end of statement"
         );
         assert!(matches!(&stmts[0], Stmt::Invalid { .. }));
         assert_eq!(stmts[1], var_decl(Type::Int, "j", Expr::IntLit(2)));
@@ -715,11 +728,11 @@ mod tests {
         assert_eq!(errors.len(), 2);
         assert_eq!(
             errors[0].to_string(),
-            "Expected an expression, but found end of statement"
+            "expected an expression, but found end of statement"
         );
         assert_eq!(
             errors[1].to_string(),
-            "Expected '=', but found end of statement"
+            "expected `=`, but found end of statement"
         );
         match &stmts[0] {
             Stmt::VarDecl {
@@ -786,8 +799,8 @@ mod tests {
         // deliberately changes.
         let (stmts, errors) = parse_program_parts(BOOM_CM);
 
-        assert_eq!(errors.len(), 58, "diagnostics: {errors:#?}");
-        assert_eq!(stmts.len(), 62, "statements: {stmts:#?}");
+        assert_eq!(errors.len(), 60, "diagnostics: {errors:#?}");
+        assert_eq!(stmts.len(), 60, "statements: {stmts:#?}");
 
         let labels: Vec<String> = stmts.iter().map(statement_label).collect();
         assert_eq!(
@@ -819,12 +832,10 @@ mod tests {
                 "assign:score",
                 "compound:score",
                 "compound:score",
-                "compound:score",
                 "var:fence:Int",
                 "compound:score",
                 "compound:score",
-                // §6 garbage heads (the `)` line is dropped by the strip pass)
-                "invalid",
+                // §6 garbage heads (the `}` and `)` lines are dropped by the lexer/strip pass)
                 "invalid",
                 "invalid",
                 "invalid",
@@ -874,7 +885,7 @@ mod tests {
         );
 
         // Zero-width "missing node" placements: nothing was ever typed there.
-        for index in [7usize, 8, 10, 38, 40, 41, 49] {
+        for index in [3usize, 7, 8, 10, 36, 38, 39, 47] {
             let span = invalid_span(&stmts[index])
                 .unwrap_or_else(|| panic!("statement {index} should carry an Invalid"));
             assert_eq!(
@@ -884,7 +895,7 @@ mod tests {
         }
 
         // Skipped-region placements: real source was consumed and covered.
-        for index in [2usize, 3, 4, 5, 6, 12, 14, 48, 50, 56, 61] {
+        for index in [2usize, 4, 5, 6, 12, 14, 46, 48, 54, 59] {
             let span = invalid_span(&stmts[index])
                 .unwrap_or_else(|| panic!("statement {index} should carry an Invalid"));
             assert!(
@@ -899,7 +910,7 @@ mod tests {
         // now recorded twice, one unterminated string, the `1.2.3` float
         // shape, and the overflow digit run).
         assert!(matches!(
-            &stmts[42],
+            &stmts[40],
             Stmt::VarDecl {
                 expr: Expr::Binary {
                     op: BinaryOp::Add,
@@ -911,9 +922,11 @@ mod tests {
         assert_eq!(
             errors
                 .iter()
-                .filter(|error| matches!(error, Diagnostic::Lex(_)))
+                .filter(|error| {
+                    matches!(error.kind(), crate::diagnostics::DiagnosticKind::Lex(_))
+                })
                 .count(),
-            8
+            14
         );
         assert_eq!(
             errors

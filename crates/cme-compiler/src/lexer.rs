@@ -3,7 +3,7 @@ use std::fmt;
 use cme_core::Span;
 use logos::Logos;
 
-#[derive(Logos, Debug, PartialEq, Clone)]
+#[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(skip r"[ \t\f]+")]
 #[logos(skip r"//[^\r\n]*")]
 pub enum Token<'a> {
@@ -59,10 +59,6 @@ pub enum Token<'a> {
     LParen,
     #[token(")")]
     RParen,
-    #[token("{")]
-    LBrace,
-    #[token("}")]
-    RBrace,
 
     // Identifiers (e.g., variable names, function names)
     // This regex matches a letter or underscore, followed by any number of letters, numbers, or underscores.
@@ -101,9 +97,13 @@ pub enum Token<'a> {
         |lex| lex.slice().parse::<f64>().ok().filter(|v| v.is_finite()).ok_or(())
     )]
     FloatLit(f64),
+
+    /// Synthetic end-of-input marker appended by the lexer. Never produced by a
+    /// regex; the parser relies on it to make `advance` infallible.
+    Eof,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct SpannedToken<'a> {
     pub token: Token<'a>,
     pub span: Span,
@@ -130,6 +130,58 @@ impl LexError {
             | LexError::IntegerOverflow { span }
             | LexError::FloatOverflow { span } => *span,
         }
+    }
+}
+
+impl<'a> Token<'a> {
+    /// A human-readable name for use in diagnostics.
+    pub fn describe(&self) -> String {
+        match self {
+            Token::Ident(name) => format!("identifier `{name}`"),
+            Token::StrLit(_) => "string literal".into(),
+            Token::IntLit(value) => format!("integer literal `{value}`"),
+            Token::FloatLit(value) => format!("float literal `{value}`"),
+            Token::Newline => "end of statement".into(),
+            Token::KwInt => "`int`".into(),
+            Token::KwFloat => "`float`".into(),
+            Token::KwStr => "`str`".into(),
+            Token::KwBool => "`bool`".into(),
+            Token::KwInfer => "`infer`".into(),
+            Token::KwReturn => "`return`".into(),
+            Token::KwTrue => "`true`".into(),
+            Token::KwFalse => "`false`".into(),
+            Token::Assign => "`=`".into(),
+            Token::AddAssign => "`+=`".into(),
+            Token::SubAssign => "`-=`".into(),
+            Token::MulAssign => "`*=`".into(),
+            Token::DivAssign => "`/=`".into(),
+            Token::RemAssign => "`%=`".into(),
+            Token::Plus => "`+`".into(),
+            Token::Minus => "`-`".into(),
+            Token::Star => "`*`".into(),
+            Token::Slash => "`/`".into(),
+            Token::Percent => "`%`".into(),
+            Token::And => "`&&`".into(),
+            Token::Or => "`||`".into(),
+            Token::Not => "`!`".into(),
+            Token::Eq => "`==`".into(),
+            Token::Ne => "`!=`".into(),
+            Token::Le => "`<=`".into(),
+            Token::Ge => "`>=`".into(),
+            Token::Lt => "`<`".into(),
+            Token::Gt => "`>`".into(),
+            Token::LParen => "`(`".into(),
+            Token::RParen => "`)`".into(),
+            Token::Eof => "end of file".into(),
+        }
+    }
+
+    /// The keywords that can start a variable declaration.
+    pub(crate) fn is_type_keyword(&self) -> bool {
+        matches!(
+            self,
+            Token::KwInt | Token::KwFloat | Token::KwStr | Token::KwBool | Token::KwInfer
+        )
     }
 }
 
@@ -187,7 +239,6 @@ pub fn lex_with_errors(source: &str) -> (Vec<SpannedToken<'_>>, Vec<LexError>) {
     let mut errors = Vec::new();
 
     let mut lexer = Token::lexer(source);
-
     while let Some(result) = lexer.next() {
         let span = Span::new(lexer.span().start, lexer.span().end);
         match result {
@@ -203,6 +254,11 @@ pub fn lex_with_errors(source: &str) -> (Vec<SpannedToken<'_>>, Vec<LexError>) {
             }
         }
     }
+    let eof_span = Span::new(source.len(), source.len());
+    tokens.push(SpannedToken {
+        token: Token::Eof,
+        span: eof_span,
+    });
 
     (tokens, errors)
 }
@@ -275,6 +331,7 @@ mod tests {
                 Token::Assign,
                 Token::IntLit(1),
                 Token::Newline,
+                Token::Eof,
             ]
         );
     }
@@ -293,6 +350,7 @@ mod tests {
                 Token::KwBool,
                 Token::KwTrue,
                 Token::KwFalse,
+                Token::Eof,
             ]
         );
     }
@@ -307,23 +365,64 @@ mod tests {
                 Token::Ident("false_x"),
                 Token::Ident("trueish"),
                 Token::Ident("falseish"),
+                Token::Eof,
             ]
         );
     }
 
     #[test]
     fn lexes_symbols() {
-        let source = "= ( ) { }";
+        let source = "= ( )";
         assert_eq!(
             lex_ok(source),
-            vec![
-                Token::Assign,
-                Token::LParen,
-                Token::RParen,
-                Token::LBrace,
-                Token::RBrace,
-            ]
+            vec![Token::Assign, Token::LParen, Token::RParen, Token::Eof]
         );
+    }
+
+    #[test]
+    fn describes_every_token_for_diagnostics() {
+        let cases: Vec<(Token<'_>, &str)> = vec![
+            (Token::Ident("x"), "identifier `x`"),
+            (Token::StrLit("\"x\""), "string literal"),
+            (Token::IntLit(42), "integer literal `42`"),
+            (Token::FloatLit(4.2), "float literal `4.2`"),
+            (Token::Newline, "end of statement"),
+            (Token::KwInt, "`int`"),
+            (Token::KwFloat, "`float`"),
+            (Token::KwStr, "`str`"),
+            (Token::KwBool, "`bool`"),
+            (Token::KwInfer, "`infer`"),
+            (Token::KwReturn, "`return`"),
+            (Token::KwTrue, "`true`"),
+            (Token::KwFalse, "`false`"),
+            (Token::Assign, "`=`"),
+            (Token::AddAssign, "`+=`"),
+            (Token::SubAssign, "`-=`"),
+            (Token::MulAssign, "`*=`"),
+            (Token::DivAssign, "`/=`"),
+            (Token::RemAssign, "`%=`"),
+            (Token::Plus, "`+`"),
+            (Token::Minus, "`-`"),
+            (Token::Star, "`*`"),
+            (Token::Slash, "`/`"),
+            (Token::Percent, "`%`"),
+            (Token::And, "`&&`"),
+            (Token::Or, "`||`"),
+            (Token::Not, "`!`"),
+            (Token::Eq, "`==`"),
+            (Token::Ne, "`!=`"),
+            (Token::Le, "`<=`"),
+            (Token::Ge, "`>=`"),
+            (Token::Lt, "`<`"),
+            (Token::Gt, "`>`"),
+            (Token::LParen, "`(`"),
+            (Token::RParen, "`)`"),
+            (Token::Eof, "end of file"),
+        ];
+
+        for (token, description) in cases {
+            assert_eq!(token.describe(), description);
+        }
     }
 
     #[test]
@@ -337,6 +436,7 @@ mod tests {
                 Token::Ident("value_1"),
                 Token::Ident("snake_case"),
                 Token::Ident("CamelCase"),
+                Token::Eof,
             ]
         );
     }
@@ -350,6 +450,7 @@ mod tests {
                 Token::Ident("intx"),
                 Token::Ident("infer_"),
                 Token::Ident("return_x"),
+                Token::Eof,
             ]
         );
     }
@@ -357,7 +458,10 @@ mod tests {
     #[test]
     fn lexes_integer_literals_without_digit_separators() {
         let source = "0 42";
-        assert_eq!(lex_ok(source), vec![Token::IntLit(0), Token::IntLit(42)]);
+        assert_eq!(
+            lex_ok(source),
+            vec![Token::IntLit(0), Token::IntLit(42), Token::Eof]
+        );
     }
 
     #[test]
@@ -369,6 +473,7 @@ mod tests {
                 Token::FloatLit(0.0),
                 Token::FloatLit(42.5),
                 Token::FloatLit(123.0001),
+                Token::Eof,
             ]
         );
     }
@@ -376,7 +481,10 @@ mod tests {
     #[test]
     fn lexes_adjacent_number_and_symbol() {
         let source = "12.5)";
-        assert_eq!(lex_ok(source), vec![Token::FloatLit(12.5), Token::RParen]);
+        assert_eq!(
+            lex_ok(source),
+            vec![Token::FloatLit(12.5), Token::RParen, Token::Eof]
+        );
     }
 
     #[test]
@@ -384,7 +492,12 @@ mod tests {
         let source = "a\n\n\r\nb";
         assert_eq!(
             lex_ok(source),
-            vec![Token::Ident("a"), Token::Newline, Token::Ident("b"),]
+            vec![
+                Token::Ident("a"),
+                Token::Newline,
+                Token::Ident("b"),
+                Token::Eof,
+            ]
         );
     }
 
@@ -393,7 +506,13 @@ mod tests {
         let source = "int // ignored\n\t// another comment\nfloat";
         assert_eq!(
             lex_ok(source),
-            vec![Token::KwInt, Token::Newline, Token::Newline, Token::KwFloat]
+            vec![
+                Token::KwInt,
+                Token::Newline,
+                Token::Newline,
+                Token::KwFloat,
+                Token::Eof,
+            ]
         );
     }
 
@@ -402,16 +521,21 @@ mod tests {
         let source = "a // comment\nb";
         assert_eq!(
             lex_ok(source),
-            vec![Token::Ident("a"), Token::Newline, Token::Ident("b")]
+            vec![
+                Token::Ident("a"),
+                Token::Newline,
+                Token::Ident("b"),
+                Token::Eof,
+            ]
         );
     }
 
     #[test]
-    fn empty_source_produces_no_tokens() {
-        assert!(lex_ok("").is_empty());
+    fn empty_source_produces_only_eof() {
+        assert_eq!(lex_ok(""), vec![Token::Eof]);
         assert_eq!(
             lex_ok(" \t \n // only whitespace and comments\n"),
-            vec![Token::Newline, Token::Newline]
+            vec![Token::Newline, Token::Newline, Token::Eof]
         );
     }
 
@@ -435,7 +559,7 @@ mod tests {
                 span: Span::new(11, 34), // the 23-digit run
             }
         );
-        let kinds: Vec<_> = tokens.iter().map(|spanned| spanned.token.clone()).collect();
+        let kinds: Vec<_> = tokens.iter().map(|spanned| spanned.token).collect();
         assert!(matches!(
             kinds.as_slice(),
             [
@@ -448,6 +572,7 @@ mod tests {
                 Token::Assign,
                 Token::IntLit(1),
                 Token::Newline,
+                Token::Eof,
             ]
         ));
 
@@ -456,6 +581,7 @@ mod tests {
         let (tokens, errors) = crate::lexer::lex_with_errors(source);
         assert!(errors.is_empty());
         assert_eq!(tokens[0].token, Token::IntLit(i64::MAX));
+        assert_eq!(tokens[1].token, Token::Eof);
     }
 
     #[test]
@@ -467,6 +593,7 @@ mod tests {
                 Token::StrLit("\"text\""),
                 Token::StrLit("\"\""),
                 Token::StrLit("\"spaces and symbols!\""),
+                Token::Eof,
             ]
         );
     }
@@ -496,7 +623,7 @@ mod tests {
         );
         assert!(matches!(
             tokens.last().map(|spanned| &spanned.token),
-            Some(Token::Newline)
+            Some(Token::Eof)
         ));
     }
 
@@ -522,7 +649,7 @@ mod tests {
         ));
         assert!(matches!(
             tokens.last().map(|spanned| &spanned.token),
-            Some(Token::Newline)
+            Some(Token::Eof)
         ));
     }
 }

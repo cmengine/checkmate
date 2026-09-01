@@ -1,48 +1,12 @@
-use crate::lexer::{LexError, SpannedToken, Token};
-use std::fmt;
+use crate::diagnostics::Diagnostic;
+use crate::lexer::{SpannedToken, Token};
 
 use cme_core::Span;
 use cme_core::ast::{BinaryOp, CompoundOp, Expr, Stmt, SyntaxError, Type, UnaryOp};
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Diagnostic {
-    Lex(LexError),
-    Parse { message: String, span: Span },
-}
-
-impl From<Diagnostic> for String {
-    fn from(value: Diagnostic) -> Self {
-        match value {
-            Diagnostic::Lex(_) => "invalid token".to_string(),
-            Diagnostic::Parse { message, .. } => message,
-        }
-    }
-}
-
-impl Diagnostic {
-    /// The precise source location of this diagnostic (offending token, or the
-    /// position where something was expected).
-    fn span(&self) -> Span {
-        match self {
-            Diagnostic::Lex(error) => error.span(),
-            Diagnostic::Parse { span, .. } => *span,
-        }
-    }
-}
-
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Diagnostic::Lex(_) => write!(formatter, "invalid token"),
-            Diagnostic::Parse { message, .. } => write!(formatter, "{message}"),
-        }
-    }
-}
-
 pub struct Parser<'a, 'src> {
     tokens: &'a [SpannedToken<'src>],
     pos: usize,
-    eof_span: Span,
     /// Diagnostics recorded so far. Recoverable errors are pushed here while
     /// an `Invalid` node is planted into the AST at the failure site, so the
     /// parser never stops and always produces the fullest possible tree.
@@ -50,11 +14,14 @@ pub struct Parser<'a, 'src> {
 }
 
 impl<'a, 'src> Parser<'a, 'src> {
-    pub fn new(tokens: &'a [SpannedToken<'src>], source_len: usize) -> Self {
+    pub fn new(tokens: &'a [SpannedToken<'src>]) -> Self {
+        debug_assert!(
+            matches!(tokens.last(), Some(token) if token.token == Token::Eof),
+            "token stream must end with a synthetic Eof"
+        );
         Self {
             tokens,
             pos: 0,
-            eof_span: Span::new(source_len, source_len + 1),
             errors: Vec::new(),
         }
     }
@@ -63,10 +30,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// for embedding into an `Invalid` AST node.
     fn record(&mut self, message: impl Into<String>, span: Span) -> SyntaxError {
         let message = message.into();
-        self.errors.push(Diagnostic::Parse {
-            message: message.clone(),
-            span,
-        });
+        self.errors.push(Diagnostic::parse(message.clone(), span));
         SyntaxError { message, span }
     }
 
@@ -76,33 +40,47 @@ impl<'a, 'src> Parser<'a, 'src> {
         std::mem::take(&mut self.errors)
     }
 
-    fn peek(&self) -> Option<&SpannedToken<'src>> {
-        self.tokens.get(self.pos)
+    /// Current token. Always valid: the stream ends with `Eof`.
+    fn peek(&self) -> &SpannedToken<'src> {
+        &self.tokens[self.pos]
     }
 
-    fn advance(&mut self) -> Option<&SpannedToken<'src>> {
-        let token = self.tokens.get(self.pos);
-        self.pos += 1;
+    /// The end-of-file span (zero-width, at end of input).
+    fn eof_span(&self) -> Span {
+        self.tokens
+            .last()
+            .map_or(Span::new(0, 0), |token| token.span)
+    }
+
+    /// True when the current token is `kind` (use with unit variants).
+    fn at(&self, kind: Token<'src>) -> bool {
+        self.peek().token == kind
+    }
+
+    /// Consumes and returns the current token; saturates at `Eof`.
+    fn advance(&mut self) -> SpannedToken<'src> {
+        let token = self.tokens[self.pos];
+        if token.token != Token::Eof {
+            self.pos += 1;
+        }
         token
     }
 
+    fn at_eof(&self) -> bool {
+        self.at(Token::Eof)
+    }
+
     fn skip_newlines(&mut self) {
-        while matches!(
-            self.peek(),
-            Some(SpannedToken {
-                token: Token::Newline,
-                ..
-            })
-        ) {
+        while self.at(Token::Newline) {
             self.pos += 1;
         }
     }
 
-    fn parse_error(message: impl Into<String>, span: Span) -> Diagnostic {
-        Diagnostic::Parse {
-            message: message.into(),
+    fn expected(what: &str, found: &Token<'_>, span: Span) -> Diagnostic {
+        Diagnostic::parse(
+            format!("expected {what}, but found {}", found.describe()),
             span,
-        }
+        )
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
@@ -125,26 +103,20 @@ impl<'a, 'src> Parser<'a, 'src> {
 
         loop {
             self.skip_newlines();
-            if self.peek().is_none() {
+            if self.at_eof() {
                 break;
             }
 
             stmts.push(self.parse_statement());
 
-            match self.peek().cloned() {
-                Some(SpannedToken {
-                    token: Token::Newline,
-                    ..
-                }) => self.pos += 1,
-                None => {}
-                Some(other) => {
-                    self.errors.push(Diagnostic::Parse {
-                        message: format!(
-                            "expected end of statement (newline), found {:?}",
-                            other.token
-                        ),
-                        span: other.span,
-                    });
+            let token = self.peek().token;
+            match token {
+                Token::Newline => self.pos += 1,
+                Token::Eof => {}
+                _ => {
+                    let span = self.peek().span;
+                    self.errors
+                        .push(Self::expected("end of statement", &token, span));
                     self.skip_to_next_statement();
                 }
             }
@@ -156,9 +128,8 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     pub fn strip_insignificant_newlines(
         tokens: Vec<SpannedToken>,
-        source_len: usize,
     ) -> Result<Vec<SpannedToken>, Diagnostic> {
-        let (tokens, errors) = Self::strip_insignificant_newlines_with_errors(tokens, source_len);
+        let (tokens, errors) = Self::strip_insignificant_newlines_with_errors(tokens);
         match errors.into_iter().next() {
             Some(error) => Err(error),
             None => Ok(tokens),
@@ -167,7 +138,6 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     pub fn strip_insignificant_newlines_with_errors(
         tokens: Vec<SpannedToken>,
-        source_len: usize,
     ) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
         let mut out = Vec::with_capacity(tokens.len());
         let mut errors = Vec::new();
@@ -177,7 +147,7 @@ impl<'a, 'src> Parser<'a, 'src> {
 
         let mut index = 0usize;
         while index < tokens.len() {
-            let SpannedToken { token: tok, span } = tokens[index].clone();
+            let SpannedToken { token: tok, span } = tokens[index];
             match tok {
                 Token::Newline => {
                     // A newline survives at depth zero when it genuinely ends
@@ -190,16 +160,9 @@ impl<'a, 'src> Parser<'a, 'src> {
                     //     must not swallow the declaration typed below it.
                     // Without this, recovery would fuse the broken line with
                     // the next one and eat the very declaration an LSP needs.
-                    let next_starts_statement = tokens.get(index + 1).is_some_and(|next| {
-                        matches!(
-                            next.token,
-                            Token::KwInt
-                                | Token::KwFloat
-                                | Token::KwStr
-                                | Token::KwBool
-                                | Token::KwInfer
-                        )
-                    });
+                    let next_starts_statement = tokens
+                        .get(index + 1)
+                        .is_some_and(|next| next.token.is_type_keyword());
                     if bracket_depth == 0
                         && (prev_can_end || prev_was_type_kw || next_starts_statement)
                     {
@@ -216,7 +179,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 Token::RParen => {
                     if bracket_depth == 0 {
-                        errors.push(Self::parse_error("unbalanced closing parenthesis", span));
+                        errors.push(Diagnostic::parse("unbalanced closing parenthesis", span));
                         if let Some(token) = skip_to_next_statement(&tokens, &mut index) {
                             out.push(token);
                         }
@@ -232,14 +195,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 _ => {
                     prev_can_end = can_end_statement(&tok);
-                    prev_was_type_kw = matches!(
-                        tok,
-                        Token::KwInt
-                            | Token::KwFloat
-                            | Token::KwStr
-                            | Token::KwBool
-                            | Token::KwInfer
-                    );
+                    prev_was_type_kw = tok.is_type_keyword();
                     out.push(SpannedToken { token: tok, span });
                 }
             }
@@ -247,9 +203,13 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
 
         if bracket_depth != 0 {
-            errors.push(Self::parse_error(
+            let eof_span = tokens
+                .last()
+                .filter(|token| token.token == Token::Eof)
+                .map_or(Span::new(0, 0), |token| token.span);
+            errors.push(Diagnostic::parse(
                 "unbalanced opening parenthesis",
-                Span::new(source_len, source_len + 1),
+                eof_span,
             ));
         }
 
@@ -265,12 +225,13 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// end offset of the consumed region, never less than `end`.
     fn skip_to_statement_end(&mut self, end: usize) -> usize {
         let mut end = end;
-        while let Some(token) = self.peek().cloned() {
-            if matches!(token.token, Token::Newline) {
+        loop {
+            let token = *self.peek();
+            if matches!(token.token, Token::Newline | Token::Eof) {
                 break;
             }
             end = end.max(token.span.end);
-            self.pos += 1;
+            self.advance();
         }
         end
     }
@@ -286,21 +247,10 @@ impl<'a, 'src> Parser<'a, 'src> {
         match self.parse_expression() {
             Ok(expr) => expr,
             Err(diagnostic) => {
-                let start = self
-                    .tokens
-                    .get(start_pos)
-                    .map_or(self.eof_span.start, |token| token.span.start);
+                let start = self.tokens[start_pos].span.start;
                 let mut end = start;
                 if self.pos > start_pos {
-                    // `advance` bumps `pos` even when it returns None, so a
-                    // failure at end of file leaves `pos - 1` one past the
-                    // array; fall back to the final token, which was
-                    // necessarily consumed.
-                    if let Some(token) =
-                        self.tokens.get(self.pos - 1).or_else(|| self.tokens.last())
-                    {
-                        end = token.span.end;
-                    }
+                    end = self.tokens[self.pos - 1].span.end;
                 }
                 let end = self.skip_to_statement_end(end);
                 let error = SyntaxError::new(diagnostic.to_string(), diagnostic.span());
@@ -330,10 +280,11 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     fn require_token(&mut self, message: &str) -> Result<SpannedToken<'src>, Diagnostic> {
-        self.advance().cloned().ok_or(Diagnostic::Parse {
-            message: message.to_string(),
-            span: self.eof_span,
-        })
+        let token = self.advance();
+        if token.token == Token::Eof {
+            return Err(Diagnostic::parse(message, token.span));
+        }
+        Ok(token)
     }
 
     /// Parses one statement. Infallible: a statement whose structure cannot
@@ -341,33 +292,33 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// and its diagnostic is recorded for [`Self::take_errors`] or
     /// [`Self::parse_program_with_errors`].
     pub fn parse_statement(&mut self) -> Stmt {
-        let Some(first) = self.peek().cloned() else {
-            let error = self.record("unexpected end of file", self.eof_span);
+        if self.at_eof() {
+            let eof_span = self.eof_span();
+            let error = self.record("unexpected end of file", eof_span);
             return Stmt::Invalid {
                 error,
-                span: Span::missing(self.eof_span.start),
+                span: Span::missing(eof_span.start),
             };
-        };
-        self.pos += 1;
+        }
+        let first = self.advance();
 
-        if matches!(
-            first.token,
-            Token::KwInt | Token::KwFloat | Token::KwStr | Token::KwBool | Token::KwInfer
-        ) {
+        if first.token.is_type_keyword() {
             return self.parse_variable_declaration(first);
         }
 
         if let Token::Ident(name) = &first.token {
-            return self.parse_assignment_statement(first.clone(), name.to_string());
+            return self.parse_assignment_statement(first, name.to_string());
         }
 
-        let error = self.record(
+        let error = SyntaxError::new(
             format!(
-                "Expected a type or assignment target, but found {:?}",
-                first.token
+                "expected a type or assignment target, but found {}",
+                first.token.describe()
             ),
             first.span,
         );
+        self.errors
+            .push(Diagnostic::parse(error.message.clone(), first.span));
         let end = self.skip_to_statement_end(first.span.end);
         Stmt::Invalid {
             error,
@@ -385,33 +336,28 @@ impl<'a, 'src> Parser<'a, 'src> {
             _ => unreachable!("the caller only dispatches type keywords"),
         };
 
-        let name = match self.peek().cloned() {
-            Some(SpannedToken {
+        let name = match *self.peek() {
+            SpannedToken {
                 token: Token::Ident(name),
                 ..
-            }) => {
-                self.pos += 1;
+            } => {
+                self.advance();
                 name.to_string()
             }
-            Some(other) => {
-                let error = self.record(
-                    format!("Expected a variable name, but found {:?}", other.token),
+            other => {
+                let error = SyntaxError::new(
+                    format!(
+                        "expected a variable name, but found {}",
+                        other.token.describe()
+                    ),
                     other.span,
                 );
+                self.errors
+                    .push(Diagnostic::parse(error.message.clone(), other.span));
                 let end = self.skip_to_statement_end(other.span.end);
                 return Stmt::Invalid {
                     error,
                     span: Span::new(type_token.span.start, end),
-                };
-            }
-            None => {
-                let error = self.record(
-                    "Expected a variable name, but reached end of file",
-                    self.eof_span,
-                );
-                return Stmt::Invalid {
-                    error,
-                    span: Span::new(type_token.span.start, type_token.span.end),
                 };
             }
         };
@@ -419,35 +365,36 @@ impl<'a, 'src> Parser<'a, 'src> {
         // A declaration whose header simply ends (`int i` at a newline or end
         // of file) keeps the declared variable for tooling, with a zero-width
         // invalid initializer marking the missing `= value`.
-        match self.peek().cloned() {
-            None => {
+        match self.peek().token {
+            Token::Newline => {
+                let span = self.peek().span;
                 let expr = self.missing_expression(
-                    "Expected '=', but reached end of file",
-                    self.eof_span,
-                    self.eof_span.start,
-                );
-                return Stmt::VarDecl { ty, name, expr };
-            }
-            Some(SpannedToken {
-                token: Token::Newline,
-                span,
-            }) => {
-                let expr = self.missing_expression(
-                    "Expected '=', but found end of statement",
+                    "expected `=`, but found end of statement",
                     span,
                     span.start,
                 );
                 return Stmt::VarDecl { ty, name, expr };
             }
-            Some(SpannedToken {
-                token: Token::Assign,
-                ..
-            }) => self.pos += 1,
-            Some(other) => {
-                let error = self.record(
-                    format!("Expected '=', but found {:?}", other.token),
+            Token::Eof => {
+                let span = self.eof_span();
+                let expr = self.missing_expression(
+                    "expected `=`, but found end of file",
+                    span,
+                    span.start,
+                );
+                return Stmt::VarDecl { ty, name, expr };
+            }
+            Token::Assign => {
+                self.advance();
+            }
+            _ => {
+                let other = *self.peek();
+                let error = SyntaxError::new(
+                    format!("expected `=`, but found {}", other.token.describe()),
                     other.span,
                 );
+                self.errors
+                    .push(Diagnostic::parse(error.message.clone(), other.span));
                 let end = self.skip_to_statement_end(other.span.end);
                 return Stmt::Invalid {
                     error,
@@ -461,16 +408,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     fn parse_assignment_statement(&mut self, target: SpannedToken<'src>, name: String) -> Stmt {
-        let Some(operator) = self.peek().cloned() else {
-            let error = self.record(
-                "Expected assignment operator, but reached end of file",
-                self.eof_span,
-            );
-            return Stmt::Invalid {
-                error,
-                span: Span::new(target.span.start, target.span.end),
-            };
-        };
+        let operator = *self.peek();
 
         let compound = match operator.token {
             Token::Assign => None,
@@ -482,10 +420,15 @@ impl<'a, 'src> Parser<'a, 'src> {
             other => {
                 // A bare identifier with no operator has no recoverable
                 // statement structure; record it as an invalid statement.
-                let error = self.record(
-                    format!("Expected assignment operator, but found {:?}", other),
+                let error = SyntaxError::new(
+                    format!(
+                        "expected an assignment operator, but found {}",
+                        other.describe()
+                    ),
                     operator.span,
                 );
+                self.errors
+                    .push(Diagnostic::parse(error.message.clone(), operator.span));
                 let end = self.skip_to_statement_end(operator.span.end);
                 return Stmt::Invalid {
                     error,
@@ -493,7 +436,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 };
             }
         };
-        self.pos += 1;
+        self.advance();
 
         let expr = self.parse_recovered_expression();
         match compound {
@@ -513,17 +456,11 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_logic_or(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
         let mut expr = self.parse_logic_and()?;
 
-        while matches!(
-            self.peek(),
-            Some(SpannedToken {
-                token: Token::Or,
-                ..
-            })
-        ) {
+        while self.at(Token::Or) {
             self.advance();
             let rhs = self.parse_logic_and()?;
             if matches!(expr.1, LogicalKind::And) || matches!(rhs.1, LogicalKind::And) {
-                return Err(Self::parse_error(
+                return Err(Diagnostic::parse(
                     "mixed && and || require parentheses",
                     expr_span(&expr.0),
                 ));
@@ -544,17 +481,11 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_logic_and(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
         let mut expr = self.parse_comparison()?;
 
-        while matches!(
-            self.peek(),
-            Some(SpannedToken {
-                token: Token::And,
-                ..
-            })
-        ) {
+        while self.at(Token::And) {
             self.advance();
             let rhs = self.parse_comparison()?;
             if matches!(expr.1, LogicalKind::Or) || matches!(rhs.1, LogicalKind::Or) {
-                return Err(Self::parse_error(
+                return Err(Diagnostic::parse(
                     "mixed && and || require parentheses",
                     expr_span(&expr.0),
                 ));
@@ -574,22 +505,19 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     fn parse_comparison(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
         let lhs = self.parse_additive()?;
-        let Some(op_token) = self.peek().cloned() else {
-            return Ok(lhs);
-        };
+        let op_token = *self.peek();
         let Some(op) = comparison_operator(&op_token.token) else {
             return Ok(lhs);
         };
         self.advance();
         let rhs = self.parse_additive()?;
 
-        if let Some(next) = self.peek()
-            && comparison_operator(&next.token).is_some()
-        {
-            return Err(Diagnostic::Parse {
-                message: "comparisons are non-associative; add parentheses".to_string(),
-                span: next.span,
-            });
+        if comparison_operator(&self.peek().token).is_some() {
+            let next = *self.peek();
+            return Err(Diagnostic::parse(
+                "comparisons are non-associative; add parentheses",
+                next.span,
+            ));
         }
 
         Ok((
@@ -605,10 +533,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_additive(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
         let mut expr = self.parse_multiplicative()?;
 
-        while let Some(op) = self
-            .peek()
-            .and_then(|token| additive_operator(&token.token))
-        {
+        while let Some(op) = additive_operator(&self.peek().token) {
             self.advance();
             let rhs = self.parse_multiplicative()?;
             expr = (
@@ -627,10 +552,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_multiplicative(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
         let mut expr = self.parse_unary()?;
 
-        while let Some(op) = self
-            .peek()
-            .and_then(|token| multiplicative_operator(&token.token))
-        {
+        while let Some(op) = multiplicative_operator(&self.peek().token) {
             self.advance();
             let rhs = self.parse_unary()?;
             expr = (
@@ -647,9 +569,9 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     fn parse_unary(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
-        let unary_op = match self.peek().map(|token| token.token.clone()) {
-            Some(Token::Minus) => UnaryOp::Neg,
-            Some(Token::Not) => UnaryOp::Not,
+        let unary_op = match self.peek().token {
+            Token::Minus => UnaryOp::Neg,
+            Token::Not => UnaryOp::Not,
             _ => return self.parse_primary(),
         };
 
@@ -667,28 +589,23 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     fn parse_primary(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
-        let Some(token) = self.peek().cloned() else {
-            return Err(Diagnostic::Parse {
-                message: "Expected an expression, but reached end of file".to_string(),
-                span: self.eof_span,
-            });
-        };
+        let token = *self.peek();
 
         // A newline here means an operand is missing (for example `int i = `
         // with nothing typed yet). Fail without consuming so recovery can
         // plant a zero-width missing node and leave the statement boundary
         // intact.
         if matches!(token.token, Token::Newline) {
-            return Err(Diagnostic::Parse {
-                message: "Expected an expression, but found end of statement".to_string(),
-                span: token.span,
-            });
+            return Err(Diagnostic::parse(
+                "expected an expression, but found end of statement",
+                token.span,
+            ));
         }
 
-        self.pos += 1;
-        match &token.token {
-            Token::IntLit(value) => Ok((Expr::IntLit(*value), LogicalKind::None)),
-            Token::FloatLit(value) => Ok((Expr::FloatLit(*value), LogicalKind::None)),
+        self.advance();
+        match token.token {
+            Token::IntLit(value) => Ok((Expr::IntLit(value), LogicalKind::None)),
+            Token::FloatLit(value) => Ok((Expr::FloatLit(value), LogicalKind::None)),
             Token::StrLit(value) => Ok((
                 Expr::StrLit(value[1..value.len() - 1].to_string()),
                 LogicalKind::None,
@@ -698,19 +615,17 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::Ident(name) => Ok((Expr::Ident(name.to_string()), LogicalKind::None)),
             Token::LParen => {
                 let expr = self.parse_logic_or()?;
-                let closing = self.require_token("Expected ')', but reached end of file")?;
+                let closing = self.require_token("expected `)`, but found end of file")?;
                 if closing.token != Token::RParen {
-                    return Err(Diagnostic::Parse {
-                        message: format!("Expected ')', but found {:?}", closing.token),
-                        span: closing.span,
-                    });
+                    return Err(Self::expected("`)`", &closing.token, closing.span));
                 }
                 Ok((expr.0, LogicalKind::Parenthesized))
             }
-            other => Err(Diagnostic::Parse {
-                message: format!("Expected an expression, but found {:?}", other),
-                span: token.span,
-            }),
+            Token::Eof => Err(Diagnostic::parse(
+                "expected an expression, but found end of file",
+                token.span,
+            )),
+            other => Err(Self::expected("an expression", &other, token.span)),
         }
     }
 }
@@ -777,7 +692,7 @@ fn skip_to_next_statement<'a>(
     while let Some(token) = tokens.get(*pos) {
         *pos += 1;
         if matches!(token.token, Token::Newline) {
-            return Some(token.clone());
+            return Some(*token);
         }
     }
     None
@@ -793,7 +708,5 @@ fn can_end_statement(t: &Token) -> bool {
             | Token::KwTrue
             | Token::KwFalse
             | Token::RParen
-            | Token::RBrace
-            | Token::KwReturn
     )
 }

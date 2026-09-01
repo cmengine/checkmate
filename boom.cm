@@ -32,7 +32,8 @@
 //   - Section 16 is kept LAST on purpose: an unclosed `(` makes every
 //     following newline insignificant, so it would swallow the whole rest
 //     of the file (see §16 for why that is the honest current behavior).
-//   - One diagnostic per marked line unless noted otherwise.
+//   - One diagnostic per marked line unless noted otherwise. Braces are
+//     lex errors; each `}` on its own code line is recorded once.
 //
 // Sections:
 //   1.  Broken code as the very first statement
@@ -60,18 +61,18 @@
 //    references the survivor.
 // ----------------------------------------------------------------------------
 
-int first = }                    // VarDecl{Int, "first", Invalid "}"}
+int first = }                    // 1 lex diagnostic; VarDecl{Int, "first", Invalid "}"}
 infer second = first + 1         // healthy
 
 
 // ----------------------------------------------------------------------------
 // 2. Flagship — the motivating case. Every declared type survives with an
 //    Invalid initializer covering the skipped region; one diagnostic per
-//    line ("Expected an expression, but found <token>").
+//    line ("expected an expression, but found <token>").
 // ----------------------------------------------------------------------------
 
 int i = str wow how              // VarDecl{Int, "i", Invalid "str wow how"}
-float f = }                      // VarDecl{Float, "f", Invalid "}"}
+float f = }                      // 1 lex diagnostic; VarDecl{Float, "f", Invalid "}"}
 str s = *                        // VarDecl{Str, "s", Invalid "*"}
 bool b = %                       // VarDecl{Bool, "b", Invalid "%"}
 infer v = +                      // VarDecl{Infer, "v", Invalid "+"}
@@ -85,8 +86,8 @@ infer v = +                      // VarDecl{Infer, "v", Invalid "+"}
 // ----------------------------------------------------------------------------
 
 int count =                      // VarDecl{Int, "count", Invalid zero-width}
-int k                            // VarDecl{Int, "k", Invalid zero-width} ("Expected '='")
-int k2 5                         // Stmt::Invalid ("Expected '=', but found IntLit(5)")
+int k                            // VarDecl{Int, "k", Invalid zero-width} ("expected `=`")
+int k2 5                         // Stmt::Invalid ("expected `=`, but found integer literal `5`")
 infer draft =                    // VarDecl{Infer, "draft", Invalid zero-width}
 
 
@@ -114,7 +115,7 @@ int after = 3                    // healthy
 
 int score = 10                   // healthy
 score = str nope                 // Assign{"score", Invalid "str nope"}
-score += }                       // CompoundAssign{+, Invalid "}"}
+score += }                       // 1 lex diagnostic; CompoundAssign{+, Invalid "}"}
 score -= str y z                 // CompoundAssign{-, Invalid "str y z"}
 score *=                         // CompoundAssign{*, Invalid zero-width}
 int fence = 20                   // healthy — the newline after `*=` was NOT eaten
@@ -124,12 +125,13 @@ score %= 2                       // healthy
 
 // ----------------------------------------------------------------------------
 // 6. Garbage statement heads — nothing recognizable at the head, so the whole
-//    line becomes one Stmt::Invalid ("Expected a type or assignment target").
+//    line becomes one Stmt::Invalid ("expected a type or assignment target").
 //    `) straggler` is dropped by the STRIP pass before the parser ever sees
-//    it: one diagnostic, zero statements.
+//    it: one diagnostic, zero statements. The `}` line is likewise dropped
+//    as a lexer-level brace error: one diagnostic, zero statements.
 // ----------------------------------------------------------------------------
 
-}                                // Stmt::Invalid (RBrace)
+}                                // 1 lex diagnostic (brace error); no statement
 * 5                              // Stmt::Invalid (Star)
 true                             // Stmt::Invalid (KwTrue — keywords are not statements)
 42                               // Stmt::Invalid (IntLit(42))
@@ -144,10 +146,10 @@ true                             // Stmt::Invalid (KwTrue — keywords are not s
 //    newline (a dangling type keyword can never continue a line).
 // ----------------------------------------------------------------------------
 
-int = 5                          // Stmt::Invalid ("Expected a variable name, but found Assign")
+int = 5                          // Stmt::Invalid ("expected a variable name, but found `=`")
 int return = 1                   // Stmt::Invalid (KwReturn is a keyword, not a name)
 int 5 = 1                        // Stmt::Invalid (IntLit(5))
-float                            // Stmt::Invalid ("Expected a variable name, but found Newline")
+float                            // Stmt::Invalid ("expected a variable name, but found end of statement")
 
 
 // ----------------------------------------------------------------------------
@@ -155,8 +157,8 @@ float                            // Stmt::Invalid ("Expected a variable name, bu
 //    an assignment operator.
 // ----------------------------------------------------------------------------
 
-lonely                           // Stmt::Invalid ("Expected assignment operator, but found Newline")
-x y                              // Stmt::Invalid ("...but found Ident(\"y\")")
+lonely                           // Stmt::Invalid ("expected an assignment operator, but found end of statement")
+x y                              // Stmt::Invalid ("...but found identifier `y`")
 
 
 // ----------------------------------------------------------------------------
@@ -236,8 +238,8 @@ int afterMulti = 4               // healthy
 //     next line is untouched.
 // ----------------------------------------------------------------------------
 
-int ok = 1 }                     // VarDecl{Int, ok, 1} survives + 1 diagnostic
-int ok2 = 2 } int late = 3       // 1 diagnostic; int late = 3 is dropped with the damaged line
+int ok = 1 }                     // 1 lex diagnostic (brace); VarDecl{Int, ok, 1} survives
+int ok2 = 2 } int late = 3       // 1 lex diagnostic (brace); int late = 3 is dropped with the damaged line
 int survivor = 5                 // healthy
 
 

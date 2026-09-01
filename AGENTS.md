@@ -60,7 +60,6 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 
 ## Repository State Notes
 
-- `cme-interp` and `cme-runtime` still expose starter `add` functions and their tests. Treat them as placeholders rather than meaningful language runtime APIs.
 - The root binary reports how to build with the `cli` feature when that feature is absent.
 - Newline handling is intentionally significant at statement boundaries; do not remove this behavior without explicit user direction.
 

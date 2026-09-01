@@ -9,9 +9,9 @@ authors = ["Matin Mohammadi"]
 license = "Apache-2.0"
 description = "Checkmate Engine: A statically typed, embeddable scripting language"
 readme = "README.md"
-repository = "https://github.com/checkmatelang/checkmate"
+repository = "https://github.com/cmengine/checkmate"
 keywords = ["checkmate", "scripting", "embedding", "language"]
-categories = ["development-tools"]
+categories = ["compilers", "parser-implementations"]
 
 [package]
 name = "cme"

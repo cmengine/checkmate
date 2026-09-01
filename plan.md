@@ -109,11 +109,11 @@ plan file itself. No functional code changes.
 
 ### Steps
 
-- [ ] **A.1 — Land this plan as `plan.md`.**
+- [x] **A.1 — Land this plan as `plan.md`.**
       Place this file at the repository root named `plan.md`. Commit:
       `jj new -m "docs: add refactor plan (plan.md)"`.
 
-- [ ] **A.2 — License + repository URL + categories (review item 15).**
+- [x] **A.2 — License + repository URL + categories (review item 15).**
   - Download the canonical Apache-2.0 text and save it as `/LICENSE`:
     `curl -o LICENSE https://www.apache.org/licenses/LICENSE-2.0.txt`
     (verify the file starts with `                                 Apache License` and is ~11 KiB;
@@ -128,7 +128,7 @@ plan file itself. No functional code changes.
     complain about missing description/docs — that's fine, we only care that metadata
     parses) and the LICENSE file exists at root.
 
-- [ ] **A.3 — Strip placeholder crates to honest shape (review item 14).**
+- [x] **A.3 — Strip placeholder crates to honest shape (review item 14).**
   - `crates/cme-interp/src/lib.rs` → replace entire content with:
     ```rust
     //! Placeholder for the Checkmate interpreter.
@@ -141,7 +141,7 @@ plan file itself. No functional code changes.
   - This deletes the starter `add()` and its `it_works` test — that is intended.
   - Done-when: `cargo test --workspace` green with the two `it_works` tests gone.
 
-- [ ] **A.4 — CI workflow (review item 17, CI half).**
+- [x] **A.4 — CI workflow (review item 17, CI half).**
       Create `.github/workflows/ci.yml`:
 
   ```yaml
@@ -166,7 +166,7 @@ plan file itself. No functional code changes.
   (Phase G will remove the last line when the `cli` feature dies.)
   Done-when: file exists, YAML is valid (e.g. `python -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml'))"` or a CI run).
 
-- [ ] **A.5 — AGENTS.md minimal touch-up.**
+- [x] **A.5 — AGENTS.md minimal touch-up.**
   - In "Repository State Notes", delete the sentence "cme-interp and cme-runtime still
     expose starter `add` functions and their tests..." (no longer true after A.3).
   - The `plan.md` instructions in "Working Rules" now point at a real file again —

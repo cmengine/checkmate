@@ -786,7 +786,7 @@ mod tests {
         // deliberately changes.
         let (stmts, errors) = parse_program_parts(BOOM_CM);
 
-        assert_eq!(errors.len(), 57, "diagnostics: {errors:#?}");
+        assert_eq!(errors.len(), 58, "diagnostics: {errors:#?}");
         assert_eq!(stmts.len(), 62, "statements: {stmts:#?}");
 
         let labels: Vec<String> = stmts.iter().map(statement_label).collect();
@@ -895,8 +895,9 @@ mod tests {
 
         // Healthy survivor spot checks: `q` still holds 1 + 2, and the
         // lexer/strip diagnostics come from exactly the damaged lines
-        // (seven lexer errors: six bad-character/string/number lines in §9
-        // plus the overflow digit run).
+        // (eight lexer errors: five bad-character lines in §9 with `@ $`
+        // now recorded twice, one unterminated string, the `1.2.3` float
+        // shape, and the overflow digit run).
         assert!(matches!(
             &stmts[42],
             Stmt::VarDecl {
@@ -912,7 +913,7 @@ mod tests {
                 .iter()
                 .filter(|error| matches!(error, Diagnostic::Lex(_)))
                 .count(),
-            7
+            8
         );
         assert_eq!(
             errors

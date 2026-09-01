@@ -167,6 +167,8 @@ pub mod ast {
     }
 }
 
+pub use ast::Span;
+
 #[cfg(test)]
 mod tests {
     use super::ast::{Expr, Span, Stmt, SyntaxError, Type};
@@ -205,5 +207,3 @@ mod tests {
         assert_eq!(span.end, 7);
     }
 }
-
-pub use ast::Span;

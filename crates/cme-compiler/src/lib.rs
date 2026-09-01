@@ -728,7 +728,10 @@ mod tests {
                 expr: Expr::Invalid { span, .. },
             } => {
                 assert_eq!(name.as_str(), "cont");
-                assert_eq!(*span, Span::new("int cont = ".len(), "int cont = 1 +".len()));
+                assert_eq!(
+                    *span,
+                    Span::new("int cont = ".len(), "int cont = 1 +".len())
+                );
             }
             other => panic!("expected a surviving declaration, got {other:?}"),
         }

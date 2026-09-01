@@ -357,10 +357,7 @@ mod tests {
                 span: cme_core::Span::new(11, 34), // the 23-digit run
             }
         );
-        let kinds: Vec<_> = tokens
-            .iter()
-            .map(|spanned| spanned.token.clone())
-            .collect();
+        let kinds: Vec<_> = tokens.iter().map(|spanned| spanned.token.clone()).collect();
         assert!(matches!(
             kinds.as_slice(),
             [

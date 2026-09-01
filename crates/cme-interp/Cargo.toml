@@ -6,6 +6,6 @@ authors.workspace = true
 license.workspace = true
 description.workspace = true
 repository.workspace = true
-publish = true
+publish = false
 
 [dependencies]

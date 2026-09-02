@@ -302,6 +302,27 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_trailing_tokens_at_eof() {
+        let (tokens, _) = crate::lexer::lex_with_errors("int a = 1 2");
+        let mut parser = Parser::new(&tokens);
+
+        let (stmts, errors) = parser.parse_program_with_errors();
+
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("end of statement"));
+    }
+
+    #[test]
+    fn recovers_from_unbalanced_parenthesis_at_eof() {
+        let (tokens, _) = crate::lexer::lex_with_errors("int a = (1");
+
+        let result = Parser::strip_insignificant_newlines(tokens);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn records_invalid_statement_for_missing_variable_name() {
         let source = "int =";
         let tokens = spanned_tokens(source);

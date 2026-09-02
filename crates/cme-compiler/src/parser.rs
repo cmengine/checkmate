@@ -690,10 +690,14 @@ fn skip_to_next_statement<'a>(
     pos: &mut usize,
 ) -> Option<SpannedToken<'a>> {
     while let Some(token) = tokens.get(*pos) {
-        *pos += 1;
+        if token.token == Token::Eof {
+            return None;
+        }
         if matches!(token.token, Token::Newline) {
+            *pos += 1;
             return Some(*token);
         }
+        *pos += 1;
     }
     None
 }

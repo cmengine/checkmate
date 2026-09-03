@@ -1051,6 +1051,133 @@ mod tests {
             outcome.is_clean(),
             "basic.cm should parse with ZERO diagnostics: {outcome:#?}"
         );
+
+        let funcs: Vec<&Stmt> = outcome
+            .statements
+            .iter()
+            .filter(|stmt| matches!(stmt.kind, StmtKind::FuncDecl { .. }))
+            .collect();
+        assert!(!funcs.is_empty(), "basic.cm should declare functions");
+
+        let has_else_if = outcome.statements.iter().any(|stmt| match &stmt.kind {
+            StmtKind::FuncDecl { body, .. } => body.stmts.iter().any(|inner| {
+                matches!(
+                    &inner.kind,
+                    StmtKind::If {
+                        else_branch: Some(_),
+                        ..
+                    }
+                )
+            }),
+            _ => false,
+        });
+        assert!(has_else_if, "basic.cm should contain an else-if chain");
+
+        let has_while = outcome.statements.iter().any(|stmt| match &stmt.kind {
+            StmtKind::FuncDecl { body, .. } => body
+                .stmts
+                .iter()
+                .any(|inner| matches!(inner.kind, StmtKind::While { .. })),
+            _ => false,
+        });
+        assert!(has_while, "basic.cm should contain a while loop");
+
+        let has_call_with_args = outcome.statements.iter().any(|stmt| match &stmt.kind {
+            StmtKind::FuncDecl { body, .. } => {
+                body.stmts.iter().any(|inner| has_call_with_arity(inner, 2))
+            }
+            _ => false,
+        });
+        assert!(
+            has_call_with_args,
+            "basic.cm should contain a call with at least 2 arguments"
+        );
+
+        let has_compound = outcome.statements.iter().any(|stmt| match &stmt.kind {
+            StmtKind::FuncDecl { body, .. } => body
+                .stmts
+                .iter()
+                .any(|inner| matches!(inner.kind, StmtKind::CompoundAssign { .. })),
+            _ => false,
+        });
+        assert!(
+            has_compound,
+            "basic.cm should contain a compound assignment"
+        );
+    }
+
+    #[test]
+    fn broken_if_header_recovers_to_sibling() {
+        let (stmts, errors) = parse_program_parts("if\nint x = 1\n");
+        assert!(!errors.is_empty());
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_closing_brace_still_yields_function() {
+        let (stmts, errors) = parse_program_parts("int f() {\nreturn 1\n");
+        assert!(!errors.is_empty());
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::FuncDecl { .. })
+        ));
+    }
+
+    #[test]
+    fn dangling_else_becomes_invalid_and_following_statement_survives() {
+        let (stmts, errors) = parse_program_parts("if (x) {\n} else\nint x = 1\n");
+        assert!(!errors.is_empty());
+        assert!(
+            stmts
+                .iter()
+                .any(|stmt| matches!(stmt.kind, StmtKind::VarDecl { .. }))
+        );
+    }
+
+    fn has_call_with_arity(stmt: &Stmt, min_args: usize) -> bool {
+        match &stmt.kind {
+            StmtKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                expr_has_call_with_arity(cond, min_args)
+                    || then_branch
+                        .stmts
+                        .iter()
+                        .any(|inner| has_call_with_arity(inner, min_args))
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|inner| has_call_with_arity(inner, min_args))
+            }
+            StmtKind::While { cond, body } => {
+                expr_has_call_with_arity(cond, min_args)
+                    || body
+                        .stmts
+                        .iter()
+                        .any(|inner| has_call_with_arity(inner, min_args))
+            }
+            StmtKind::VarDecl { expr, .. }
+            | StmtKind::Assign { expr, .. }
+            | StmtKind::CompoundAssign { expr, .. }
+            | StmtKind::Expression { expr } => expr_has_call_with_arity(expr, min_args),
+            _ => false,
+        }
+    }
+
+    fn expr_has_call_with_arity(expr: &Expr, min_args: usize) -> bool {
+        match &expr.kind {
+            ExprKind::Call { args, .. } if args.len() >= min_args => true,
+            ExprKind::Binary { lhs, rhs, .. } => {
+                expr_has_call_with_arity(lhs, min_args) || expr_has_call_with_arity(rhs, min_args)
+            }
+            ExprKind::Unary { expr, .. } => expr_has_call_with_arity(expr, min_args),
+            ExprKind::Paren { expr } => expr_has_call_with_arity(expr, min_args),
+            _ => false,
+        }
     }
 
     fn statement_label(stmt: &Stmt) -> String {

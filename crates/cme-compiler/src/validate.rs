@@ -15,7 +15,8 @@ fn validate_statement(statement: &Stmt, diagnostics: &mut Vec<Diagnostic>) {
     match &statement.kind {
         StmtKind::VarDecl { expr, .. }
         | StmtKind::Assign { expr, .. }
-        | StmtKind::CompoundAssign { expr, .. } => validate_expression(expr, diagnostics),
+        | StmtKind::CompoundAssign { expr, .. }
+        | StmtKind::Expression { expr } => validate_expression(expr, diagnostics),
         StmtKind::Invalid { .. } => {}
         _ => {}
     }

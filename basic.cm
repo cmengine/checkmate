@@ -63,5 +63,6 @@ int main() {
         status += " light"
     }
 
+    append_report(total, status)
     return total
 }

@@ -194,7 +194,8 @@ pub mod ast {
                 StmtKind::Invalid { .. } => true,
                 StmtKind::VarDecl { expr, .. }
                 | StmtKind::Assign { expr, .. }
-                | StmtKind::CompoundAssign { expr, .. } => expr.contains_invalid(),
+                | StmtKind::CompoundAssign { expr, .. }
+                | StmtKind::Expression { expr } => expr.contains_invalid(),
                 _ => false,
             }
         }
@@ -220,6 +221,11 @@ pub mod ast {
         CompoundAssign {
             target: String,
             op: CompoundOp,
+            expr: Expr,
+        },
+        /// A statement consisting solely of a call expression; its value is
+        /// discarded. Other expression statements remain invalid.
+        Expression {
             expr: Expr,
         },
         FuncDecl {

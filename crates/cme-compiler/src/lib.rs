@@ -1,3 +1,18 @@
+//! `cme-compiler` implements the Checkmate front-end. The canonical one-call
+//! API is [`parse_source`], which lexes source, strips insignificant newlines,
+//! parses with recovery, and runs the post-parse validator.
+//!
+//! Recovery never stops: the parser plants [`cme_core::ast::ExprKind::Invalid`]
+//! or [`cme_core::ast::StmtKind::Invalid`] placeholders and reports every
+//! diagnostic it can. The resulting tree remains useful for tooling, while
+//! execution consumers should reject any non-empty diagnostic list.
+//!
+//! ```
+//! let outcome = cme_compiler::parse_source("int hp = 100\nhp += 5\n");
+//! assert!(outcome.is_clean());
+//! assert_eq!(outcome.statements.len(), 2);
+//! ```
+
 pub mod diagnostics;
 pub mod lexer;
 pub mod parser;

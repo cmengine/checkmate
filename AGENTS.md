@@ -2,17 +2,17 @@
 
 ## Repository Overview
 
-Checkmate (CME) is a statically typed, embeddable scripting language implemented as a Cargo workspace in Rust (edition 2024). The implementation is early-stage: `cme-core` and `cme-compiler` contain the first real language functionality, while the interpreter, runtime, and CLI remain placeholders.
+Checkmate (CME) is a statically typed, embeddable scripting language implemented as a Cargo workspace in Rust (edition 2024). The implementation is early-stage: `cme-core` and `cme-compiler` contain the first real language functionality, while the interpreter and runtime remain placeholders.
 
 The workspace root package is `cme`. It re-exports workspace crates behind feature flags. The intended development workflow uses `--features cli` (or the individual feature flags); the default build intentionally exposes no root APIs.
 
 ## Crates
 
-- `crates/cme-core` — Foundation crate with no dependencies. Defines the initial AST: primitive/inferred types, literals, identifiers, and variable declarations. Shared by compiler and future language components.
-- `crates/cme-compiler` — Depends on `cme-core` and `logos`. Provides the lexer and recursive-descent parser for the current subset, including newline-sensitive statement parsing and insignificant-newline handling inside brackets.
+- `crates/cme-core` — Foundation crate with no dependencies. Defines the spanned AST, source spans, and diagnostic references: primitive/inferred types, literals, identifiers, and variable declarations. Shared by compiler and future language components.
+- `crates/cme-compiler` — Depends on `cme-core` and `logos`. Provides the lexer, parser, diagnostics, validator, and the one-call `parse_source` front-end for the current subset, including newline-sensitive statement parsing and insignificant-newline handling inside brackets.
 - `crates/cme-interp` — Dependency-free placeholder. Currently contains starter code only; interpreter behavior is not implemented.
 - `crates/cme-runtime` — Dependency-free placeholder. Currently contains starter code only; runtime services and built-ins are not implemented.
-- Root package `cme` — Facade package and optional CLI. Feature-gated re-exports are: `core`, `compiler`, `interp`, and `runtime`; `cli` enables all four and provides the placeholder toolchain binary.
+- Root package `cme` — Facade package and optional CLI. Feature-gated re-exports are: `core`, `compiler`, `interp`, and `runtime`; `cli` enables all four and provides the working lex/ast toolchain binary.
 
 ## Whitepaper Policy
 
@@ -29,18 +29,14 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 - Keep changes focused on the affected crate and avoid implementing unspecified language behavior by guessing.
 - Preserve the feature-gated structure of the root facade. Adding functionality to a workspace crate should not require enabling that crate by default in the root package.
 - Lexer and parser changes must respect `cme-core` AST ownership: language data models belong in `cme-core`, while recognition/parsing remains in `cme-compiler`.
-- Update lexer, parser, and AST pieces together when language-facing changes require it, and add focused unit tests in the relevant crate.
-- Use `plan.md` at the repository root as the canonical, continuously updated plan for multi-step implementation work.
-  - Before beginning or continuing such work, read `plan.md` and resume from its first unfinished checklist item.
-  - Keep the progress checklist and progress notes current after every completed, changed, or materially constrained task, with enough detail that a fresh agent can continue without prior conversation context.
-  - Do not restate obsolete progress as current work; update or replace stale entries rather than accumulating contradictory history.
+- Update lexer, parser, validator, and AST pieces together when language-facing changes require it, and add focused unit tests in the relevant crate.
 
 ## Code Review Process
 
 - Perform code review in report-first mode: inspect the affected source and produce findings before changing code.
 - For each finding, present remediation options with a recommended option first and an explicit discard option last; do not implement remediation until the user chooses.
 - Keep review findings tied to concrete source locations and distinguish correctness issues from style-level changes.
-- After review decisions are approved, create or update `plan.md` with the accepted work, then implement against that plan.
+- After review decisions are approved, record the accepted work in the relevant task brief or commit plan, then implement against it.
 - Run `cargo fmt --check` (or `cargo fmt` when preparing changes), `cargo test --workspace`, and `cargo clippy --workspace --all-targets` as part of validation. Use the complete facade with `--features cli` when CLI-facing behavior changes.
 
 ## Commands

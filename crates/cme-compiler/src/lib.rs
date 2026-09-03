@@ -1037,8 +1037,8 @@ mod tests {
         // deliberately changes.
         let (stmts, errors) = parse_program_parts(BOOM_CM);
 
-        assert_eq!(errors.len(), 61, "diagnostics: {errors:#?}");
-        assert_eq!(stmts.len(), 60, "statements: {stmts:#?}");
+        assert_eq!(errors.len(), 59, "diagnostics: {errors:#?}");
+        assert_eq!(stmts.len(), 62, "statements: {stmts:#?}");
 
         let labels: Vec<String> = stmts.iter().map(statement_label).collect();
         assert_eq!(
@@ -1070,10 +1070,13 @@ mod tests {
                 "assign:score",
                 "compound:score",
                 "compound:score",
+                "compound:score",
                 "var:fence:Int",
                 "compound:score",
                 "compound:score",
-                // §6 garbage heads (the `}` and `)` lines are dropped by the lexer/strip pass)
+                // §6 garbage heads (the `)` line is dropped by the strip pass;
+                // the `}` line is now a token and produces one Invalid)
+                "invalid",
                 "invalid",
                 "invalid",
                 "invalid",
@@ -1127,8 +1130,8 @@ mod tests {
 
         // Skipped-region placements: real source was consumed and covered.
         for index in [
-            2usize, 3, 4, 5, 6, 7, 9, 12, 14, 15, 16, 19, 21, 23, 25, 26, 27, 28, 29, 30, 31, 32,
-            33, 34, 36, 38, 39, 42, 43, 45, 46, 47, 48, 54, 58, 59,
+            2usize, 3, 4, 5, 6, 7, 9, 12, 14, 15, 16, 19, 21, 24, 26, 27, 28, 29, 30, 31, 32, 33,
+            34, 35, 36, 38, 40, 41, 44, 45, 47, 48, 49, 50, 56, 60, 61,
         ] {
             let span = invalid_span(&stmts[index])
                 .unwrap_or_else(|| panic!("statement {index} should carry an Invalid"));
@@ -1144,7 +1147,7 @@ mod tests {
         // now recorded twice, one unterminated string, the `1.2.3` float
         // shape, and the overflow digit run).
         assert!(matches!(
-            &stmts[40],
+            &stmts[42],
             Stmt {
                 kind: StmtKind::VarDecl {
                     expr: Expr {
@@ -1166,7 +1169,7 @@ mod tests {
                     matches!(error.kind(), crate::diagnostics::DiagnosticKind::Lex(_))
                 })
                 .count(),
-            14
+            8
         );
         assert_eq!(
             errors

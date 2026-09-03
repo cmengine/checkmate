@@ -17,6 +17,7 @@ fn validate_statement(statement: &Stmt, diagnostics: &mut Vec<Diagnostic>) {
         | StmtKind::Assign { expr, .. }
         | StmtKind::CompoundAssign { expr, .. } => validate_expression(expr, diagnostics),
         StmtKind::Invalid { .. } => {}
+        _ => {}
     }
 }
 

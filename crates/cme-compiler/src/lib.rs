@@ -142,7 +142,10 @@ mod tests {
     fn parses_inferred_float_variable_declaration() {
         let ast = parse_statement_ok("infer speed = 4.5");
 
-        assert_eq!(ast, var_decl(None, "speed", expr(ExprKind::FloatLit(4.5))));
+        assert_eq!(
+            ast,
+            var_decl(Type::Infer, "speed", expr(ExprKind::FloatLit(4.5)))
+        );
     }
 
     #[test]
@@ -151,7 +154,7 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(
-                Some(PrimitiveType::Int),
+                Type::Prim(PrimitiveType::Int),
                 "count",
                 expr(ExprKind::IntLit(42))
             )
@@ -164,7 +167,7 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(
-                Some(PrimitiveType::Float),
+                Type::Prim(PrimitiveType::Float),
                 "ratio",
                 expr(ExprKind::FloatLit(0.25))
             )
@@ -177,7 +180,7 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(
-                None,
+                Type::Infer,
                 "value",
                 expr(ExprKind::Ident("other_value".to_string()))
             )
@@ -190,7 +193,7 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(
-                Some(PrimitiveType::Str),
+                Type::Prim(PrimitiveType::Str),
                 "message",
                 expr(ExprKind::StrLit("OMG WOW!".to_string()))
             )
@@ -203,10 +206,14 @@ mod tests {
         assert_eq!(
             ast,
             vec![
-                var_decl(Some(PrimitiveType::Int), "a", expr(ExprKind::IntLit(1))),
-                var_decl(None, "b", expr(ExprKind::Ident("a".to_string()))),
                 var_decl(
-                    Some(PrimitiveType::Float),
+                    Type::Prim(PrimitiveType::Int),
+                    "a",
+                    expr(ExprKind::IntLit(1))
+                ),
+                var_decl(Type::Infer, "b", expr(ExprKind::Ident("a".to_string()))),
+                var_decl(
+                    Type::Prim(PrimitiveType::Float),
                     "c",
                     expr(ExprKind::FloatLit(2.5))
                 ),
@@ -220,8 +227,12 @@ mod tests {
         assert_eq!(
             ast,
             vec![
-                var_decl(Some(PrimitiveType::Int), "a", expr(ExprKind::IntLit(1))),
-                var_decl(None, "b", expr(ExprKind::Ident("a".to_string()))),
+                var_decl(
+                    Type::Prim(PrimitiveType::Int),
+                    "a",
+                    expr(ExprKind::IntLit(1))
+                ),
+                var_decl(Type::Infer, "b", expr(ExprKind::Ident("a".to_string()))),
             ]
         );
     }
@@ -442,7 +453,7 @@ mod tests {
 
         match stmt.kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Int),
+                ty: Type::Prim(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -467,7 +478,7 @@ mod tests {
 
         match stmt.kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Int),
+                ty: Type::Prim(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -521,13 +532,16 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(
-                Some(PrimitiveType::Bool),
+                Type::Prim(PrimitiveType::Bool),
                 "flag",
                 expr(ExprKind::BoolLit(true))
             )
         );
         let ast = parse_statement_ok("infer flag = false");
-        assert_eq!(ast, var_decl(None, "flag", expr(ExprKind::BoolLit(false))));
+        assert_eq!(
+            ast,
+            var_decl(Type::Infer, "flag", expr(ExprKind::BoolLit(false)))
+        );
     }
 
     #[test]
@@ -587,7 +601,7 @@ mod tests {
         assert_eq!(
             stmts,
             vec![var_decl(
-                Some(PrimitiveType::Int),
+                Type::Prim(PrimitiveType::Int),
                 "b",
                 expr(ExprKind::IntLit(1))
             )]
@@ -610,7 +624,11 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "b", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "b",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -627,7 +645,7 @@ mod tests {
 
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Int),
+                ty: Type::Prim(PrimitiveType::Int),
                 name,
                 expr:
                     Expr {
@@ -644,7 +662,11 @@ mod tests {
         }
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "j",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -657,7 +679,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Int),
+                ty: Type::Prim(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -680,7 +702,7 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Int),
+                ty: Type::Prim(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -691,7 +713,11 @@ mod tests {
         }
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "j",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -717,7 +743,11 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "j",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -741,7 +771,11 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "j",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -765,7 +799,11 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "j",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -812,7 +850,11 @@ mod tests {
         ));
         assert_eq!(
             stmts[2],
-            var_decl(Some(PrimitiveType::Int), "c", expr(ExprKind::IntLit(3)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "c",
+                expr(ExprKind::IntLit(3))
+            )
         );
     }
 
@@ -843,7 +885,7 @@ mod tests {
 
         assert_eq!(
             parser.parse_statement(),
-            var_decl(None, "a", expr(ExprKind::IntLit(1)))
+            var_decl(Type::Infer, "a", expr(ExprKind::IntLit(1)))
         );
     }
 
@@ -867,6 +909,7 @@ mod tests {
                 StmtKind::VarDecl { expr, .. }
                 | StmtKind::Assign { expr, .. }
                 | StmtKind::CompoundAssign { expr, .. } => walk_expr(expr, errors),
+                _ => {}
             }
         }
 
@@ -891,7 +934,7 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Int),
+                ty: Type::Prim(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -902,7 +945,11 @@ mod tests {
         }
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "j",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -926,7 +973,11 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
+            var_decl(
+                Type::Prim(PrimitiveType::Int),
+                "j",
+                expr(ExprKind::IntLit(2))
+            )
         );
     }
 
@@ -948,7 +999,7 @@ mod tests {
         );
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Int),
+                ty: Type::Prim(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -962,7 +1013,7 @@ mod tests {
         }
         match &stmts[1].kind {
             StmtKind::VarDecl {
-                ty: Some(PrimitiveType::Str),
+                ty: Type::Prim(PrimitiveType::Str),
                 name,
                 expr:
                     Expr {
@@ -984,17 +1035,20 @@ mod tests {
             StmtKind::VarDecl { ty, name, .. } => {
                 format!(
                     "var:{name}:{}",
-                    ty.as_ref().map_or("None", |ty| match ty {
-                        PrimitiveType::Int => "Int",
-                        PrimitiveType::Float => "Float",
-                        PrimitiveType::Bool => "Bool",
-                        PrimitiveType::Str => "Str",
-                    })
+                    match ty {
+                        Type::Prim(PrimitiveType::Int) => "Int",
+                        Type::Prim(PrimitiveType::Float) => "Float",
+                        Type::Prim(PrimitiveType::Bool) => "Bool",
+                        Type::Prim(PrimitiveType::Str) => "Str",
+                        Type::Infer => "None",
+                        Type::Void => "Void",
+                    }
                 )
             }
             StmtKind::Assign { name, .. } => format!("assign:{name}"),
             StmtKind::CompoundAssign { target, .. } => format!("compound:{target}"),
             StmtKind::Invalid { .. } => "invalid".to_string(),
+            _ => "invalid".to_string(),
         }
     }
 

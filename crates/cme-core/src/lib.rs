@@ -8,7 +8,7 @@
 //!
 //! let stmt = Stmt::new(
 //!     StmtKind::VarDecl {
-//!         ty: Some(PrimitiveType::Int),
+//!         ty: Type::Prim(PrimitiveType::Int),
 //!         name: "x".to_string(),
 //!         expr: Expr::new(ExprKind::IntLit(1), Span::new(8, 9)),
 //!     },
@@ -44,7 +44,15 @@ pub mod ast {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct ErrorId(pub usize);
 
-    pub type Type = Option<PrimitiveType>;
+    /// A declared type. `None` (the "infer" pseudo-type) crystallizes at
+    /// validation time; `Some(PrimitiveType)` covers the four scalar types.
+    /// `Void` is only valid as a function return type.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Type {
+        Infer,
+        Prim(PrimitiveType),
+        Void,
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PrimitiveType {
@@ -52,6 +60,22 @@ pub mod ast {
         Float,
         Bool,
         Str,
+    }
+
+    /// A function parameter: declared type plus name.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Param {
+        pub ty: Type,
+        pub name: String,
+    }
+
+    /// A braced block of statements. Own struct (rather than `Vec<Stmt>`) so
+    /// the block's `{`/`}` span is preserved for tooling and future
+    /// scope-aware consumers.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Block {
+        pub span: Span,
+        pub stmts: Vec<Stmt>,
     }
 
     #[derive(Debug, Clone)]
@@ -102,6 +126,10 @@ pub mod ast {
         Unary {
             op: UnaryOp,
             expr: Box<Expr>,
+        },
+        Call {
+            name: String,
+            args: Vec<Expr>,
         },
         /// A placeholder for a region of source the parser could not
         /// interpret as an expression. The parser never stops: it plants this
@@ -167,6 +195,7 @@ pub mod ast {
                 StmtKind::VarDecl { expr, .. }
                 | StmtKind::Assign { expr, .. }
                 | StmtKind::CompoundAssign { expr, .. } => expr.contains_invalid(),
+                _ => false,
             }
         }
     }
@@ -193,6 +222,24 @@ pub mod ast {
             op: CompoundOp,
             expr: Expr,
         },
+        FuncDecl {
+            name: String,
+            params: Vec<Param>,
+            return_ty: Type,
+            body: Block,
+        },
+        If {
+            cond: Expr,
+            then_branch: Block,
+            else_branch: Option<Box<Stmt>>,
+        },
+        While {
+            cond: Expr,
+            body: Block,
+        },
+        Return {
+            value: Option<Expr>,
+        },
         /// A placeholder for a whole statement the parser could not recognize
         /// (not even its head). Its outer `span` covers the skipped source
         /// region so statement positions stay aligned with the file, which
@@ -207,7 +254,7 @@ pub use ast::Span;
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{ErrorId, Expr, ExprKind, PrimitiveType, Span, Stmt, StmtKind};
+    use super::ast::{ErrorId, Expr, ExprKind, PrimitiveType, Span, Stmt, StmtKind, Type};
 
     #[test]
     fn invalid_nodes_report_containment() {
@@ -223,7 +270,7 @@ mod tests {
             Stmt {
                 span: Span::new(0, 1),
                 kind: StmtKind::VarDecl {
-                    ty: Some(PrimitiveType::Int),
+                    ty: Type::Prim(PrimitiveType::Int),
                     name: "i".into(),
                     expr: broken
                 },

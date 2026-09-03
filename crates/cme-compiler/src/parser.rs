@@ -248,6 +248,17 @@ impl<'a, 'src> Parser<'a, 'src> {
         end
     }
 
+    /// Advances past the failed statement, stopping before the next line that
+    /// begins a declaration or control-flow construct. This lets sibling
+    /// functions and statements survive a broken header.
+    fn recover_to_next_statement(&mut self, end: usize) -> usize {
+        let end = self.skip_to_statement_end(end);
+        if self.peek().token == Token::Newline {
+            self.pos += 1;
+        }
+        end
+    }
+
     /// Parses an initializer or assignment right-hand side with recovery.
     ///
     /// On failure the diagnostic is recorded, tokens up to the statement
@@ -425,7 +436,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             self.advance();
         } else {
             let other = *self.peek();
-            let end = self.skip_to_statement_end(other.span.end);
+            let end = self.recover_to_next_statement(other.span.end);
             let error = self.record(
                 format!("expected `{{`, but found {}", other.token.describe()),
                 other.span,
@@ -567,8 +578,8 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_if_statement(&mut self, if_token: SpannedToken<'src>) -> Stmt {
         let (cond, cond_ok) = self.parse_condition_parens();
         if !cond_ok {
-            let end = self.skip_to_statement_end(self.peek().span.end);
             let error = ErrorId(self.errors.len().saturating_sub(1));
+            let end = self.recover_to_next_statement(self.peek().span.end);
             return Stmt {
                 span: Span::new(if_token.span.start, end),
                 kind: StmtKind::Invalid { error },
@@ -636,8 +647,8 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_while_statement(&mut self, while_token: SpannedToken<'src>) -> Stmt {
         let (cond, cond_ok) = self.parse_condition_parens();
         if !cond_ok {
-            let end = self.skip_to_statement_end(self.peek().span.end);
             let error = ErrorId(self.errors.len().saturating_sub(1));
+            let end = self.recover_to_next_statement(self.peek().span.end);
             return Stmt {
                 span: Span::new(while_token.span.start, end),
                 kind: StmtKind::Invalid { error },
@@ -835,6 +846,27 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_assignment_statement(&mut self, target: SpannedToken<'src>, name: String) -> Stmt {
         let operator = *self.peek();
 
+        if operator.token == Token::LParen {
+            match self.parse_call_expression(name, target.span) {
+                Ok(expr) => {
+                    return Stmt::new(
+                        StmtKind::Expression { expr },
+                        Span::new(target.span.start, self.tokens[self.pos - 1].span.end),
+                    );
+                }
+                Err(diagnostic) => {
+                    self.errors.push(diagnostic);
+                    let end = self.skip_to_statement_end(operator.span.end);
+                    return Stmt {
+                        span: Span::new(target.span.start, end),
+                        kind: StmtKind::Invalid {
+                            error: ErrorId(self.errors.len() - 1),
+                        },
+                    };
+                }
+            }
+        }
+
         let compound = match operator.token {
             Token::Assign => None,
             Token::AddAssign => Some(CompoundOp::Add),
@@ -878,6 +910,39 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     fn parse_expression(&mut self) -> Result<Expr, Diagnostic> {
         self.parse_logic_or()
+    }
+
+    fn parse_call_expression(&mut self, name: String, start: Span) -> Result<Expr, Diagnostic> {
+        self.advance();
+        self.skip_newlines();
+        let mut args = Vec::new();
+        if !self.at(Token::RParen) {
+            loop {
+                self.skip_newlines();
+                args.push(self.parse_expression()?);
+                self.skip_newlines();
+                if self.at(Token::Comma) {
+                    self.advance();
+                    continue;
+                }
+                if self.at(Token::RParen) {
+                    break;
+                }
+                let other = *self.peek();
+                return Err(Self::expected(
+                    "`,` or `)` in argument list",
+                    &other.token,
+                    other.span,
+                ));
+            }
+        }
+        let closing = *self.peek();
+        if closing.token != Token::RParen {
+            return Err(Self::expected("`)`", &closing.token, closing.span));
+        }
+        self.advance();
+        let span = Span::new(start.start, closing.span.end);
+        Ok(Expr::new(ExprKind::Call { name, args }, span))
     }
 
     fn parse_logic_or(&mut self) -> Result<Expr, Diagnostic> {
@@ -1034,42 +1099,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::KwFalse => Ok(Expr::new(ExprKind::BoolLit(false), token.span)),
             Token::Ident(name) => {
                 if self.at(Token::LParen) {
-                    self.advance();
-                    self.skip_newlines();
-                    let mut args = Vec::new();
-                    if !self.at(Token::RParen) {
-                        loop {
-                            self.skip_newlines();
-                            args.push(self.parse_expression()?);
-                            self.skip_newlines();
-                            if self.at(Token::Comma) {
-                                self.advance();
-                                continue;
-                            }
-                            if self.at(Token::RParen) {
-                                break;
-                            }
-                            let other = *self.peek();
-                            return Err(Self::expected(
-                                "`,` or `)` in argument list",
-                                &other.token,
-                                other.span,
-                            ));
-                        }
-                    }
-                    let closing = *self.peek();
-                    if closing.token != Token::RParen {
-                        return Err(Self::expected("`)`", &closing.token, closing.span));
-                    }
-                    self.advance();
-                    let span = Span::new(token.span.start, closing.span.end);
-                    Ok(Expr::new(
-                        ExprKind::Call {
-                            name: name.to_string(),
-                            args,
-                        },
-                        span,
-                    ))
+                    self.parse_call_expression(name.to_string(), token.span)
                 } else {
                     Ok(Expr::new(ExprKind::Ident(name.to_string()), token.span))
                 }

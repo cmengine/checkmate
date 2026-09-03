@@ -226,6 +226,8 @@ fn is_float_shape(text: &str) -> bool {
     }
 }
 
+/// Fails fast on the first lex error. For tolerant parsing, prefer
+/// [`crate::parse_source`].
 pub fn lex(source: &str) -> Result<Vec<SpannedToken<'_>>, LexError> {
     let (tokens, errors) = lex_with_errors(source);
     match errors.into_iter().next() {

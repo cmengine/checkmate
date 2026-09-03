@@ -2,7 +2,6 @@
 #[cfg(feature = "cli")]
 use cme_compiler::diagnostics::Diagnostic;
 #[cfg(feature = "cli")]
-use cme_compiler::parser::Parser;
 #[cfg(feature = "cli")]
 use std::process::ExitCode;
 #[cfg(feature = "cli")]
@@ -39,15 +38,9 @@ fn run() -> Result<(), CliError> {
             render_diagnostics(errors, &source)
         }
         "ast" => {
-            let (tokens, lex_errors) = cme_compiler::lexer::lex_with_errors(&source);
-            let mut errors = lex_errors
-                .into_iter()
-                .map(Diagnostic::lex)
-                .collect::<Vec<_>>();
-            let (tokens, strip_errors) = Parser::strip_insignificant_newlines_with_errors(tokens);
-            errors.extend(strip_errors);
-            let (ast, parse_errors) = Parser::new(&tokens).parse_program_with_errors();
-            errors.extend(parse_errors);
+            let outcome = cme_compiler::parse_source(&source);
+            let errors = outcome.diagnostics;
+            let ast = outcome.statements;
 
             println!("{ast:#?}");
             render_diagnostics(errors, &source)

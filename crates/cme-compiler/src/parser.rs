@@ -86,6 +86,8 @@ impl<'a, 'src> Parser<'a, 'src> {
         )
     }
 
+    /// Fails fast on the first diagnostic. For tolerant parsing, prefer
+    /// [`crate::parse_source`].
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
         let (stmts, errors) = self.parse_program_with_errors();
         match errors.into_iter().next() {

@@ -60,3 +60,21 @@ impl fmt::Display for Diagnostic {
         formatter.write_str(&self.message)
     }
 }
+
+/// The result of a tolerant parse: the recovered AST plus every diagnostic.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ParseOutcome {
+    pub statements: Vec<cme_core::ast::Stmt>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl ParseOutcome {
+    pub fn is_clean(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+
+    pub fn error(&self, id: cme_core::ast::ErrorId) -> Option<&Diagnostic> {
+        self.diagnostics.get(id.0)
+    }
+}

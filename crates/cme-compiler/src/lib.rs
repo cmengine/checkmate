@@ -2,8 +2,22 @@ pub mod diagnostics;
 pub mod lexer;
 pub mod parser;
 pub mod validate;
-pub use diagnostics::{Diagnostic, DiagnosticKind};
-pub use logos;
+pub use diagnostics::{Diagnostic, DiagnosticKind, ParseOutcome};
+
+pub fn parse_source(source: &str) -> ParseOutcome {
+    // Lexes, strips insignificant newlines, then parses and validates with
+    // recovery. This is the one-call front-end API.
+    let (tokens, lex_errors) = lexer::lex_with_errors(source);
+    let mut diagnostics: Vec<Diagnostic> = lex_errors.into_iter().map(Diagnostic::lex).collect();
+    let (tokens, strip_errors) = parser::Parser::strip_insignificant_newlines_with_errors(tokens);
+    diagnostics.extend(strip_errors);
+    let (statements, parse_errors) = parser::Parser::new(&tokens).parse_program_with_errors();
+    diagnostics.extend(parse_errors);
+    ParseOutcome {
+        statements,
+        diagnostics,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -70,16 +84,8 @@ mod tests {
     }
 
     fn parse_program_parts(source: &str) -> (Vec<Stmt>, Vec<Diagnostic>) {
-        let (tokens, lex_errors) = crate::lexer::lex_with_errors(source);
-        let mut errors = lex_errors
-            .into_iter()
-            .map(Diagnostic::lex)
-            .collect::<Vec<_>>();
-        let (tokens, strip_errors) = Parser::strip_insignificant_newlines_with_errors(tokens);
-        errors.extend(strip_errors);
-        let (stmts, parse_errors) = Parser::new(&tokens).parse_program_with_errors();
-        errors.extend(parse_errors);
-        (stmts, errors)
+        let outcome = crate::parse_source(source);
+        (outcome.statements, outcome.diagnostics)
     }
 
     fn parse_program_ok(source: &str) -> Vec<Stmt> {
@@ -824,6 +830,35 @@ mod tests {
             parser.parse_statement(),
             var_decl(None, "a", expr(ExprKind::IntLit(1)))
         );
+    }
+
+    #[test]
+    fn invalid_error_ids_index_existing_diagnostics() {
+        fn walk_expr(expr: &Expr, errors: &[Diagnostic]) {
+            match &expr.kind {
+                ExprKind::Invalid { error } => assert!(error.0 < errors.len()),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    walk_expr(lhs, errors);
+                    walk_expr(rhs, errors);
+                }
+                ExprKind::Unary { expr, .. } | ExprKind::Paren { expr } => walk_expr(expr, errors),
+                _ => {}
+            }
+        }
+
+        fn walk_stmt(stmt: &Stmt, errors: &[Diagnostic]) {
+            match &stmt.kind {
+                StmtKind::Invalid { error } => assert!(error.0 < errors.len()),
+                StmtKind::VarDecl { expr, .. }
+                | StmtKind::Assign { expr, .. }
+                | StmtKind::CompoundAssign { expr, .. } => walk_expr(expr, errors),
+            }
+        }
+
+        let outcome = crate::parse_source(BOOM_CM);
+        for stmt in &outcome.statements {
+            walk_stmt(stmt, &outcome.diagnostics);
+        }
     }
 
     #[test]

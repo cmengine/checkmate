@@ -2,7 +2,7 @@
 pub use cme_compiler as compiler;
 
 #[cfg(feature = "core")]
-pub use cme_core as core;
+pub use cme_core as lang;
 
 #[cfg(feature = "interp")]
 pub use cme_interp as interp;

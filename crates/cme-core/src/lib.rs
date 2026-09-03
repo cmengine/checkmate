@@ -1,3 +1,22 @@
+//! `cme-core` owns the language data model: the spanned AST, source spans, and
+//! diagnostic references. Recognition and parsing stay in `cme-compiler`.
+//!
+//! A hand-built declaration looks like this:
+//!
+//! ```
+//! use cme_core::ast::{Expr, ExprKind, PrimitiveType, Span, Stmt, StmtKind, Type};
+//!
+//! let stmt = Stmt::new(
+//!     StmtKind::VarDecl {
+//!         ty: Some(PrimitiveType::Int),
+//!         name: "x".to_string(),
+//!         expr: Expr::new(ExprKind::IntLit(1), Span::new(8, 9)),
+//!     },
+//!     Span::new(0, 9),
+//! );
+//! assert_eq!(stmt.span.end, 9);
+//! ```
+
 pub mod ast {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Span {

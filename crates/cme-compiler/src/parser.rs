@@ -4,7 +4,8 @@ use crate::validate;
 
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, CompoundOp, ErrorId, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
+    BinaryOp, Block, CompoundOp, ErrorId, Expr, ExprKind, Param, PrimitiveType, Stmt, StmtKind,
+    Type, UnaryOp,
 };
 
 pub struct Parser<'a, 'src> {
@@ -322,7 +323,36 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
         let first = self.advance();
 
+        if first.token == Token::KwIf {
+            return self.parse_if_statement(first);
+        }
+        if first.token == Token::KwWhile {
+            return self.parse_while_statement(first);
+        }
+        if first.token == Token::KwReturn {
+            return self.parse_return_statement(first);
+        }
+        if first.token == Token::KwVoid {
+            if matches!(self.peek().token, Token::Ident(_))
+                && !matches!(
+                    self.tokens.get(self.pos + 1).map(|t| t.token),
+                    Some(Token::LParen)
+                )
+            {
+                return self.parse_void_misuse(first);
+            }
+            return self.parse_function_declaration(first);
+        }
+
         if first.token.is_type_keyword() {
+            if matches!(self.peek().token, Token::Ident(_))
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| t.token),
+                    Some(Token::LParen)
+                )
+            {
+                return self.parse_function_declaration(first);
+            }
             return self.parse_variable_declaration(first);
         }
 
@@ -338,6 +368,377 @@ impl<'a, 'src> Parser<'a, 'src> {
         let error = self.record(message, first.span);
         Stmt {
             span: Span::new(first.span.start, end),
+            kind: StmtKind::Invalid { error },
+        }
+    }
+
+    fn parse_type_from_token(token: &Token<'_>) -> Option<Type> {
+        match token {
+            Token::KwInt => Some(Type::Prim(PrimitiveType::Int)),
+            Token::KwFloat => Some(Type::Prim(PrimitiveType::Float)),
+            Token::KwStr => Some(Type::Prim(PrimitiveType::Str)),
+            Token::KwBool => Some(Type::Prim(PrimitiveType::Bool)),
+            Token::KwInfer => Some(Type::Infer),
+            Token::KwVoid => Some(Type::Void),
+            _ => None,
+        }
+    }
+
+    fn parse_function_declaration(&mut self, type_token: SpannedToken<'src>) -> Stmt {
+        let return_ty = Self::parse_type_from_token(&type_token.token).unwrap_or(Type::Infer);
+
+        let name = match *self.peek() {
+            SpannedToken {
+                token: Token::Ident(name),
+                ..
+            } => {
+                self.advance();
+                name.to_string()
+            }
+            other => {
+                let end = self.skip_to_statement_end(other.span.end);
+                let error = self.record(
+                    format!(
+                        "expected a function name, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                return Stmt {
+                    span: Span::new(type_token.span.start, end),
+                    kind: StmtKind::Invalid { error },
+                };
+            }
+        };
+
+        let (params, params_ok) = self.parse_parameter_list();
+        if !params_ok {
+            let end = self.skip_to_statement_end(self.peek().span.end);
+            let error = ErrorId(self.errors.len().saturating_sub(1));
+            return Stmt {
+                span: Span::new(type_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        if self.at(Token::LBrace) {
+            self.advance();
+        } else {
+            let other = *self.peek();
+            let end = self.skip_to_statement_end(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(type_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        let body = self.parse_block_body(type_token.span.start);
+        Stmt::new(
+            StmtKind::FuncDecl {
+                name,
+                params,
+                return_ty,
+                body,
+            },
+            Span::new(type_token.span.start, self.tokens[self.pos - 1].span.end),
+        )
+    }
+
+    fn parse_parameter_list(&mut self) -> (Vec<Param>, bool) {
+        let mut params = Vec::new();
+
+        if !self.at(Token::LParen) {
+            let other = *self.peek();
+            let error = self.record(
+                format!("expected `(`, but found {}", other.token.describe()),
+                other.span,
+            );
+            let _ = error;
+            return (params, false);
+        }
+        self.advance();
+
+        if self.at(Token::RParen) {
+            self.advance();
+            return (params, true);
+        }
+
+        loop {
+            let type_token = *self.peek();
+            let ty = Self::parse_type_from_token(&type_token.token);
+            if ty.is_none() {
+                let _ = self.record(
+                    format!(
+                        "expected a parameter type, but found {}",
+                        type_token.token.describe()
+                    ),
+                    type_token.span,
+                );
+                return (params, false);
+            }
+            self.advance();
+
+            let name = match *self.peek() {
+                SpannedToken {
+                    token: Token::Ident(name),
+                    ..
+                } => {
+                    self.advance();
+                    name.to_string()
+                }
+                other => {
+                    let _ = self.record(
+                        format!(
+                            "expected a parameter name, but found {}",
+                            other.token.describe()
+                        ),
+                        other.span,
+                    );
+                    return (params, false);
+                }
+            };
+
+            params.push(Param {
+                ty: ty.unwrap(),
+                name,
+            });
+
+            if self.at(Token::Comma) {
+                self.advance();
+                continue;
+            }
+            if self.at(Token::RParen) {
+                self.advance();
+                return (params, true);
+            }
+            let other = *self.peek();
+            let _ = self.record(
+                format!("expected `,` or `)`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return (params, false);
+        }
+    }
+
+    fn parse_block_body(&mut self, _start: usize) -> Block {
+        let mut stmts = Vec::new();
+
+        loop {
+            self.skip_newlines();
+            if self.at(Token::RBrace) {
+                let closing = self.advance();
+                return Block {
+                    span: Span::new(closing.span.start, closing.span.end),
+                    stmts,
+                };
+            }
+            if self.at_eof() {
+                let eof_span = self.eof_span();
+                let _ = self.record("expected `}` before end of file", eof_span);
+                return Block {
+                    span: Span::missing(eof_span.start),
+                    stmts,
+                };
+            }
+
+            let inner = self.parse_statement();
+            stmts.push(inner);
+
+            match self.peek().token {
+                Token::Newline => {
+                    self.pos += 1;
+                }
+                Token::RBrace | Token::Eof => {}
+                _ => {
+                    let token = self.peek().token;
+                    let span = self.peek().span;
+                    self.errors
+                        .push(Self::expected("end of statement", &token, span));
+                    self.skip_to_next_statement();
+                }
+            }
+        }
+    }
+
+    fn parse_if_statement(&mut self, if_token: SpannedToken<'src>) -> Stmt {
+        let (cond, cond_ok) = self.parse_condition_parens();
+        if !cond_ok {
+            let end = self.skip_to_statement_end(self.peek().span.end);
+            let error = ErrorId(self.errors.len().saturating_sub(1));
+            return Stmt {
+                span: Span::new(if_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        if self.at(Token::LBrace) {
+            self.advance();
+        } else {
+            let other = *self.peek();
+            let end = self.skip_to_statement_end(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(if_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        let then_branch = self.parse_block_body(if_token.span.start);
+
+        let else_branch = if self.at(Token::KwElse) {
+            self.advance();
+            if self.at(Token::KwIf) {
+                let else_if = self.advance();
+                Some(Box::new(self.parse_if_statement(else_if)))
+            } else if self.at(Token::LBrace) {
+                self.advance();
+                Some(Box::new(Stmt::new(
+                    StmtKind::Block(self.parse_block_body(if_token.span.start)),
+                    Span::new(0, 0),
+                )))
+            } else {
+                let other = *self.peek();
+                let end = self.skip_to_statement_end(other.span.end);
+                let error = self.record(
+                    format!(
+                        "expected `{{` or `if` after `else`, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                Some(Box::new(Stmt {
+                    span: Span::new(other.span.start, end),
+                    kind: StmtKind::Invalid { error },
+                }))
+            }
+        } else {
+            None
+        };
+
+        let end = self.tokens[self.pos - 1].span.end;
+        Stmt::new(
+            StmtKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            },
+            Span::new(if_token.span.start, end),
+        )
+    }
+
+    fn parse_while_statement(&mut self, while_token: SpannedToken<'src>) -> Stmt {
+        let (cond, cond_ok) = self.parse_condition_parens();
+        if !cond_ok {
+            let end = self.skip_to_statement_end(self.peek().span.end);
+            let error = ErrorId(self.errors.len().saturating_sub(1));
+            return Stmt {
+                span: Span::new(while_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        if self.at(Token::LBrace) {
+            self.advance();
+        } else {
+            let other = *self.peek();
+            let end = self.skip_to_statement_end(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(while_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        let body = self.parse_block_body(while_token.span.start);
+        let end = self.tokens[self.pos - 1].span.end;
+        Stmt::new(
+            StmtKind::While { cond, body },
+            Span::new(while_token.span.start, end),
+        )
+    }
+
+    fn parse_condition_parens(&mut self) -> (Expr, bool) {
+        if !self.at(Token::LParen) {
+            let other = *self.peek();
+            let error = self.record(
+                format!("expected `(`, but found {}", other.token.describe()),
+                other.span,
+            );
+            let _ = error;
+            let missing = Expr {
+                span: Span::missing(other.span.start),
+                kind: ExprKind::Invalid {
+                    error: ErrorId(self.errors.len() - 1),
+                },
+            };
+            return (missing, false);
+        }
+        self.advance();
+        self.skip_newlines();
+
+        match self.parse_expression() {
+            Ok(expr) => {
+                self.skip_newlines();
+                if self.at(Token::RParen) {
+                    self.advance();
+                    (expr, true)
+                } else {
+                    let other = *self.peek();
+                    let _ = self.record(
+                        format!("expected `)`, but found {}", other.token.describe()),
+                        other.span,
+                    );
+                    (expr, false)
+                }
+            }
+            Err(diagnostic) => {
+                self.errors.push(diagnostic);
+                let missing = Expr {
+                    span: Span::missing(self.peek().span.start),
+                    kind: ExprKind::Invalid {
+                        error: ErrorId(self.errors.len() - 1),
+                    },
+                };
+                (missing, false)
+            }
+        }
+    }
+
+    fn parse_return_statement(&mut self, return_token: SpannedToken<'src>) -> Stmt {
+        let value = if matches!(
+            self.peek().token,
+            Token::Newline | Token::RBrace | Token::Eof
+        ) {
+            None
+        } else {
+            Some(self.parse_recovered_expression())
+        };
+
+        let end = self.tokens[self.pos - 1].span.end;
+        Stmt::new(
+            StmtKind::Return { value },
+            Span::new(return_token.span.start, end),
+        )
+    }
+
+    fn parse_void_misuse(&mut self, void_token: SpannedToken<'src>) -> Stmt {
+        let end = self.skip_to_statement_end(void_token.span.end);
+        let error = self.record(
+            "`void` is only valid as a function return type",
+            void_token.span,
+        );
+        Stmt {
+            span: Span::new(void_token.span.start, end),
             kind: StmtKind::Invalid { error },
         }
     }
@@ -631,7 +1032,48 @@ impl<'a, 'src> Parser<'a, 'src> {
             )),
             Token::KwTrue => Ok(Expr::new(ExprKind::BoolLit(true), token.span)),
             Token::KwFalse => Ok(Expr::new(ExprKind::BoolLit(false), token.span)),
-            Token::Ident(name) => Ok(Expr::new(ExprKind::Ident(name.to_string()), token.span)),
+            Token::Ident(name) => {
+                if self.at(Token::LParen) {
+                    self.advance();
+                    self.skip_newlines();
+                    let mut args = Vec::new();
+                    if !self.at(Token::RParen) {
+                        loop {
+                            self.skip_newlines();
+                            args.push(self.parse_expression()?);
+                            self.skip_newlines();
+                            if self.at(Token::Comma) {
+                                self.advance();
+                                continue;
+                            }
+                            if self.at(Token::RParen) {
+                                break;
+                            }
+                            let other = *self.peek();
+                            return Err(Self::expected(
+                                "`,` or `)` in argument list",
+                                &other.token,
+                                other.span,
+                            ));
+                        }
+                    }
+                    let closing = *self.peek();
+                    if closing.token != Token::RParen {
+                        return Err(Self::expected("`)`", &closing.token, closing.span));
+                    }
+                    self.advance();
+                    let span = Span::new(token.span.start, closing.span.end);
+                    Ok(Expr::new(
+                        ExprKind::Call {
+                            name: name.to_string(),
+                            args,
+                        },
+                        span,
+                    ))
+                } else {
+                    Ok(Expr::new(ExprKind::Ident(name.to_string()), token.span))
+                }
+            }
             Token::LParen => {
                 let expr = self.parse_logic_or()?;
                 let closing = self.require_token("expected `)`, but found end of file")?;

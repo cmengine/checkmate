@@ -1029,6 +1029,29 @@ mod tests {
     }
 
     const BOOM_CM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../boom.cm"));
+    const BASIC_CM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../basic.cm"));
+
+    #[test]
+    fn truncation_never_panics() {
+        for fixture in [BOOM_CM, BASIC_CM] {
+            for end in 0..=fixture.len() {
+                if !fixture.is_char_boundary(end) {
+                    continue;
+                }
+                let outcome = crate::parse_source(&fixture[..end]);
+                let _ = outcome;
+            }
+        }
+    }
+
+    #[test]
+    fn basic_cm_parses_clean() {
+        let outcome = crate::parse_source(BASIC_CM);
+        assert!(
+            outcome.is_clean(),
+            "basic.cm should parse with ZERO diagnostics: {outcome:#?}"
+        );
+    }
 
     fn statement_label(stmt: &Stmt) -> String {
         match &stmt.kind {

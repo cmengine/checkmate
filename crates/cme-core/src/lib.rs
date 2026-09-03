@@ -240,6 +240,10 @@ pub mod ast {
         Return {
             value: Option<Expr>,
         },
+        /// A braced block used as a statement body (`else { ... }`). The
+        /// parser reuses the If node for chains, so a plain else block needs
+        /// its own statement wrapper.
+        Block(Block),
         /// A placeholder for a whole statement the parser could not recognize
         /// (not even its head). Its outer `span` covers the skipped source
         /// region so statement positions stay aligned with the file, which

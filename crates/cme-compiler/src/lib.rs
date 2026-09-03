@@ -11,7 +11,9 @@ mod tests {
     use super::parser::Parser;
     use crate::diagnostics::Diagnostic;
     use cme_core::Span;
-    use cme_core::ast::{BinaryOp, CompoundOp, Expr, ExprKind, Stmt, StmtKind, Type, UnaryOp};
+    use cme_core::ast::{
+        BinaryOp, CompoundOp, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
+    };
 
     fn expr(kind: ExprKind) -> Expr {
         Expr::new(kind, Span::missing(0))
@@ -119,10 +121,7 @@ mod tests {
     fn parses_inferred_float_variable_declaration() {
         let ast = parse_statement_ok("infer speed = 4.5");
 
-        assert_eq!(
-            ast,
-            var_decl(Type::Infer, "speed", expr(ExprKind::FloatLit(4.5)))
-        );
+        assert_eq!(ast, var_decl(None, "speed", expr(ExprKind::FloatLit(4.5))));
     }
 
     #[test]
@@ -130,7 +129,11 @@ mod tests {
         let ast = parse_statement_ok("int count = 42");
         assert_eq!(
             ast,
-            var_decl(Type::Int, "count", expr(ExprKind::IntLit(42)))
+            var_decl(
+                Some(PrimitiveType::Int),
+                "count",
+                expr(ExprKind::IntLit(42))
+            )
         );
     }
 
@@ -139,7 +142,11 @@ mod tests {
         let ast = parse_statement_ok("float ratio = 0.25");
         assert_eq!(
             ast,
-            var_decl(Type::Float, "ratio", expr(ExprKind::FloatLit(0.25)))
+            var_decl(
+                Some(PrimitiveType::Float),
+                "ratio",
+                expr(ExprKind::FloatLit(0.25))
+            )
         );
     }
 
@@ -149,7 +156,7 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(
-                Type::Infer,
+                None,
                 "value",
                 expr(ExprKind::Ident("other_value".to_string()))
             )
@@ -162,7 +169,7 @@ mod tests {
         assert_eq!(
             ast,
             var_decl(
-                Type::Str,
+                Some(PrimitiveType::Str),
                 "message",
                 expr(ExprKind::StrLit("OMG WOW!".to_string()))
             )
@@ -175,9 +182,13 @@ mod tests {
         assert_eq!(
             ast,
             vec![
-                var_decl(Type::Int, "a", expr(ExprKind::IntLit(1))),
-                var_decl(Type::Infer, "b", expr(ExprKind::Ident("a".to_string()))),
-                var_decl(Type::Float, "c", expr(ExprKind::FloatLit(2.5))),
+                var_decl(Some(PrimitiveType::Int), "a", expr(ExprKind::IntLit(1))),
+                var_decl(None, "b", expr(ExprKind::Ident("a".to_string()))),
+                var_decl(
+                    Some(PrimitiveType::Float),
+                    "c",
+                    expr(ExprKind::FloatLit(2.5))
+                ),
             ]
         );
     }
@@ -188,8 +199,8 @@ mod tests {
         assert_eq!(
             ast,
             vec![
-                var_decl(Type::Int, "a", expr(ExprKind::IntLit(1))),
-                var_decl(Type::Infer, "b", expr(ExprKind::Ident("a".to_string()))),
+                var_decl(Some(PrimitiveType::Int), "a", expr(ExprKind::IntLit(1))),
+                var_decl(None, "b", expr(ExprKind::Ident("a".to_string()))),
             ]
         );
     }
@@ -410,7 +421,7 @@ mod tests {
 
         match stmt.kind {
             StmtKind::VarDecl {
-                ty: Type::Int,
+                ty: Some(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -435,7 +446,7 @@ mod tests {
 
         match stmt.kind {
             StmtKind::VarDecl {
-                ty: Type::Int,
+                ty: Some(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -488,13 +499,14 @@ mod tests {
         let ast = parse_statement_ok("bool flag = true");
         assert_eq!(
             ast,
-            var_decl(Type::Bool, "flag", expr(ExprKind::BoolLit(true)))
+            var_decl(
+                Some(PrimitiveType::Bool),
+                "flag",
+                expr(ExprKind::BoolLit(true))
+            )
         );
         let ast = parse_statement_ok("infer flag = false");
-        assert_eq!(
-            ast,
-            var_decl(Type::Infer, "flag", expr(ExprKind::BoolLit(false)))
-        );
+        assert_eq!(ast, var_decl(None, "flag", expr(ExprKind::BoolLit(false))));
     }
 
     #[test]
@@ -553,7 +565,11 @@ mod tests {
         ));
         assert_eq!(
             stmts,
-            vec![var_decl(Type::Int, "b", expr(ExprKind::IntLit(1)))]
+            vec![var_decl(
+                Some(PrimitiveType::Int),
+                "b",
+                expr(ExprKind::IntLit(1))
+            )]
         );
     }
 
@@ -573,7 +589,7 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "b", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "b", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -590,7 +606,7 @@ mod tests {
 
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Type::Int,
+                ty: Some(PrimitiveType::Int),
                 name,
                 expr:
                     Expr {
@@ -607,7 +623,7 @@ mod tests {
         }
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "j", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -620,7 +636,7 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Type::Int,
+                ty: Some(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -643,7 +659,7 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Type::Int,
+                ty: Some(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -654,7 +670,7 @@ mod tests {
         }
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "j", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -680,7 +696,7 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "j", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -704,7 +720,7 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "j", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -728,7 +744,7 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "j", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -775,7 +791,7 @@ mod tests {
         ));
         assert_eq!(
             stmts[2],
-            var_decl(Type::Int, "c", expr(ExprKind::IntLit(3)))
+            var_decl(Some(PrimitiveType::Int), "c", expr(ExprKind::IntLit(3)))
         );
     }
 
@@ -806,7 +822,7 @@ mod tests {
 
         assert_eq!(
             parser.parse_statement(),
-            var_decl(Type::Infer, "a", expr(ExprKind::IntLit(1)))
+            var_decl(None, "a", expr(ExprKind::IntLit(1)))
         );
     }
 
@@ -825,7 +841,7 @@ mod tests {
         assert_eq!(stmts.len(), 2);
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Type::Int,
+                ty: Some(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -836,7 +852,7 @@ mod tests {
         }
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "j", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -860,7 +876,7 @@ mod tests {
         ));
         assert_eq!(
             stmts[1],
-            var_decl(Type::Int, "j", expr(ExprKind::IntLit(2)))
+            var_decl(Some(PrimitiveType::Int), "j", expr(ExprKind::IntLit(2)))
         );
     }
 
@@ -882,7 +898,7 @@ mod tests {
         );
         match &stmts[0].kind {
             StmtKind::VarDecl {
-                ty: Type::Int,
+                ty: Some(PrimitiveType::Int),
                 name,
                 expr: Expr { span, .. },
             } => {
@@ -896,7 +912,7 @@ mod tests {
         }
         match &stmts[1].kind {
             StmtKind::VarDecl {
-                ty: Type::Str,
+                ty: Some(PrimitiveType::Str),
                 name,
                 expr:
                     Expr {
@@ -915,7 +931,17 @@ mod tests {
 
     fn statement_label(stmt: &Stmt) -> String {
         match &stmt.kind {
-            StmtKind::VarDecl { ty, name, .. } => format!("var:{name}:{ty:?}"),
+            StmtKind::VarDecl { ty, name, .. } => {
+                format!(
+                    "var:{name}:{}",
+                    ty.as_ref().map_or("None", |ty| match ty {
+                        PrimitiveType::Int => "Int",
+                        PrimitiveType::Float => "Float",
+                        PrimitiveType::Bool => "Bool",
+                        PrimitiveType::Str => "Str",
+                    })
+                )
+            }
             StmtKind::Assign { name, .. } => format!("assign:{name}"),
             StmtKind::CompoundAssign { target, .. } => format!("compound:{target}"),
             StmtKind::Invalid { .. } => "invalid".to_string(),
@@ -969,18 +995,18 @@ mod tests {
             labels,
             vec![
                 "var:first:Int",
-                "var:second:Infer",
+                "var:second:None",
                 // §2 flagship — every declared type survives its broken initializer
                 "var:i:Int",
                 "var:f:Float",
                 "var:s:Str",
                 "var:b:Bool",
-                "var:v:Infer",
+                "var:v:None",
                 // §3 missing pieces — three zero-width survivors + one unrecognizable
                 "var:count:Int",
                 "var:k:Int",
                 "invalid",
-                "var:draft:Infer",
+                "var:draft:None",
                 // §4 siblings
                 "var:left:Int",
                 "var:middle:Int",
@@ -1013,22 +1039,22 @@ mod tests {
                 // §9 lexer errors — five declarations survive the damaged lines
                 "var:cursed:Int",
                 "var:oops:Str",
-                "var:fragile:Infer",
-                "var:afterAt:Infer",
+                "var:fragile:None",
+                "var:afterAt:None",
                 "var:huge:Int",
                 // §10 unbalanced closing parens — both statements stay healthy
-                "var:q:Infer",
+                "var:q:None",
                 "var:q2:Int",
                 // §11 balanced broken groups
-                "var:empty:Infer",
-                "var:mixed:Infer",
+                "var:empty:None",
+                "var:mixed:None",
                 // §12 operator grammar
-                "var:mixedBad:Infer",
-                "var:chained:Infer",
+                "var:mixedBad:None",
+                "var:chained:None",
                 // §13 continuations
                 "var:cont:Int",
                 "var:boom2:Str",
-                "var:multi:Infer",
+                "var:multi:None",
                 "var:afterMulti:Int",
                 // §14 trailing garbage
                 "var:ok:Int",
@@ -1037,12 +1063,12 @@ mod tests {
                 // §15 LSP simulation
                 "var:hp:Int",
                 "var:mp:Int",
-                "var:total:Infer",
+                "var:total:None",
                 "var:name:Str",
                 "var:flag:Bool",
                 "var:brokenFlag:Bool",
                 // §16 EOF
-                "var:unterminated:Infer",
+                "var:unterminated:None",
             ]
         );
 

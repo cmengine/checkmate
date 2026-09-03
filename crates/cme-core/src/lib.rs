@@ -25,13 +25,14 @@ pub mod ast {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct ErrorId(pub usize);
 
+    pub type Type = Option<PrimitiveType>;
+
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum Type {
+    pub enum PrimitiveType {
         Int,
         Float,
         Bool,
         Str,
-        Infer,
     }
 
     #[derive(Debug, Clone)]
@@ -187,7 +188,7 @@ pub use ast::Span;
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{ErrorId, Expr, ExprKind, Span, Stmt, StmtKind, Type};
+    use super::ast::{ErrorId, Expr, ExprKind, PrimitiveType, Span, Stmt, StmtKind};
 
     #[test]
     fn invalid_nodes_report_containment() {
@@ -203,7 +204,7 @@ mod tests {
             Stmt {
                 span: Span::new(0, 1),
                 kind: StmtKind::VarDecl {
-                    ty: Type::Int,
+                    ty: Some(PrimitiveType::Int),
                     name: "i".into(),
                     expr: broken
                 },

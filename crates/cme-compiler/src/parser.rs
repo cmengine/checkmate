@@ -4,7 +4,7 @@ use crate::validate;
 
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, CompoundOp, ErrorId, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, UnaryOp,
+    BinaryOp, CompoundOp, ErrorId, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
 };
 
 pub struct Parser<'a, 'src> {
@@ -344,11 +344,11 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     fn parse_variable_declaration(&mut self, type_token: SpannedToken<'src>) -> Stmt {
         let ty = match type_token.token {
-            Token::KwInt => Some(PrimitiveType::Int),
-            Token::KwFloat => Some(PrimitiveType::Float),
-            Token::KwStr => Some(PrimitiveType::Str),
-            Token::KwBool => Some(PrimitiveType::Bool),
-            Token::KwInfer => None,
+            Token::KwInt => Type::Prim(PrimitiveType::Int),
+            Token::KwFloat => Type::Prim(PrimitiveType::Float),
+            Token::KwStr => Type::Prim(PrimitiveType::Str),
+            Token::KwBool => Type::Prim(PrimitiveType::Bool),
+            Token::KwInfer => Type::Infer,
             _ => unreachable!("the caller only dispatches type keywords"),
         };
 

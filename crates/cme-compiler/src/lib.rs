@@ -1,6 +1,7 @@
 pub mod diagnostics;
 pub mod lexer;
 pub mod parser;
+pub mod validate;
 pub use diagnostics::{Diagnostic, DiagnosticKind};
 pub use logos;
 
@@ -290,7 +291,16 @@ mod tests {
             ast[0],
             errors
         );
-        assert_eq!(errors.len(), 0);
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn validator_reports_operand_spans_for_mixed_logic() {
+        let (ast, errors) = parse_program_parts("infer x = a && b || c");
+        assert!(!ast[0].contains_invalid());
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].to_string(), "mixed && and || require parentheses");
+        assert_eq!(errors[1].to_string(), "mixed && and || require parentheses");
     }
 
     #[test]
@@ -951,7 +961,7 @@ mod tests {
         // deliberately changes.
         let (stmts, errors) = parse_program_parts(BOOM_CM);
 
-        assert_eq!(errors.len(), 59, "diagnostics: {errors:#?}");
+        assert_eq!(errors.len(), 61, "diagnostics: {errors:#?}");
         assert_eq!(stmts.len(), 60, "statements: {stmts:#?}");
 
         let labels: Vec<String> = stmts.iter().map(statement_label).collect();

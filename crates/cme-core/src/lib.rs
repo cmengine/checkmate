@@ -71,6 +71,9 @@ pub mod ast {
         StrLit(String),
         BoolLit(bool),
         Ident(String),
+        Paren {
+            expr: Box<Expr>,
+        },
         Binary {
             op: BinaryOp,
             lhs: Box<Expr>,

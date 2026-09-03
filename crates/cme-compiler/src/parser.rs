@@ -1,5 +1,6 @@
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{SpannedToken, Token};
+use crate::validate;
 
 use cme_core::Span;
 use cme_core::ast::{BinaryOp, CompoundOp, ErrorId, Expr, ExprKind, Stmt, StmtKind, Type, UnaryOp};
@@ -99,6 +100,12 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// for reporting; execution consumers should refuse to run while it is
     /// non-empty.
     pub fn parse_program_with_errors(&mut self) -> (Vec<Stmt>, Vec<Diagnostic>) {
+        let (stmts, mut errors) = self.parse_statement_inner();
+        errors.extend(validate::validate_statements(&stmts));
+        (stmts, errors)
+    }
+
+    fn parse_statement_inner(&mut self) -> (Vec<Stmt>, Vec<Diagnostic>) {
         let mut stmts = Vec::new();
 
         loop {
@@ -293,6 +300,14 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// and its diagnostic is recorded for [`Self::take_errors`] or
     /// [`Self::parse_program_with_errors`].
     pub fn parse_statement(&mut self) -> Stmt {
+        let stmt = self.parse_statement_inner_single();
+        for diagnostic in validate::validate_statements(std::slice::from_ref(&stmt)) {
+            self.record(diagnostic.message(), diagnostic.span());
+        }
+        stmt
+    }
+
+    fn parse_statement_inner_single(&mut self) -> Stmt {
         if self.at_eof() {
             let eof_span = self.eof_span();
             let error = self.record("unexpected end of file", eof_span);
@@ -620,7 +635,9 @@ impl<'a, 'src> Parser<'a, 'src> {
                     return Err(Self::expected("`)`", &closing.token, closing.span));
                 }
                 Ok(Expr::new(
-                    expr.kind,
+                    ExprKind::Paren {
+                        expr: Box::new(expr),
+                    },
                     Span::new(token.span.start, closing.span.end),
                 ))
             }

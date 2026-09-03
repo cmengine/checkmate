@@ -21,30 +21,11 @@ pub mod ast {
         }
     }
 
-    /// A recorded syntax error attached to an `Invalid` AST node.
-    ///
-    /// `span` points at the precise error location (the offending token or the
-    /// position where something was expected), while the enclosing `Invalid`
-    /// node's own `span` covers the whole source region the parser skipped.
-    /// The same diagnostics are also returned by the parser, which stays the
-    /// canonical list for reporting; the copy here keeps each broken region
-    /// self-describing as the tree is passed between components.
-    #[derive(Debug, PartialEq, Eq, Clone)]
-    pub struct SyntaxError {
-        pub message: String,
-        pub span: Span,
-    }
+    /// The index of a diagnostic in the diagnostics list produced with an AST.
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub struct ErrorId(pub usize);
 
-    impl SyntaxError {
-        pub fn new(message: impl Into<String>, span: Span) -> Self {
-            Self {
-                message: message.into(),
-                span,
-            }
-        }
-    }
-
-    #[derive(Debug, PartialEq, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Type {
         Int,
         Float,
@@ -53,8 +34,38 @@ pub mod ast {
         Infer,
     }
 
-    #[derive(Debug, PartialEq, Clone)]
-    pub enum Expr {
+    #[derive(Debug, Clone)]
+    pub struct Expr {
+        pub span: Span,
+        pub kind: ExprKind,
+    }
+
+    impl Expr {
+        pub fn new(kind: ExprKind, span: Span) -> Self {
+            Self { span, kind }
+        }
+
+        /// Returns `true` if this expression or any subexpression is `Invalid`.
+        pub fn contains_invalid(&self) -> bool {
+            match &self.kind {
+                ExprKind::Invalid { .. } => true,
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    lhs.contains_invalid() || rhs.contains_invalid()
+                }
+                ExprKind::Unary { expr, .. } => expr.contains_invalid(),
+                _ => false,
+            }
+        }
+    }
+
+    impl PartialEq for Expr {
+        fn eq(&self, other: &Self) -> bool {
+            self.kind == other.kind
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ExprKind {
         IntLit(i64),
         FloatLit(f64),
         StrLit(String),
@@ -73,24 +84,11 @@ pub mod ast {
         /// interpret as an expression. The parser never stops: it plants this
         /// node, records the diagnostic, and continues, so surrounding
         /// statements stay intact for tooling (for example an LSP that still
-        /// sees the declared variable). A zero-width `span` marks source text
-        /// that is missing entirely, such as an initializer not yet typed.
+        /// sees the declared variable). A zero-width outer `span` marks source
+        /// text that is missing entirely, such as an initializer not yet typed.
         Invalid {
-            error: SyntaxError,
-            span: Span,
+            error: ErrorId,
         },
-    }
-
-    impl Expr {
-        /// Returns `true` if this expression or any subexpression is `Invalid`.
-        pub fn contains_invalid(&self) -> bool {
-            match self {
-                Expr::Invalid { .. } => true,
-                Expr::Binary { lhs, rhs, .. } => lhs.contains_invalid() || rhs.contains_invalid(),
-                Expr::Unary { expr, .. } => expr.contains_invalid(),
-                _ => false,
-            }
-        }
     }
 
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -125,8 +123,39 @@ pub mod ast {
         Rem,
     }
 
+    #[derive(Debug, Clone)]
+    pub struct Stmt {
+        pub span: Span,
+        pub kind: StmtKind,
+    }
+
+    impl Stmt {
+        pub fn new(kind: StmtKind, span: Span) -> Self {
+            Self { span, kind }
+        }
+
+        /// Returns `true` if this statement is or contains an `Invalid` node.
+        /// Execution-facing consumers can use this (or the parser's diagnostics
+        /// list) as a gate before running a program, while tooling consumers
+        /// may instead keep working around the broken parts.
+        pub fn contains_invalid(&self) -> bool {
+            match &self.kind {
+                StmtKind::Invalid { .. } => true,
+                StmtKind::VarDecl { expr, .. }
+                | StmtKind::Assign { expr, .. }
+                | StmtKind::CompoundAssign { expr, .. } => expr.contains_invalid(),
+            }
+        }
+    }
+
+    impl PartialEq for Stmt {
+        fn eq(&self, other: &Self) -> bool {
+            self.kind == other.kind
+        }
+    }
+
     #[derive(Debug, PartialEq, Clone)]
-    pub enum Stmt {
+    pub enum StmtKind {
         VarDecl {
             ty: Type,
             name: String,
@@ -142,28 +171,12 @@ pub mod ast {
             expr: Expr,
         },
         /// A placeholder for a whole statement the parser could not recognize
-        /// (not even its head). Its `span` covers the skipped source region so
-        /// statement positions stay aligned with the file, which keeps
-        /// document outlines and symbol tables stable on broken code.
+        /// (not even its head). Its outer `span` covers the skipped source
+        /// region so statement positions stay aligned with the file, which
+        /// keeps document outlines and symbol tables stable on broken code.
         Invalid {
-            error: SyntaxError,
-            span: Span,
+            error: ErrorId,
         },
-    }
-
-    impl Stmt {
-        /// Returns `true` if this statement is or contains an `Invalid` node.
-        /// Execution-facing consumers can use this (or the parser's diagnostics
-        /// list) as a gate before running a program, while tooling consumers
-        /// may instead keep working around the broken parts.
-        pub fn contains_invalid(&self) -> bool {
-            match self {
-                Stmt::Invalid { .. } => true,
-                Stmt::VarDecl { expr, .. }
-                | Stmt::Assign { expr, .. }
-                | Stmt::CompoundAssign { expr, .. } => expr.contains_invalid(),
-            }
-        }
     }
 }
 
@@ -171,30 +184,36 @@ pub use ast::Span;
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{Expr, Span, Stmt, SyntaxError, Type};
+    use super::ast::{ErrorId, Expr, ExprKind, Span, Stmt, StmtKind, Type};
 
     #[test]
     fn invalid_nodes_report_containment() {
-        let broken = Expr::Invalid {
-            error: SyntaxError::new("Expected an expression", Span::new(0, 1)),
+        let broken = Expr {
             span: Span::new(0, 1),
+            kind: ExprKind::Invalid { error: ErrorId(0) },
         };
-        let healthy = Expr::IntLit(1);
+        let healthy = Expr::new(ExprKind::IntLit(1), Span::new(0, 1));
 
         assert!(broken.contains_invalid());
         assert!(!healthy.contains_invalid());
         assert!(
-            Stmt::VarDecl {
-                ty: Type::Int,
-                name: "i".into(),
-                expr: broken
+            Stmt {
+                span: Span::new(0, 1),
+                kind: StmtKind::VarDecl {
+                    ty: Type::Int,
+                    name: "i".into(),
+                    expr: broken
+                },
             }
             .contains_invalid()
         );
         assert!(
-            !Stmt::Assign {
-                name: "i".into(),
-                expr: healthy
+            !Stmt {
+                span: Span::new(0, 1),
+                kind: StmtKind::Assign {
+                    name: "i".into(),
+                    expr: healthy
+                },
             }
             .contains_invalid()
         );

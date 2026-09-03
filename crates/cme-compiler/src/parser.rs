@@ -2,7 +2,7 @@ use crate::diagnostics::Diagnostic;
 use crate::lexer::{SpannedToken, Token};
 
 use cme_core::Span;
-use cme_core::ast::{BinaryOp, CompoundOp, Expr, Stmt, SyntaxError, Type, UnaryOp};
+use cme_core::ast::{BinaryOp, CompoundOp, ErrorId, Expr, ExprKind, Stmt, StmtKind, Type, UnaryOp};
 
 pub struct Parser<'a, 'src> {
     tokens: &'a [SpannedToken<'src>],
@@ -26,12 +26,12 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
-    /// Records a recoverable diagnostic and returns the matching `SyntaxError`
-    /// for embedding into an `Invalid` AST node.
-    fn record(&mut self, message: impl Into<String>, span: Span) -> SyntaxError {
-        let message = message.into();
-        self.errors.push(Diagnostic::parse(message.clone(), span));
-        SyntaxError { message, span }
+    /// Records a recoverable diagnostic and returns its index for embedding
+    /// into an `Invalid` AST node.
+    fn record(&mut self, message: impl Into<String>, span: Span) -> ErrorId {
+        let id = self.errors.len();
+        self.errors.push(Diagnostic::parse(message, span));
+        ErrorId(id)
     }
 
     /// Drains the diagnostics recorded so far. Useful alongside
@@ -253,11 +253,12 @@ impl<'a, 'src> Parser<'a, 'src> {
                     end = self.tokens[self.pos - 1].span.end;
                 }
                 let end = self.skip_to_statement_end(end);
-                let error = SyntaxError::new(diagnostic.to_string(), diagnostic.span());
                 self.errors.push(diagnostic);
-                Expr::Invalid {
-                    error,
+                Expr {
                     span: Span::new(start, end),
+                    kind: ExprKind::Invalid {
+                        error: ErrorId(self.errors.len() - 1),
+                    },
                 }
             }
         }
@@ -273,9 +274,9 @@ impl<'a, 'src> Parser<'a, 'src> {
         offset: usize,
     ) -> Expr {
         let error = self.record(message, span);
-        Expr::Invalid {
-            error,
+        Expr {
             span: Span::missing(offset),
+            kind: ExprKind::Invalid { error },
         }
     }
 
@@ -295,9 +296,9 @@ impl<'a, 'src> Parser<'a, 'src> {
         if self.at_eof() {
             let eof_span = self.eof_span();
             let error = self.record("unexpected end of file", eof_span);
-            return Stmt::Invalid {
-                error,
+            return Stmt {
                 span: Span::missing(eof_span.start),
+                kind: StmtKind::Invalid { error },
             };
         }
         let first = self.advance();
@@ -310,19 +311,15 @@ impl<'a, 'src> Parser<'a, 'src> {
             return self.parse_assignment_statement(first, name.to_string());
         }
 
-        let error = SyntaxError::new(
-            format!(
-                "expected a type or assignment target, but found {}",
-                first.token.describe()
-            ),
-            first.span,
+        let message = format!(
+            "expected a type or assignment target, but found {}",
+            first.token.describe()
         );
-        self.errors
-            .push(Diagnostic::parse(error.message.clone(), first.span));
         let end = self.skip_to_statement_end(first.span.end);
-        Stmt::Invalid {
-            error,
+        let error = self.record(message, first.span);
+        Stmt {
             span: Span::new(first.span.start, end),
+            kind: StmtKind::Invalid { error },
         }
     }
 
@@ -345,19 +342,17 @@ impl<'a, 'src> Parser<'a, 'src> {
                 name.to_string()
             }
             other => {
-                let error = SyntaxError::new(
+                let end = self.skip_to_statement_end(other.span.end);
+                let error = self.record(
                     format!(
                         "expected a variable name, but found {}",
                         other.token.describe()
                     ),
                     other.span,
                 );
-                self.errors
-                    .push(Diagnostic::parse(error.message.clone(), other.span));
-                let end = self.skip_to_statement_end(other.span.end);
-                return Stmt::Invalid {
-                    error,
+                return Stmt {
                     span: Span::new(type_token.span.start, end),
+                    kind: StmtKind::Invalid { error },
                 };
             }
         };
@@ -373,7 +368,11 @@ impl<'a, 'src> Parser<'a, 'src> {
                     span,
                     span.start,
                 );
-                return Stmt::VarDecl { ty, name, expr };
+                let end = expr.span.end;
+                return Stmt::new(
+                    StmtKind::VarDecl { ty, name, expr },
+                    Span::new(type_token.span.start, end),
+                );
             }
             Token::Eof => {
                 let span = self.eof_span();
@@ -382,29 +381,35 @@ impl<'a, 'src> Parser<'a, 'src> {
                     span,
                     span.start,
                 );
-                return Stmt::VarDecl { ty, name, expr };
+                let end = expr.span.end;
+                return Stmt::new(
+                    StmtKind::VarDecl { ty, name, expr },
+                    Span::new(type_token.span.start, end),
+                );
             }
             Token::Assign => {
                 self.advance();
             }
             _ => {
                 let other = *self.peek();
-                let error = SyntaxError::new(
+                let end = self.skip_to_statement_end(other.span.end);
+                let error = self.record(
                     format!("expected `=`, but found {}", other.token.describe()),
                     other.span,
                 );
-                self.errors
-                    .push(Diagnostic::parse(error.message.clone(), other.span));
-                let end = self.skip_to_statement_end(other.span.end);
-                return Stmt::Invalid {
-                    error,
+                return Stmt {
                     span: Span::new(type_token.span.start, end),
+                    kind: StmtKind::Invalid { error },
                 };
             }
         }
 
         let expr = self.parse_recovered_expression();
-        Stmt::VarDecl { ty, name, expr }
+        let end = expr.span.end;
+        Stmt::new(
+            StmtKind::VarDecl { ty, name, expr },
+            Span::new(type_token.span.start, end),
+        )
     }
 
     fn parse_assignment_statement(&mut self, target: SpannedToken<'src>, name: String) -> Stmt {
@@ -420,90 +425,82 @@ impl<'a, 'src> Parser<'a, 'src> {
             other => {
                 // A bare identifier with no operator has no recoverable
                 // statement structure; record it as an invalid statement.
-                let error = SyntaxError::new(
+                let end = self.skip_to_statement_end(operator.span.end);
+                let error = self.record(
                     format!(
                         "expected an assignment operator, but found {}",
                         other.describe()
                     ),
                     operator.span,
                 );
-                self.errors
-                    .push(Diagnostic::parse(error.message.clone(), operator.span));
-                let end = self.skip_to_statement_end(operator.span.end);
-                return Stmt::Invalid {
-                    error,
+                return Stmt {
                     span: Span::new(target.span.start, end),
+                    kind: StmtKind::Invalid { error },
                 };
             }
         };
         self.advance();
 
         let expr = self.parse_recovered_expression();
-        match compound {
-            None => Stmt::Assign { name, expr },
-            Some(op) => Stmt::CompoundAssign {
+        let kind = match compound {
+            None => StmtKind::Assign {
+                name,
+                expr: expr.clone(),
+            },
+            Some(op) => StmtKind::CompoundAssign {
                 target: name,
                 op,
-                expr,
+                expr: expr.clone(),
             },
-        }
+        };
+        Stmt::new(kind, Span::new(target.span.start, expr.span.end))
     }
 
     fn parse_expression(&mut self) -> Result<Expr, Diagnostic> {
-        Ok(self.parse_logic_or()?.0)
+        self.parse_logic_or()
     }
 
-    fn parse_logic_or(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+    fn parse_logic_or(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_logic_and()?;
 
         while self.at(Token::Or) {
             self.advance();
             let rhs = self.parse_logic_and()?;
-            if matches!(expr.1, LogicalKind::And) || matches!(rhs.1, LogicalKind::And) {
-                return Err(Diagnostic::parse(
-                    "mixed && and || require parentheses",
-                    expr_span(&expr.0),
-                ));
-            }
-            expr = (
-                Expr::Binary {
+            let span = Span::new(expr.span.start, rhs.span.end);
+            expr = Expr::new(
+                ExprKind::Binary {
                     op: BinaryOp::Or,
-                    lhs: Box::new(expr.0),
-                    rhs: Box::new(rhs.0),
+                    lhs: Box::new(expr),
+                    rhs: Box::new(rhs),
                 },
-                LogicalKind::Or,
+                span,
             );
         }
 
         Ok(expr)
     }
 
-    fn parse_logic_and(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+    fn parse_logic_and(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_comparison()?;
 
         while self.at(Token::And) {
             self.advance();
             let rhs = self.parse_comparison()?;
-            if matches!(expr.1, LogicalKind::Or) || matches!(rhs.1, LogicalKind::Or) {
-                return Err(Diagnostic::parse(
-                    "mixed && and || require parentheses",
-                    expr_span(&expr.0),
-                ));
-            }
-            expr = (
-                Expr::Binary {
+            let span = Span::new(expr.span.start, rhs.span.end);
+            expr = Expr::new(
+                ExprKind::Binary {
                     op: BinaryOp::And,
-                    lhs: Box::new(expr.0),
-                    rhs: Box::new(rhs.0),
+                    lhs: Box::new(expr),
+                    rhs: Box::new(rhs),
                 },
-                LogicalKind::And,
+                span,
             );
         }
 
         Ok(expr)
     }
 
-    fn parse_comparison(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+    fn parse_comparison(&mut self) -> Result<Expr, Diagnostic> {
         let lhs = self.parse_additive()?;
         let op_token = *self.peek();
         let Some(op) = comparison_operator(&op_token.token) else {
@@ -520,55 +517,59 @@ impl<'a, 'src> Parser<'a, 'src> {
             ));
         }
 
-        Ok((
-            Expr::Binary {
+        let span = Span::new(lhs.span.start, rhs.span.end);
+        Ok(Expr::new(
+            ExprKind::Binary {
                 op,
-                lhs: Box::new(lhs.0),
-                rhs: Box::new(rhs.0),
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
             },
-            LogicalKind::None,
+            span,
         ))
     }
 
-    fn parse_additive(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+    fn parse_additive(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_multiplicative()?;
 
         while let Some(op) = additive_operator(&self.peek().token) {
             self.advance();
             let rhs = self.parse_multiplicative()?;
-            expr = (
-                Expr::Binary {
+            let span = Span::new(expr.span.start, rhs.span.end);
+            expr = Expr::new(
+                ExprKind::Binary {
                     op,
-                    lhs: Box::new(expr.0),
-                    rhs: Box::new(rhs.0),
+                    lhs: Box::new(expr),
+                    rhs: Box::new(rhs),
                 },
-                combine_operand_kind(expr.1, rhs.1),
+                span,
             );
         }
 
         Ok(expr)
     }
 
-    fn parse_multiplicative(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+    fn parse_multiplicative(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_unary()?;
 
         while let Some(op) = multiplicative_operator(&self.peek().token) {
             self.advance();
             let rhs = self.parse_unary()?;
-            expr = (
-                Expr::Binary {
+            let span = Span::new(expr.span.start, rhs.span.end);
+            expr = Expr::new(
+                ExprKind::Binary {
                     op,
-                    lhs: Box::new(expr.0),
-                    rhs: Box::new(rhs.0),
+                    lhs: Box::new(expr),
+                    rhs: Box::new(rhs),
                 },
-                combine_operand_kind(expr.1, rhs.1),
+                span,
             );
         }
 
         Ok(expr)
     }
 
-    fn parse_unary(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+    fn parse_unary(&mut self) -> Result<Expr, Diagnostic> {
+        let op_span = self.peek().span;
         let unary_op = match self.peek().token {
             Token::Minus => UnaryOp::Neg,
             Token::Not => UnaryOp::Not,
@@ -577,18 +578,17 @@ impl<'a, 'src> Parser<'a, 'src> {
 
         self.advance();
         let expr = self.parse_unary()?;
-        let kind = expr.1;
-
-        Ok((
-            Expr::Unary {
+        let span = Span::new(op_span.start, expr.span.end);
+        Ok(Expr::new(
+            ExprKind::Unary {
                 op: unary_op,
-                expr: Box::new(expr.0),
+                expr: Box::new(expr),
             },
-            kind,
+            span,
         ))
     }
 
-    fn parse_primary(&mut self) -> Result<(Expr, LogicalKind), Diagnostic> {
+    fn parse_primary(&mut self) -> Result<Expr, Diagnostic> {
         let token = *self.peek();
 
         // A newline here means an operand is missing (for example `int i = `
@@ -604,22 +604,25 @@ impl<'a, 'src> Parser<'a, 'src> {
 
         self.advance();
         match token.token {
-            Token::IntLit(value) => Ok((Expr::IntLit(value), LogicalKind::None)),
-            Token::FloatLit(value) => Ok((Expr::FloatLit(value), LogicalKind::None)),
-            Token::StrLit(value) => Ok((
-                Expr::StrLit(value[1..value.len() - 1].to_string()),
-                LogicalKind::None,
+            Token::IntLit(value) => Ok(Expr::new(ExprKind::IntLit(value), token.span)),
+            Token::FloatLit(value) => Ok(Expr::new(ExprKind::FloatLit(value), token.span)),
+            Token::StrLit(value) => Ok(Expr::new(
+                ExprKind::StrLit(value[1..value.len() - 1].to_string()),
+                token.span,
             )),
-            Token::KwTrue => Ok((Expr::BoolLit(true), LogicalKind::None)),
-            Token::KwFalse => Ok((Expr::BoolLit(false), LogicalKind::None)),
-            Token::Ident(name) => Ok((Expr::Ident(name.to_string()), LogicalKind::None)),
+            Token::KwTrue => Ok(Expr::new(ExprKind::BoolLit(true), token.span)),
+            Token::KwFalse => Ok(Expr::new(ExprKind::BoolLit(false), token.span)),
+            Token::Ident(name) => Ok(Expr::new(ExprKind::Ident(name.to_string()), token.span)),
             Token::LParen => {
                 let expr = self.parse_logic_or()?;
                 let closing = self.require_token("expected `)`, but found end of file")?;
                 if closing.token != Token::RParen {
                     return Err(Self::expected("`)`", &closing.token, closing.span));
                 }
-                Ok((expr.0, LogicalKind::Parenthesized))
+                Ok(Expr::new(
+                    expr.kind,
+                    Span::new(token.span.start, closing.span.end),
+                ))
             }
             Token::Eof => Err(Diagnostic::parse(
                 "expected an expression, but found end of file",
@@ -627,23 +630,6 @@ impl<'a, 'src> Parser<'a, 'src> {
             )),
             other => Err(Self::expected("an expression", &other, token.span)),
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LogicalKind {
-    None,
-    Or,
-    And,
-    Parenthesized,
-}
-
-fn combine_operand_kind(lhs: LogicalKind, rhs: LogicalKind) -> LogicalKind {
-    match (lhs, rhs) {
-        (LogicalKind::Parenthesized, _) | (_, LogicalKind::Parenthesized) => {
-            LogicalKind::Parenthesized
-        }
-        _ => LogicalKind::None,
     }
 }
 
@@ -673,15 +659,6 @@ fn multiplicative_operator(token: &Token) -> Option<BinaryOp> {
         Token::Slash => Some(BinaryOp::Div),
         Token::Percent => Some(BinaryOp::Rem),
         _ => None,
-    }
-}
-
-fn expr_span(expr: &Expr) -> Span {
-    match expr {
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::StrLit(_) | Expr::BoolLit(_) => Span::new(0, 0),
-        Expr::Ident(_) => Span::new(0, 0),
-        Expr::Binary { .. } | Expr::Unary { .. } => Span::new(0, 0),
-        Expr::Invalid { span, .. } => *span,
     }
 }
 

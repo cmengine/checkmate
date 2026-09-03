@@ -59,6 +59,12 @@ pub enum Token<'a> {
     LParen,
     #[token(")")]
     RParen,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+    #[token(",")]
+    Comma,
 
     // Identifiers (e.g., variable names, function names)
     // This regex matches a letter or underscore, followed by any number of letters, numbers, or underscores.
@@ -74,6 +80,14 @@ pub enum Token<'a> {
     KwInfer,
     #[token("return")]
     KwReturn,
+    #[token("if")]
+    KwIf,
+    #[token("else")]
+    KwElse,
+    #[token("while")]
+    KwWhile,
+    #[token("void")]
+    KwVoid,
     #[token("str")]
     KwStr,
     #[token("bool")]
@@ -148,6 +162,10 @@ impl<'a> Token<'a> {
             Token::KwBool => "`bool`".into(),
             Token::KwInfer => "`infer`".into(),
             Token::KwReturn => "`return`".into(),
+            Token::KwIf => "`if`".into(),
+            Token::KwElse => "`else`".into(),
+            Token::KwWhile => "`while`".into(),
+            Token::KwVoid => "`void`".into(),
             Token::KwTrue => "`true`".into(),
             Token::KwFalse => "`false`".into(),
             Token::Assign => "`=`".into(),
@@ -172,6 +190,9 @@ impl<'a> Token<'a> {
             Token::Gt => "`>`".into(),
             Token::LParen => "`(`".into(),
             Token::RParen => "`)`".into(),
+            Token::LBrace => "`{`".into(),
+            Token::RBrace => "`}`".into(),
+            Token::Comma => "`,`".into(),
             Token::Eof => "end of file".into(),
         }
     }
@@ -340,7 +361,7 @@ mod tests {
 
     #[test]
     fn lexes_keywords() {
-        let source = "int float infer return str bool true false";
+        let source = "int float infer return if else while void str bool true false";
         assert_eq!(
             lex_ok(source),
             vec![
@@ -348,6 +369,10 @@ mod tests {
                 Token::KwFloat,
                 Token::KwInfer,
                 Token::KwReturn,
+                Token::KwIf,
+                Token::KwElse,
+                Token::KwWhile,
+                Token::KwVoid,
                 Token::KwStr,
                 Token::KwBool,
                 Token::KwTrue,
@@ -374,10 +399,18 @@ mod tests {
 
     #[test]
     fn lexes_symbols() {
-        let source = "= ( )";
+        let source = "= ( ) { } ,";
         assert_eq!(
             lex_ok(source),
-            vec![Token::Assign, Token::LParen, Token::RParen, Token::Eof]
+            vec![
+                Token::Assign,
+                Token::LParen,
+                Token::RParen,
+                Token::LBrace,
+                Token::RBrace,
+                Token::Comma,
+                Token::Eof,
+            ]
         );
     }
 
@@ -395,6 +428,10 @@ mod tests {
             (Token::KwBool, "`bool`"),
             (Token::KwInfer, "`infer`"),
             (Token::KwReturn, "`return`"),
+            (Token::KwIf, "`if`"),
+            (Token::KwElse, "`else`"),
+            (Token::KwWhile, "`while`"),
+            (Token::KwVoid, "`void`"),
             (Token::KwTrue, "`true`"),
             (Token::KwFalse, "`false`"),
             (Token::Assign, "`=`"),
@@ -419,6 +456,9 @@ mod tests {
             (Token::Gt, "`>`"),
             (Token::LParen, "`(`"),
             (Token::RParen, "`)`"),
+            (Token::LBrace, "`{`"),
+            (Token::RBrace, "`}`"),
+            (Token::Comma, "`,`"),
             (Token::Eof, "end of file"),
         ];
 

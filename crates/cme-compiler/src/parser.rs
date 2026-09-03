@@ -710,5 +710,6 @@ fn can_end_statement(t: &Token) -> bool {
             | Token::KwTrue
             | Token::KwFalse
             | Token::RParen
+            | Token::RBrace
     )
 }

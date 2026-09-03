@@ -4,8 +4,8 @@ CME is a statically typed, embeddable scripting language implemented in Rust. Th
 
 ## Current Status
 
-- `cme-core` defines the spanned AST, including primitive/inferred types, literals, identifiers, and variable declarations.
-- `cme-compiler` provides the lexer, parser, diagnostics, validator, and one-call `parse_source`.
+- `cme-core` defines the spanned AST, including primitive/inferred/void types, literals, identifiers, variable declarations, functions, calls, if/else, while, and return.
+- `cme-compiler` provides the lexer, parser, diagnostics, validator, and one-call `parse_source`. Functions, if/else, while, and return now parse.
 - `cme-interp` and `cme-runtime` are placeholders.
 - The `cme` CLI has working `lex` and `ast` commands with rendered diagnostics.
 

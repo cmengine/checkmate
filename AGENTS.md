@@ -8,8 +8,8 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 
 ## Crates
 
-- `crates/cme-core` — Foundation crate with no dependencies. Defines the spanned AST, source spans, and diagnostic references: primitive/inferred types, literals, identifiers, and variable declarations. Shared by compiler and future language components.
-- `crates/cme-compiler` — Depends on `cme-core` and `logos`. Provides the lexer, parser, diagnostics, validator, and the one-call `parse_source` front-end for the current subset, including newline-sensitive statement parsing and insignificant-newline handling inside brackets.
+- `crates/cme-core` — Foundation crate with no dependencies. Defines the spanned AST, source spans, and diagnostic references: primitive/inferred/void types, literals, identifiers, variable declarations, functions, calls, if/else, while, and return. Shared by compiler and future language components.
+- `crates/cme-compiler` — Depends on `cme-core` and `logos`. Provides the lexer, parser, diagnostics, validator, and the one-call `parse_source` front-end for the current subset, including functions, control flow, bare calls, newline-sensitive statement parsing, and insignificant-newline handling inside brackets.
 - `crates/cme-interp` — Dependency-free placeholder. Currently contains starter code only; interpreter behavior is not implemented.
 - `crates/cme-runtime` — Dependency-free placeholder. Currently contains starter code only; runtime services and built-ins are not implemented.
 - Root package `cme` — Facade package and optional CLI. Feature-gated re-exports are: `core`, `compiler`, `interp`, and `runtime`; `cli` enables all four and provides the working lex/ast toolchain binary.

@@ -9,3 +9,9 @@ repository.workspace = true
 publish = true
 
 [dependencies]
+cme-core = { path = "../cme-core", version = "0.2.0" }
+
+# Test-only: the inline-source unit tests parse Checkmate source with the
+# real front end. The shipped library still depends on `cme-core` alone.
+[dev-dependencies]
+cme-compiler = { path = "../cme-compiler", version = "0.2.0" }

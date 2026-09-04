@@ -314,16 +314,11 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// Parses one statement. Infallible: a statement whose structure cannot
     /// be recognized becomes [`Stmt::Invalid`] covering the skipped region,
     /// and its diagnostic is recorded for [`Self::take_errors`] or
-    /// [`Self::parse_program_with_errors`].
+    /// [`Self::parse_program_with_errors`]. Expression-level validation
+    /// (Appendix A §A.3) is deliberately NOT run here: it runs once over the
+    /// finished program in [`Self::parse_program_with_errors`], so a
+    /// violation nested anywhere is reported exactly once.
     pub fn parse_statement(&mut self) -> Stmt {
-        let stmt = self.parse_statement_inner_single();
-        for diagnostic in validate::validate_statements(std::slice::from_ref(&stmt)) {
-            self.record(diagnostic.message(), diagnostic.span());
-        }
-        stmt
-    }
-
-    fn parse_statement_inner_single(&mut self) -> Stmt {
         if self.at_eof() {
             let eof_span = self.eof_span();
             let error = self.record("unexpected end of file", eof_span);

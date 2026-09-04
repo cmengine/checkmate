@@ -694,6 +694,37 @@ mod tests {
         );
     }
 
+    /// The full pipeline the CLI runs: parse (lexer, recovery, post-parse
+    /// validation) plus the type checker. A healthy program produces an
+    /// empty list; a program with one defect produces exactly one
+    /// diagnostic, no matter where in the tree the defect hides.
+    fn full_pipeline(source: &str) -> Vec<Diagnostic> {
+        let outcome = parse_source(source);
+        let mut diagnostics = outcome.diagnostics;
+        diagnostics.extend(check(&outcome.statements));
+        diagnostics
+    }
+
+    #[test]
+    fn mixed_logic_inside_a_function_is_reported_exactly_once() {
+        // Regression for the silent-validator hotfix: `return a || b && c`
+        // inside a function body used to produce NO diagnostic from the
+        // full pipeline because the validator never descended into
+        // function bodies (Appendix A §A.3 Rule 1 must fire there).
+        let source = "bool f(bool a, bool b, bool c) {\nreturn a || b && c\n}\n";
+        let diagnostics = full_pipeline(source);
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "expected exactly one diagnostic: {diagnostics:#?}"
+        );
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "mixed && and || require parentheses"
+        );
+        assert_eq!(diagnostics[0].span(), span_of(source, "b && c"));
+    }
+
     #[test]
     fn forward_references_and_recursion_resolve() {
         let source =

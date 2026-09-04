@@ -335,16 +335,63 @@ mod tests {
             ast[0],
             errors
         );
-        assert_eq!(errors.len(), 2);
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]
     fn validator_reports_operand_spans_for_mixed_logic() {
         let (ast, errors) = parse_program_parts("infer x = a && b || c");
         assert!(!ast[0].contains_invalid());
-        assert_eq!(errors.len(), 2);
+        assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].to_string(), "mixed && and || require parentheses");
-        assert_eq!(errors[1].to_string(), "mixed && and || require parentheses");
+        assert_eq!(errors[0].span(), Span::new(10, 16));
+    }
+
+    #[test]
+    fn mixed_logic_inside_executable_code_is_validated() {
+        // §A.3 Rule 1 applies everywhere an expression can appear, and the
+        // executable code of the language lives inside function bodies:
+        // return values, if/while conditions, else-if chains, and call
+        // arguments. Each source reports the violation exactly once.
+        let sources = [
+            "bool f(bool a, bool b, bool c) {\nreturn a || b && c\n}\n",
+            "void f(bool a, bool b, bool c) {\nif (a || b && c) {\n}\n}\n",
+            "void f(bool a, bool b, bool c) {\nwhile (a || b && c) {\n}\n}\n",
+            "void f(bool a, bool b, bool c) {\nif (a) {\n} else if (a || b && c) {\n}\n}\n",
+            "void f(bool a, bool b, bool c) {\nlog(a || b && c)\n}\n",
+            "void f(bool a, bool b, bool c) {\nbool ready = a || b && c\n}\n",
+            "void f(bool a, bool b, bool c) {\nready = a || b && c\n}\n",
+            "void f(bool a, bool b, bool c) {\nready += a || b && c\n}\n",
+        ];
+        for source in sources {
+            let (_, errors) = parse_program_parts(source);
+            assert_eq!(errors.len(), 1, "{source:?}: {errors:#?}");
+            assert_eq!(
+                errors[0].to_string(),
+                "mixed && and || require parentheses",
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parenthesized_logic_inside_executable_code_stays_clean() {
+        let sources = [
+            "bool f(bool a, bool b, bool c) {\nreturn a || (b && c)\n}\n",
+            "bool f(bool a, bool b, bool c) {\nreturn (a || b) && c\n}\n",
+            "bool f(bool a, bool b, bool c) {\nreturn a && b && c\n}\n",
+            "bool f(bool a, bool b, bool c) {\nreturn a || b || c\n}\n",
+            "void f(bool a, bool b, bool c) {\nif (a || (b && c)) {\n}\n}\n",
+            "void f(bool a, bool b, bool c) {\nwhile ((a || b) && c) {\n}\n}\n",
+            "void f(bool a, bool b, bool c) {\nlog(a || (b && c))\n}\n",
+        ];
+        for source in sources {
+            let (_, errors) = parse_program_parts(source);
+            assert!(
+                errors.is_empty(),
+                "{source:?} should validate clean: {errors:#?}"
+            );
+        }
     }
 
     #[test]
@@ -1498,7 +1545,7 @@ mod tests {
         // deliberately changes.
         let (stmts, errors) = parse_program_parts(BOOM_CM);
 
-        assert_eq!(errors.len(), 59, "diagnostics: {errors:#?}");
+        assert_eq!(errors.len(), 58, "diagnostics: {errors:#?}");
         assert_eq!(stmts.len(), 62, "statements: {stmts:#?}");
 
         let labels: Vec<String> = stmts.iter().map(statement_label).collect();

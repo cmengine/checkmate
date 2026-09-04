@@ -12,6 +12,8 @@ pub enum DiagnosticKind {
     Lex(LexError),
     /// A parse-stage failure (free-form message).
     Parse,
+    /// A type-check-stage failure (free-form message).
+    Type,
 }
 
 /// A single diagnostic: what went wrong, where, and from which stage.
@@ -37,6 +39,15 @@ impl Diagnostic {
     pub fn parse(message: impl Into<String>, span: Span) -> Self {
         Self {
             kind: DiagnosticKind::Parse,
+            message: message.into(),
+            span,
+        }
+    }
+
+    /// A type-check-stage diagnostic pointing at `span`.
+    pub fn type_error(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            kind: DiagnosticKind::Type,
             message: message.into(),
             span,
         }

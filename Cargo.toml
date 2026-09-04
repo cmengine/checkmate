@@ -32,6 +32,11 @@ cme-compiler = { path = "crates/cme-compiler", version = "0.2.0", optional = tru
 cme-interp = { path = "crates/cme-interp", version = "0.2.0", optional = true }
 cme-runtime = { path = "crates/cme-runtime", version = "0.2.0", optional = true }
 
+# The root integration tests drive the real front end and interpreter.
+[dev-dependencies]
+cme-compiler = { path = "crates/cme-compiler", version = "0.2.0" }
+cme-interp = { path = "crates/cme-interp", version = "0.2.0" }
+
 [features]
 default = []
 core = ["dep:cme-core"]

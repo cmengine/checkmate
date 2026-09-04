@@ -33,6 +33,10 @@ version = "0.2.0"
 [[package]]
 name = "cme-interp"
 version = "0.2.0"
+dependencies = [
+ "cme-compiler",
+ "cme-core",
+]
 
 [[package]]
 name = "cme-runtime"

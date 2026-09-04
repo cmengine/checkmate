@@ -2,7 +2,7 @@
 
 ## Repository Overview
 
-Checkmate (CME) is a statically typed, embeddable scripting language implemented as a Cargo workspace in Rust (edition 2024). The implementation is early-stage: `cme-core` and `cme-compiler` contain the first real language functionality, while the interpreter and runtime remain placeholders.
+Checkmate (CME) is a statically typed, embeddable scripting language implemented as a Cargo workspace in Rust (edition 2024). The implementation is early-stage: `cme-core` and `cme-compiler` contain the first real language functionality, `cme-interp` implements the tree-walking interpreter for the basic subset, and the runtime remains a placeholder.
 
 The workspace root package is `cme`. It re-exports workspace crates behind feature flags. The intended development workflow uses `--features cli` (or the individual feature flags); the default build intentionally exposes no root APIs.
 
@@ -10,9 +10,9 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 
 - `crates/cme-core` — Foundation crate with no dependencies. Defines the spanned AST, source spans, and diagnostic references: primitive/inferred/void types, literals, identifiers, variable declarations, functions, calls, if/else, while, and return. Shared by compiler and future language components.
 - `crates/cme-compiler` — Depends on `cme-core` and `logos`. Provides the lexer, parser, diagnostics, validator, the type checker (`check::check`, enforcing Appendix A and §2.10–§2.16 for the basic subset), and the one-call `parse_source` front-end for the current subset, including functions, control flow, bare calls, newline-sensitive statement parsing, and insignificant-newline handling inside brackets.
-- `crates/cme-interp` — Dependency-free placeholder. Currently contains starter code only; interpreter behavior is not implemented.
+- `crates/cme-interp` — Depends only on `cme-core` (the AST is the contract; `cme-compiler` appears as a dev-dependency for the inline-source unit tests). Implements the tree-walking interpreter for the basic subset: `Value`, `InterpError`, and `Interpreter::new`/`invoke`, with overflow-checked arithmetic, truncating integer division, short-circuit `&&`/`||`, §A.6 stringification, and a fixed 1024 call-depth limit that turns runaway recursion into a clean error. The walker is the reference oracle the future bytecode VM will be differential-tested against, so its observable behavior is exact.
 - `crates/cme-runtime` — Dependency-free placeholder. Currently contains starter code only; runtime services and built-ins are not implemented.
-- Root package `cme` — Facade package and optional CLI. Feature-gated re-exports are: `core`, `compiler`, `interp`, and `runtime`; `cli` enables all four and provides the working lex/ast/check toolchain binary.
+- Root package `cme` — Facade package and optional CLI. Feature-gated re-exports are: `core`, `compiler`, `interp`, and `runtime`; `cli` enables all four and provides the working lex/ast/check/run toolchain binary (`run` parses + checks first and never executes a program that produced a diagnostic).
 
 ## Whitepaper Policy
 

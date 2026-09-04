@@ -1,15 +1,22 @@
 #[cfg(feature = "cli")]
 use cme_compiler::diagnostics::Diagnostic;
 #[cfg(feature = "cli")]
+use cme_core::Span;
+#[cfg(feature = "cli")]
+use cme_core::ast::StmtKind;
+#[cfg(feature = "cli")]
+use cme_interp::{InterpError, Interpreter, Value};
+#[cfg(feature = "cli")]
 use std::process::ExitCode;
 #[cfg(feature = "cli")]
-const USAGE: &str = "Usage: cme <lex|ast|check> <file.cm>";
+const USAGE: &str = "Usage: cme <lex|ast|check|run> <file.cm>";
 
 #[cfg(feature = "cli")]
 enum CliError {
     Usage(String),
     Io(String),
     Compiler(Vec<Diagnostic>, String),
+    Runtime(InterpError, String),
 }
 
 #[cfg(feature = "cli")]
@@ -48,9 +55,43 @@ fn run() -> Result<(), CliError> {
             errors.extend(cme_compiler::check::check(&outcome.statements));
             render_diagnostics(errors, &source)
         }
+        "run" => run_program(&source, path),
         _ => Err(CliError::Usage(format!(
             "unknown command: {command}\n{USAGE}"
         ))),
+    }
+}
+
+#[cfg(feature = "cli")]
+fn run_program(source: &str, path: &str) -> Result<(), CliError> {
+    let outcome = cme_compiler::parse_source(source);
+    let mut errors = outcome.diagnostics;
+    errors.extend(cme_compiler::check::check(&outcome.statements));
+    // Never run broken code: refuse before invoking anything.
+    render_diagnostics(errors, source)?;
+
+    // §2.1: the host picks the entry point — `main` is the CLI convention,
+    // not a language concept.
+    let has_main = outcome
+        .statements
+        .iter()
+        .any(|stmt| matches!(&stmt.kind, StmtKind::FuncDecl { name, .. } if name == "main"));
+    if !has_main {
+        return Err(CliError::Usage(format!(
+            "no `main` function to run in {path}"
+        )));
+    }
+
+    let interpreter = Interpreter::new(&outcome.statements);
+    match interpreter.invoke("main", &[]) {
+        Ok(value) => {
+            // Void prints nothing; every other value prints via Display.
+            if !matches!(value, Value::Void) {
+                println!("{value}");
+            }
+            Ok(())
+        }
+        Err(error) => Err(CliError::Runtime(error, source.to_string())),
     }
 }
 
@@ -64,7 +105,13 @@ fn render_diagnostics(errors: Vec<Diagnostic>, source: &str) -> Result<(), CliEr
 
 #[cfg(feature = "cli")]
 fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
-    let span = error.span();
+    render_message_at(error.message(), error.span(), source, path)
+}
+
+/// Renders `message` located at `span` with the caret machinery. Shared by
+/// compile-time diagnostics and interpreter runtime errors.
+#[cfg(feature = "cli")]
+fn render_message_at(message: &str, span: Span, source: &str, path: &str) -> String {
     let (line, column) = line_column(source, span.start);
     let line_text = source
         .split_inclusive(['\n'])
@@ -88,10 +135,7 @@ fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
     if span.end > line_end + 1 {
         caret.push_str("...");
     }
-    format!(
-        "{path}:{line}:{column}: {message}\n{line_text}\n{caret}",
-        message = error.message()
-    )
+    format!("{path}:{line}:{column}: {message}\n{line_text}\n{caret}")
 }
 
 #[cfg(feature = "cli")]
@@ -138,6 +182,11 @@ fn main() -> ExitCode {
             for error in errors {
                 eprintln!("error: {}", render_error(&error, &source, &source_path));
             }
+            ExitCode::FAILURE
+        }
+        Err(CliError::Runtime(error, source)) => {
+            let rendered = render_message_at(&error.message, error.span, &source, &source_path);
+            eprintln!("error: {rendered}");
             ExitCode::FAILURE
         }
     }

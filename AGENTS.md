@@ -25,7 +25,7 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 
 ## Working Rules
 
-- Always use `git` and never use `jj` commands directly.
+- Always use `git` and never use `jj` commands directly. ALWAYS FOLLOW Conventional Commits SPECS FOR NAMING COMMITS!
 - Keep changes focused on the affected crate and avoid implementing unspecified language behavior by guessing.
 - Preserve the feature-gated structure of the root facade. Adding functionality to a workspace crate should not require enabling that crate by default in the root package.
 - Lexer and parser changes must respect `cme-core` AST ownership: language data models belong in `cme-core`, while recognition/parsing remains in `cme-compiler`.

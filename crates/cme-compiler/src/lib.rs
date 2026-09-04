@@ -13,6 +13,7 @@
 //! assert_eq!(outcome.statements.len(), 2);
 //! ```
 
+pub mod check;
 pub mod diagnostics;
 pub mod lexer;
 pub mod parser;
@@ -41,7 +42,7 @@ mod tests {
     use crate::diagnostics::Diagnostic;
     use cme_core::Span;
     use cme_core::ast::{
-        BinaryOp, CompoundOp, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
+        BinaryOp, Block, CompoundOp, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
     };
 
     fn expr(kind: ExprKind) -> Expr {
@@ -1039,6 +1040,8 @@ mod tests {
                     continue;
                 }
                 let outcome = crate::parse_source(&fixture[..end]);
+                // The checker must survive any recovered tree.
+                let _ = crate::check::check(&outcome.statements);
                 let _ = outcome;
             }
         }
@@ -1104,6 +1107,260 @@ mod tests {
             has_compound,
             "basic.cm should contain a compound assignment"
         );
+    }
+
+    #[test]
+    fn parses_unescaped_string_literals() {
+        // Each accepted escape decodes when the StrLit expression is built.
+        let cases: Vec<(&str, &str)> = vec![
+            (r#"str s = "a\nb""#, "a\nb"),
+            (r#"str s = "c\td""#, "c\td"),
+            (r#"str s = "e\\f""#, "e\\f"),
+            (r#"str s = "g\"h""#, "g\"h"),
+        ];
+        for (source, value) in cases {
+            let ast = parse_statement_ok(source);
+            assert_eq!(
+                ast,
+                var_decl(
+                    Type::Prim(PrimitiveType::Str),
+                    "s",
+                    expr(ExprKind::StrLit(value.to_string()))
+                ),
+                "case {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn infer_function_return_type_is_rejected() {
+        let (stmts, errors) = parse_program_parts("infer f() {\nreturn 1\n}\n");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "`infer` is only valid for local declarations"
+        );
+        assert_eq!(errors[0].span(), Span::new(0, 5));
+        // Recovery keeps the declaration itself for tooling.
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::FuncDecl { .. })
+        ));
+    }
+
+    #[test]
+    fn void_parameter_type_is_rejected() {
+        let (stmts, errors) = parse_program_parts("int f(void x) {\nreturn 1\n}\n");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "`void` is only valid as a function return type"
+        );
+        assert_eq!(errors[0].span(), Span::new(6, 10));
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::FuncDecl { .. })
+        ));
+    }
+
+    #[test]
+    fn infer_parameter_type_is_rejected() {
+        let (stmts, errors) = parse_program_parts("int f(infer x) {\nreturn 1\n}\n");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "`infer` is only valid for local declarations"
+        );
+        assert_eq!(errors[0].span(), Span::new(6, 11));
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::FuncDecl { .. })
+        ));
+    }
+
+    #[test]
+    fn void_variable_declaration_is_rejected() {
+        // Pins existing behavior: `void` as a variable type is a parse error.
+        let (stmts, errors) = parse_program_parts("void x = 5\n");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "`void` is only valid as a function return type"
+        );
+        assert_eq!(errors[0].span(), Span::new(0, 4));
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn function_body_block_span_covers_both_braces() {
+        let source = "int f() {\nreturn 1\n}";
+        let ast = parse_statement_ok(source);
+        match &ast.kind {
+            StmtKind::FuncDecl { body, .. } => {
+                assert_eq!(body.span, Span::new(8, 20));
+                assert_eq!(&source[body.span.start..body.span.start + 1], "{");
+                assert_eq!(&source[body.span.end - 1..body.span.end], "}");
+            }
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn while_body_block_span_covers_both_braces() {
+        let source = "while (x) {\n}";
+        let ast = parse_statement_ok(source);
+        match &ast.kind {
+            StmtKind::While { body, .. } => {
+                assert_eq!(body.span, Span::new(10, 13));
+                assert_eq!(&source[body.span.start..body.span.start + 1], "{");
+                assert_eq!(&source[body.span.end - 1..body.span.end], "}");
+            }
+            other => panic!("expected a while statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn else_block_stmt_span_covers_else_keyword_through_closing_brace() {
+        let source = "if (x) {\n} else {\n}";
+        let ast = parse_statement_ok(source);
+        match &ast.kind {
+            StmtKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                assert_eq!(then_branch.span, Span::new(7, 10));
+                let else_stmt = else_branch.as_deref().expect("an else branch");
+                match &else_stmt.kind {
+                    StmtKind::Block(block) => {
+                        assert_eq!(block.span, Span::new(16, 19));
+                        // The wrapper covers `else` through the block's `}`.
+                        assert_eq!(else_stmt.span, Span::new(11, 19));
+                        assert_eq!(&source[11..15], "else");
+                        assert_eq!(&source[else_stmt.span.end - 1..else_stmt.span.end], "}");
+                    }
+                    other => panic!("expected a block statement, got {other:?}"),
+                }
+            }
+            other => panic!("expected an if statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_span_reaches_eof_when_closing_brace_is_missing() {
+        let (stmts, errors) = parse_program_parts("int f() {\nreturn 1\n");
+        assert!(!errors.is_empty());
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => {
+                assert_eq!(body.span, Span::new(8, 19));
+            }
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn span_audit_walks_the_whole_basic_cm_ast() {
+        let outcome = crate::parse_source(BASIC_CM);
+        assert!(
+            outcome.is_clean(),
+            "basic.cm should parse with ZERO diagnostics: {outcome:#?}"
+        );
+        let len = BASIC_CM.len();
+        for stmt in &outcome.statements {
+            audit_span(stmt.span, len, "statement");
+            assert!(
+                stmt.span.start < stmt.span.end,
+                "zero-width span on a statement in basic.cm: {:?}",
+                stmt.span
+            );
+            audit_stmt(stmt, len);
+        }
+    }
+
+    fn audit_span(span: Span, source_len: usize, what: &str) {
+        assert!(span.start <= span.end, "reversed {what} span {span:?}");
+        assert!(
+            span.end <= source_len,
+            "{what} span {span:?} exceeds source length {source_len}"
+        );
+    }
+
+    fn audit_stmt(stmt: &Stmt, source_len: usize) {
+        match &stmt.kind {
+            StmtKind::VarDecl { expr, .. }
+            | StmtKind::Assign { expr, .. }
+            | StmtKind::CompoundAssign { expr, .. }
+            | StmtKind::Expression { expr } => audit_expr(expr, source_len),
+            StmtKind::FuncDecl { body, .. } => audit_block(body, source_len),
+            StmtKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                audit_expr(cond, source_len);
+                audit_block(then_branch, source_len);
+                if let Some(else_stmt) = else_branch {
+                    audit_span(else_stmt.span, source_len, "else statement");
+                    assert!(
+                        else_stmt.span.start < else_stmt.span.end,
+                        "zero-width span on an else wrapper in basic.cm: {:?}",
+                        else_stmt.span
+                    );
+                    audit_stmt(else_stmt, source_len);
+                }
+            }
+            StmtKind::While { cond, body } => {
+                audit_expr(cond, source_len);
+                audit_block(body, source_len);
+            }
+            StmtKind::Return { value } => {
+                if let Some(expr) = value {
+                    audit_expr(expr, source_len);
+                }
+            }
+            StmtKind::Block(block) => audit_block(block, source_len),
+            StmtKind::Invalid { .. } => panic!("clean basic.cm must not contain Invalid"),
+        }
+    }
+
+    fn audit_block(block: &Block, source_len: usize) {
+        audit_span(block.span, source_len, "block");
+        assert!(
+            block.span.start < block.span.end,
+            "zero-width span on a block in basic.cm: {:?}",
+            block.span
+        );
+        for stmt in &block.stmts {
+            audit_span(stmt.span, source_len, "statement");
+            assert!(
+                stmt.span.start < stmt.span.end,
+                "zero-width span on a statement in basic.cm: {:?}",
+                stmt.span
+            );
+            audit_stmt(stmt, source_len);
+        }
+    }
+
+    fn audit_expr(expr: &Expr, source_len: usize) {
+        audit_span(expr.span, source_len, "expression");
+        assert!(
+            expr.span.start < expr.span.end,
+            "zero-width span on an expression in basic.cm: {:?}",
+            expr.span
+        );
+        match &expr.kind {
+            ExprKind::Paren { expr } => audit_expr(expr, source_len),
+            ExprKind::Unary { expr, .. } => audit_expr(expr, source_len),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                audit_expr(lhs, source_len);
+                audit_expr(rhs, source_len);
+            }
+            ExprKind::Invalid { .. } => panic!("clean basic.cm must not contain Invalid"),
+            _ => {}
+        }
     }
 
     #[test]

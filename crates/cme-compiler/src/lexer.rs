@@ -3,6 +3,44 @@ use std::fmt;
 use cme_core::Span;
 use logos::Logos;
 
+/// The callback for [`Token::StrLit`]: validates that every backslash in
+/// the matched slice is followed by one of the four accepted escape
+/// characters, returning the raw slice when the literal is well formed and
+/// `None` (failing the token) when it is not. The lexer's error recovery
+/// then classifies and reports the failure.
+fn str_lit<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<&'src str> {
+    let slice = lex.slice();
+    str_escapes_valid(slice).then_some(slice)
+}
+
+/// True when every backslash inside a matched string slice pairs with one
+/// of the four accepted escape characters. The final byte is the
+/// delimiting quote, so a backslash in the last content position is a
+/// dangling escape and fails validation.
+fn str_escapes_valid(slice: &str) -> bool {
+    let content = &slice[1..slice.len() - 1];
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            let Some(&next) = bytes.get(index + 1) else {
+                return false;
+            };
+            if !is_accepted_escape_byte(next) {
+                return false;
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    true
+}
+
+fn is_accepted_escape_byte(byte: u8) -> bool {
+    matches!(byte, b'n' | b't' | b'\\' | b'"')
+}
+
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(skip r"[ \t\f]+")]
 #[logos(skip r"//[^\r\n]*")]
@@ -10,8 +48,14 @@ pub enum Token<'a> {
     #[regex(r"[\r\n]+")] // one or more line breaks -> one token
     Newline,
 
-    // String Literals
-    #[regex(r#""[^"\r\n]*""#)]
+    // String Literals. At the match level a backslash pairs with any
+    // non-newline character (so an escaped quote does not close the
+    // literal, and a bare trailing backslash still consumes to the line
+    // end); the callback then restricts escapes to the accepted set
+    // (`n`, `t`, `\\`, `"`), failing the token on any other pair.
+    // Recovery classifies the failed region as `InvalidEscape` or
+    // `UnterminatedString` by rescanning the source.
+    #[regex(r#""(?:\\[^\r\n]|\\|[^"\r\n\\])*""#, str_lit)]
     StrLit(&'a str),
 
     // Symbols
@@ -130,6 +174,9 @@ pub enum LexError {
     InvalidCharacter { span: Span },
     /// A `"` with no closing `"` before the end of the line/file.
     UnterminatedString { span: Span },
+    /// A backslash inside a string literal that is not followed by one of
+    /// the four accepted escape characters (`n`, `t`, `\\`, `"`).
+    InvalidEscape { span: Span },
     /// An integer literal whose digit run does not fit in `i64`.
     IntegerOverflow { span: Span },
     /// A float literal that would parse to infinity.
@@ -141,6 +188,7 @@ impl LexError {
         match self {
             LexError::InvalidCharacter { span }
             | LexError::UnterminatedString { span }
+            | LexError::InvalidEscape { span }
             | LexError::IntegerOverflow { span }
             | LexError::FloatOverflow { span } => *span,
         }
@@ -211,6 +259,7 @@ impl fmt::Display for LexError {
         let msg = match self {
             LexError::InvalidCharacter { .. } => "invalid character",
             LexError::UnterminatedString { .. } => "unterminated string literal",
+            LexError::InvalidEscape { .. } => "invalid escape sequence in string literal",
             LexError::IntegerOverflow { .. } => "integer literal is too large",
             LexError::FloatOverflow { .. } => "float literal is too large",
         };
@@ -219,20 +268,104 @@ impl fmt::Display for LexError {
 }
 
 /// Chooses the `LexError` variant for a failed region by inspecting the source
-/// text: a leading `"` means an unterminated string; an all-digit run is integer
+/// text: a leading `"` means the failure is inside a string literal (an
+/// invalid escape, or an unterminated literal); an all-digit run is integer
 /// overflow; a `digits.digits` shape is float overflow; anything else is a bad
 /// character.
 fn classify_error(source: &str, span: Span) -> LexError {
     let text = &source[span.start..span.end];
-    if text.starts_with('"') {
-        LexError::UnterminatedString { span }
-    } else if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+    if text.starts_with('"')
+        && let Some(error) = classify_string_error(source, span.start)
+    {
+        return error;
+    }
+    // The scan reached a closing quote without incident, so the failure
+    // lies outside this literal; fall through to the shape rules below.
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
         LexError::IntegerOverflow { span }
     } else if is_float_shape(text) {
         LexError::FloatOverflow { span }
     } else {
         LexError::InvalidCharacter { span }
     }
+}
+
+/// Rescans a string literal beginning at `start` (the opening quote) to find
+/// why the string regex failed. A backslash not followed by one of `n`, `t`,
+/// `\`, `"` is an [`LexError::InvalidEscape`] covering the escape pair; a
+/// line break or the end of file before the closing quote is an
+/// [`LexError::UnterminatedString`] covering the quoted region. Returns `None`
+/// when the literal closes cleanly (the failure then lies elsewhere).
+fn classify_string_error(source: &str, start: usize) -> Option<LexError> {
+    let mut cursor = start + 1;
+    let mut chars = source[cursor..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return None,
+            '\n' | '\r' => {
+                return Some(LexError::UnterminatedString {
+                    span: Span::new(start, cursor),
+                });
+            }
+            '\\' => {
+                let escape_start = cursor;
+                cursor += 1;
+                let next = chars.next();
+                let accepted = matches!(next, Some('n') | Some('t') | Some('\\') | Some('"'));
+                if !accepted {
+                    let end = match next {
+                        Some(c) => cursor + c.len_utf8(),
+                        None => cursor,
+                    };
+                    return Some(LexError::InvalidEscape {
+                        span: Span::new(escape_start, end.min(source.len())),
+                    });
+                }
+                cursor += next.map_or(0, |c| c.len_utf8());
+            }
+            _ => cursor += c.len_utf8(),
+        }
+    }
+    Some(LexError::UnterminatedString {
+        span: Span::new(start, source.len()),
+    })
+}
+
+/// Decodes a raw string-literal token slice (including the delimiting
+/// quotes) into its value: strips the quotes and replaces the four accepted
+/// escape pairs (`\n`, `\t`, `\\`, `\"`) with the characters they denote.
+/// The lexer guarantees valid escapes, so a stray backslash is kept verbatim
+/// rather than panicking on unexpected input.
+pub fn unescape_str_lit(raw: &str) -> String {
+    let inner = &raw[1..raw.len() - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('n') => {
+                chars.next();
+                out.push('\n');
+            }
+            Some('t') => {
+                chars.next();
+                out.push('\t');
+            }
+            Some('\\') => {
+                chars.next();
+                out.push('\\');
+            }
+            Some('"') => {
+                chars.next();
+                out.push('"');
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
 }
 
 fn is_float_shape(text: &str) -> bool {
@@ -638,6 +771,85 @@ mod tests {
                 Token::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn lexes_each_accepted_escape_inside_string_literals() {
+        // The token carries the raw slice; unescaping happens in the parser.
+        // The empty literal sits mid-source on purpose: a trailing `""`
+        // would fuse with the raw-string delimiter.
+        let source = r#""a\nb" "" "c\t" "d\\e" "f\"g" h"#;
+        assert_eq!(
+            lex_ok(source),
+            vec![
+                Token::StrLit("\"a\\nb\""),
+                Token::StrLit("\"\""),
+                Token::StrLit("\"c\\t\""),
+                Token::StrLit("\"d\\\\e\""),
+                Token::StrLit("\"f\\\"g\""),
+                Token::Ident("h"),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn escaped_quote_does_not_terminate_a_string() {
+        let source = r#""a\"b""#;
+        assert_eq!(
+            lex_ok(source),
+            vec![Token::StrLit("\"a\\\"b\""), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn invalid_escape_is_a_lex_error_pointing_at_the_escape_pair() {
+        let source = "\"a\\qb\"\nint next = 1\n";
+        let (tokens, errors) = lex_with_errors(source);
+        assert_eq!(
+            errors,
+            vec![LexError::InvalidEscape {
+                span: Span::new(2, 4)
+            }]
+        );
+        // The damaged line degrades to a statement boundary; the next line
+        // lexes untouched.
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|spanned| spanned.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::Newline,
+                Token::KwInt,
+                Token::Ident("next"),
+                Token::Assign,
+                Token::IntLit(1),
+                Token::Newline,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn trailing_bare_backslash_in_string_is_an_invalid_escape() {
+        let source = "\"abc\\";
+        let (_, errors) = lex_with_errors(source);
+        assert_eq!(
+            errors,
+            vec![LexError::InvalidEscape {
+                span: Span::new(4, 5)
+            }]
+        );
+    }
+
+    #[test]
+    fn unescape_decodes_each_accepted_escape() {
+        assert_eq!(super::unescape_str_lit(r#""a\nb""#), "a\nb");
+        assert_eq!(super::unescape_str_lit(r#""c\t""#), "c\t");
+        assert_eq!(super::unescape_str_lit(r#""d\\e""#), "d\\e");
+        assert_eq!(super::unescape_str_lit(r#""f\"g""#), "f\"g");
+        assert_eq!(super::unescape_str_lit("\"\""), "");
     }
 
     #[test]

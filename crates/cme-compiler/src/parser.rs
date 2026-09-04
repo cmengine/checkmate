@@ -398,6 +398,16 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_function_declaration(&mut self, type_token: SpannedToken<'src>) -> Stmt {
         let return_ty = Self::parse_type_from_token(&type_token.token).unwrap_or(Type::Infer);
 
+        // §2.16: `infer` marks local declarations only; a return type must
+        // be explicit. The error is recorded while the declaration keeps
+        // parsing so tooling still sees the function.
+        if type_token.token == Token::KwInfer {
+            self.record(
+                "`infer` is only valid for local declarations",
+                type_token.span,
+            );
+        }
+
         let name = match *self.peek() {
             SpannedToken {
                 token: Token::Ident(name),
@@ -432,9 +442,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             };
         }
 
-        if self.at(Token::LBrace) {
-            self.advance();
-        } else {
+        if !self.at(Token::LBrace) {
             let other = *self.peek();
             let end = self.recover_to_next_statement(other.span.end);
             let error = self.record(
@@ -446,8 +454,9 @@ impl<'a, 'src> Parser<'a, 'src> {
                 kind: StmtKind::Invalid { error },
             };
         }
+        let open_brace = self.advance().span.start;
 
-        let body = self.parse_block_body(type_token.span.start);
+        let body = self.parse_block_body(open_brace);
         Stmt::new(
             StmtKind::FuncDecl {
                 name,
@@ -490,6 +499,24 @@ impl<'a, 'src> Parser<'a, 'src> {
                     type_token.span,
                 );
                 return (params, false);
+            }
+            // §1: parameters are explicitly typed — `infer` (§2.16, local
+            // declarations only) and `void` (§2.4, no value) are placement
+            // errors. The parameter is kept so the declaration keeps parsing.
+            match type_token.token {
+                Token::KwInfer => {
+                    let _ = self.record(
+                        "`infer` is only valid for local declarations",
+                        type_token.span,
+                    );
+                }
+                Token::KwVoid => {
+                    let _ = self.record(
+                        "`void` is only valid as a function return type",
+                        type_token.span,
+                    );
+                }
+                _ => {}
             }
             self.advance();
 
@@ -535,7 +562,11 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
-    fn parse_block_body(&mut self, _start: usize) -> Block {
+    /// Parses the statements of a block whose opening `{` (at byte
+    /// `open_brace`) has already been consumed. The block's span covers from
+    /// that `{` through the closing `}` — or to the end of file when the
+    /// closing brace is missing.
+    fn parse_block_body(&mut self, open_brace: usize) -> Block {
         let mut stmts = Vec::new();
 
         loop {
@@ -543,7 +574,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             if self.at(Token::RBrace) {
                 let closing = self.advance();
                 return Block {
-                    span: Span::new(closing.span.start, closing.span.end),
+                    span: Span::new(open_brace, closing.span.end),
                     stmts,
                 };
             }
@@ -551,7 +582,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 let eof_span = self.eof_span();
                 let _ = self.record("expected `}` before end of file", eof_span);
                 return Block {
-                    span: Span::missing(eof_span.start),
+                    span: Span::new(open_brace, eof_span.end),
                     stmts,
                 };
             }
@@ -586,9 +617,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             };
         }
 
-        if self.at(Token::LBrace) {
-            self.advance();
-        } else {
+        if !self.at(Token::LBrace) {
             let other = *self.peek();
             let end = self.skip_to_statement_end(other.span.end);
             let error = self.record(
@@ -600,20 +629,21 @@ impl<'a, 'src> Parser<'a, 'src> {
                 kind: StmtKind::Invalid { error },
             };
         }
-
-        let then_branch = self.parse_block_body(if_token.span.start);
+        let open_brace = self.advance().span.start;
+        let then_branch = self.parse_block_body(open_brace);
 
         let else_branch = if self.at(Token::KwElse) {
-            self.advance();
+            let else_token = self.advance();
             if self.at(Token::KwIf) {
                 let else_if = self.advance();
                 Some(Box::new(self.parse_if_statement(else_if)))
             } else if self.at(Token::LBrace) {
-                self.advance();
-                Some(Box::new(Stmt::new(
-                    StmtKind::Block(self.parse_block_body(if_token.span.start)),
-                    Span::new(0, 0),
-                )))
+                let open_brace = self.advance().span.start;
+                let block = self.parse_block_body(open_brace);
+                // The wrapping statement covers the `else` keyword through
+                // the block's closing brace.
+                let span = Span::new(else_token.span.start, block.span.end);
+                Some(Box::new(Stmt::new(StmtKind::Block(block), span)))
             } else {
                 let other = *self.peek();
                 let end = self.skip_to_statement_end(other.span.end);
@@ -655,9 +685,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             };
         }
 
-        if self.at(Token::LBrace) {
-            self.advance();
-        } else {
+        if !self.at(Token::LBrace) {
             let other = *self.peek();
             let end = self.skip_to_statement_end(other.span.end);
             let error = self.record(
@@ -669,8 +697,9 @@ impl<'a, 'src> Parser<'a, 'src> {
                 kind: StmtKind::Invalid { error },
             };
         }
+        let open_brace = self.advance().span.start;
 
-        let body = self.parse_block_body(while_token.span.start);
+        let body = self.parse_block_body(open_brace);
         let end = self.tokens[self.pos - 1].span.end;
         Stmt::new(
             StmtKind::While { cond, body },
@@ -1092,7 +1121,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::IntLit(value) => Ok(Expr::new(ExprKind::IntLit(value), token.span)),
             Token::FloatLit(value) => Ok(Expr::new(ExprKind::FloatLit(value), token.span)),
             Token::StrLit(value) => Ok(Expr::new(
-                ExprKind::StrLit(value[1..value.len() - 1].to_string()),
+                ExprKind::StrLit(crate::lexer::unescape_str_lit(value)),
                 token.span,
             )),
             Token::KwTrue => Ok(Expr::new(ExprKind::BoolLit(true), token.span)),

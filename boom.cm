@@ -204,13 +204,13 @@ infer mixed = (str boom)         // VarDecl{Infer, mixed, Invalid "(str boom)"}
 
 // ----------------------------------------------------------------------------
 // 12. Operator-grammar violations — the violation is diagnosed mid-expression
-//     and the whole RHS becomes Invalid. Known limitation: the mixed &&/||
-//     diagnostic's span is the expr_span (0,0) stub until spans land on all
-//     AST nodes (renders at 1:1); the chained-comparison span correctly
-//     points at the second operator.
+//     at its real span: the mixed &&/|| diagnostic spans the offending
+//     unparenthesized operand (recorded by both validation passes) and the RHS
+//     survives as a real tree; the chained-comparison diagnostic points at the
+//     second operator and its RHS becomes Invalid.
 // ----------------------------------------------------------------------------
 
-infer mixedBad = alive && ready || armed   // Invalid covers the whole RHS ("mixed && and || require parentheses")
+infer mixedBad = alive && ready || armed   // RHS survives as a real (alive && ready) || armed tree ("mixed && and || require parentheses" spans "alive && ready")
 infer chained = 1 < 2 < 3                  // Invalid covers "1 < 2 < 3" ("comparisons are non-associative")
 
 

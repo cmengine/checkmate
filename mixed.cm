@@ -1,0 +1,164 @@
+// mixed.cm — healthy and broken code side by side, for eyeballing `cme check`.
+// This is a demo, NOT a fixture: basic.cm stays the only zero-diagnostics pin.
+// Run: cargo run --features cli -- check mixed.cm   (expect exit code 1)
+
+// ---------- healthy ----------
+
+int fib(int n) {
+    if (n <= 1) {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+str banner(str prefix, int count) {
+    str s = prefix + ": " + count        // ok: int stringifies inside concat
+    s += "\n"                            // ok: escape + compound concat
+    s += 7                               // ok: exactly s = s + 7, stringifies
+    return s
+}
+
+bool ready(int score, bool armed) {
+    return (score > 50 && score < 90) || armed      // ok: parens make mixing legal
+}
+
+int sign(int n) {
+    if (n > 0) {
+        return 1
+    } else if (n < 0) {
+        return -1
+    } else {
+        return 0
+    }
+}
+
+int sum_to(int limit) {
+    int total = 0
+    int i = 1
+    while (i <= limit) {
+        total += i
+        i += 1
+    }
+    return total
+}
+
+// ---------- operand typing ----------
+
+float mix(int a, float b) {
+    return a + b                         // err: int + float is cross-type
+}
+
+str repeatish(str word) {
+    return word * 3                      // err: only + accepts a str operand
+}
+
+bool compare(int n, str label) {
+    bool same = n == 42                  // ok: same-type equality
+    return n == label                    // err: == never crosses types
+}
+
+void unary_abuse(int value, bool flag) {
+    int a = -value                       // ok
+    bool b = !flag                       // ok
+    int c = -flag                        // err: unary - wants int or float
+    bool d = !value                      // err: unary ! wants bool
+}
+
+// ---------- names and scopes ----------
+
+int ghost() {
+    return phantom                       // err: undeclared identifier
+}
+
+int self_ref() {
+    int a = a                            // err: not in scope in its own initializer
+    return a
+}
+
+int shadower(int x) {
+    int x = 5                            // err: local shadows the parameter
+    return x
+}
+
+void caller() {
+    int n = fib(1, 2)                    // err: fib expects 1 argument
+    int m = fib(true)                    // err: bool where int expected
+    int k = nosuch(1)                    // err: unknown function
+}
+
+int dup(int x) {
+    return x
+}
+
+float dup(int x) {                       // err: duplicate function name
+    return 1.5
+}
+
+int pair(int a, int a) {                 // err: duplicate parameter name
+    return a
+}
+
+// ---------- statements and assignment ----------
+
+void assigner() {
+    int total = 0
+    float weight = 1.5
+    total = 2.5                          // err: float into an int variable
+    total += 2.5                         // err: total + 2.5 is int + float
+    weight /= 2                          // err: weight / 2 is float / int
+    weight %= 1.0                        // err: % is int-only
+}
+
+void statement_abuse() {
+    int a = 1
+    a + 1                                // err: only a call can be a statement
+}
+
+void log(str msg) {
+    str line = msg + "\n"                // ok
+}
+
+void uses_log() {
+    log("event")                         // ok: call as a statement
+    infer line = log("event")            // err: void call used as a value
+}
+
+// ---------- conditions and returns ----------
+
+void guard(int level) {
+    if (level) {                         // err: condition must be bool
+        level += 1
+    }
+}
+
+int falls_off(int n) {
+    infer doubled = n * 2                // ok: infer crystallizes to int
+}                                        // err: can fall off the end
+
+int conditional(int n) {
+    if (n > 0) {
+        return 1
+    }                                    // err: else-less if does not return
+}
+
+int wrong_return(int n) {
+    return "nope"                        // err: str returned from an int function
+}
+
+void sneaky_return() {
+    return 5                             // err: value returned from void
+}
+
+int bare_returner() {
+    return                               // err: bare return in a non-void function
+}
+
+// ---------- validator (parse-stage, surfaces through check) ----------
+
+bool mixed_logic(bool a, bool b, bool c) {
+    return a || b && c                   // err: mixed && and || require parentheses
+}
+
+// ---------- top level ----------
+
+int global_counter = 0                   // err: top level is functions only

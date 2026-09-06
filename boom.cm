@@ -158,7 +158,9 @@ float                            // Stmt::Invalid ("expected a variable name, bu
 // ----------------------------------------------------------------------------
 
 lonely                           // Stmt::Invalid ("expected an assignment operator, but found end of statement")
-x y                              // Stmt::Invalid ("...but found identifier `y`")
+x y                              // VarDecl{Named(x), y, Invalid zero-width}: named-type decl
+                                 // with a missing `=` (the same recovery as `int x`); the
+                                 // checker reports the unknown type `x`
 
 
 // ----------------------------------------------------------------------------

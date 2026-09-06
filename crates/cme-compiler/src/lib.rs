@@ -1548,6 +1548,269 @@ mod tests {
     }
 
     #[test]
+    fn parses_named_type_led_declarations() {
+        // `vec2 pos = ...` and `option<int> findEven(...)` (§2.6, §2.9, §2.11).
+        let source = "vec2 distance(vec2 a, vec2 b) {\nreturn a\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl {
+                name, return_ty, ..
+            } => {
+                assert_eq!(name, "distance");
+                assert_eq!(
+                    *return_ty,
+                    Type::Named {
+                        name: "vec2".into(),
+                        args: vec![]
+                    }
+                );
+            }
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+
+        // A generic type leading a variable declaration.
+        let source = "int main() {\npair<int, str> p = f()\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => match &body.stmts[0].kind {
+                StmtKind::VarDecl { ty, name, .. } => {
+                    assert_eq!(name, "p");
+                    assert_eq!(
+                        *ty,
+                        Type::Named {
+                            name: "pair".into(),
+                            args: vec![
+                                Type::Prim(PrimitiveType::Int),
+                                Type::Prim(PrimitiveType::Str)
+                            ]
+                        }
+                    );
+                }
+                other => panic!("expected a variable declaration, got {other:?}"),
+            },
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comparison_shaped_fragments_roll_back_to_expressions() {
+        // `x < y` is not a declaration; it is a bare fragment statement.
+        let (stmts, errors) = parse_program_parts("int f() {\nx < y\nreturn 0\n}\n");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("assignment operator"));
+        assert!(matches!(stmts[0].kind, StmtKind::FuncDecl { .. }));
+    }
+
+    #[test]
+    fn parses_positional_and_named_call_arguments() {
+        use cme_core::ast::CallArg;
+        // Positional (§2.12).
+        let source = "int main() {\nint r = clamp(15, 0, 10)\nreturn r\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        match &init.kind {
+            ExprKind::Call { name, args } => {
+                assert_eq!(name, "clamp");
+                assert_eq!(args.len(), 3);
+                assert!(args.iter().all(|arg| matches!(arg, CallArg::Positional(_))));
+            }
+            other => panic!("expected a call, got {other:?}"),
+        }
+
+        // Named across lines: the stripped newlines become adjacency (§2.12).
+        let source = "int main() {\nint r = clamp(\n    value: 15\n    low: 0\n    high: 10\n)\nreturn r\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        match &init.kind {
+            ExprKind::Call { args, .. } => {
+                assert_eq!(args.len(), 3);
+                let names: Vec<&str> = args
+                    .iter()
+                    .map(|arg| match arg {
+                        CallArg::Named { name, .. } => name.as_str(),
+                        CallArg::Positional(_) => panic!("expected named arguments"),
+                    })
+                    .collect();
+                assert_eq!(names, ["value", "low", "high"]);
+            }
+            other => panic!("expected a call, got {other:?}"),
+        }
+
+        // Named on one line with commas (§4.2 style).
+        let source = "int main() {\nint r = clamp(value: 15, low: 0, high: 10)\nreturn r\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        assert!(matches!(
+            &init.kind,
+            ExprKind::Call { args, .. } if args.len() == 3
+        ));
+    }
+
+    #[test]
+    fn mixing_positional_and_named_arguments_is_a_parse_error() {
+        // §2.12: a single invocation cannot mix the two forms.
+        let source = "int main() {\nint r = clamp(15, low: 0, high: 10)\nreturn r\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(
+            errors[0].to_string(),
+            "cannot mix positional and named arguments"
+        );
+        assert!(matches!(stmts[0].kind, StmtKind::FuncDecl { .. }));
+    }
+
+    #[test]
+    fn parses_variant_construction() {
+        // `gameEvent.Damage(25)` (§2.7).
+        let source = "int main() {\ngameEvent evt = gameEvent.Damage(25)\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        match &init.kind {
+            ExprKind::VariantCall {
+                enum_name,
+                variant,
+                args,
+            } => {
+                assert_eq!(enum_name, "gameEvent");
+                assert_eq!(variant, "Damage");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected a variant construction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_field_and_index_postfix_chains() {
+        // `p.health`, `points[1].x`, `grid[1][0]` (§2.6, §11).
+        let source = "int main() {\nfloat x = points[1].x\nint y = grid[1][0]\nint z = squad.leader.position.x\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        match &init.kind {
+            ExprKind::Field { obj, name } => {
+                assert_eq!(name, "x");
+                assert!(matches!(&obj.kind, ExprKind::Index { .. }));
+            }
+            other => panic!("expected a field access, got {other:?}"),
+        }
+        // `grid[1][0]`: the outer index applies to the inner index result.
+        let init = stmts[0].declaration_expr_of(1);
+        assert!(matches!(
+            &init.kind,
+            ExprKind::Index { obj, .. } if matches!(obj.kind, ExprKind::Index { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_field_and_index_assignment_targets() {
+        // §2.13, §A.7: `p.health = ...`, `m[\"k\"] += ...`.
+        use cme_core::ast::LValue;
+        let source = "int main() {\np.health = 90\np.health -= 10\nm[\"k\"] += 1\nsquad.leader.position.x = 1.0\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => {
+                match &body.stmts[0].kind {
+                    StmtKind::Assign { target, .. } => match target {
+                        LValue::Field { base, name } => {
+                            assert_eq!(name, "health");
+                            assert!(matches!(base.as_ref(), LValue::Var { .. }));
+                        }
+                        other => panic!("expected a field assignment, got {other:?}"),
+                    },
+                    other => panic!("expected a field assignment, got {other:?}"),
+                }
+                match &body.stmts[1].kind {
+                    StmtKind::CompoundAssign { target, .. } => {
+                        assert!(matches!(target, LValue::Field { .. }))
+                    }
+                    other => panic!("expected a compound field assignment, got {other:?}"),
+                }
+                match &body.stmts[2].kind {
+                    StmtKind::CompoundAssign { target, .. } => {
+                        assert!(matches!(target, LValue::Index { .. }))
+                    }
+                    other => panic!("expected an index assignment, got {other:?}"),
+                }
+                match &body.stmts[3].kind {
+                    StmtKind::Assign { target, .. } => {
+                        // Field of field of field of var.
+                        let mut depth = 0;
+                        let mut cursor = target;
+                        while let LValue::Field { base, .. } = cursor {
+                            depth += 1;
+                            cursor = base;
+                        }
+                        assert!(matches!(cursor, LValue::Var { name } if name == "squad"));
+                        assert_eq!(depth, 3);
+                    }
+                    other => panic!("expected a deep field assignment, got {other:?}"),
+                }
+            }
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_the_try_operator_as_postfix() {
+        // `safeDiv(a, b)?` (§2.8).
+        let source = "result<int, str> chain(int a) {\nint v = safeDiv(a, 2)?\nreturn Ok(v)\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => match &body.stmts[0].kind {
+                StmtKind::VarDecl { expr, .. } => {
+                    assert!(matches!(&expr.kind, ExprKind::Try { expr: inner }
+                        if matches!(inner.kind, ExprKind::Call { .. })));
+                }
+                other => panic!("expected a variable declaration, got {other:?}"),
+            },
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn indexing_a_call_result_and_calling_results_are_parsed() {
+        // `getUser(42).name` and `f(x)[0]` are postfix chains; `f(x)(y)`
+        // is rejected — calls name functions (no function values).
+        let source = "str main() {\nstr n = getUser(42).name\nreturn n\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        assert!(matches!(
+            &init.kind,
+            ExprKind::Field { obj, .. } if matches!(obj.kind, ExprKind::Call { .. })
+        ));
+
+        let (stmts, errors) = parse_program_parts("int main() {\ngetUser(42)(1)\nreturn 0\n}\n");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("must name a function"));
+        assert!(matches!(stmts[0].kind, StmtKind::FuncDecl { .. }));
+    }
+
+    trait DeclarationExprOf {
+        fn declaration_expr_of(&self, index: usize) -> &Expr;
+    }
+
+    impl DeclarationExprOf for Stmt {
+        fn declaration_expr_of(&self, index: usize) -> &Expr {
+            match &self.kind {
+                StmtKind::FuncDecl { body, .. } => match &body.stmts[index].kind {
+                    StmtKind::VarDecl { expr, .. } => expr,
+                    other => panic!("expected a variable declaration, got {other:?}"),
+                },
+                other => panic!("expected a function declaration, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn infer_function_return_type_is_rejected() {
         let (stmts, errors) = parse_program_parts("infer f() {\nreturn 1\n}\n");
         assert_eq!(errors.len(), 1);
@@ -1984,9 +2247,11 @@ mod tests {
                 "invalid",
                 "invalid",
                 "invalid",
-                // §8 bare identifiers
+                // §8 bare identifiers — `lonely` is Invalid; `x y` now reads
+                // as a named-type declaration with a missing `=` (same
+                // recovery as `int x`), so it survives as a VarDecl
                 "invalid",
-                "invalid",
+                "var:y:Other",
                 // §9 lexer errors — five declarations survive the damaged lines
                 "var:cursed:Int",
                 "var:oops:Str",

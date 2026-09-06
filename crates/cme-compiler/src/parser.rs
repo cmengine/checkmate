@@ -415,8 +415,8 @@ impl<'a, 'src> Parser<'a, 'src> {
             return self.parse_type_declaration(first, "a variable name");
         }
 
-        if let Token::Ident(name) = &first.token {
-            return self.parse_assignment_statement(first, name.to_string());
+        if let Token::Ident(_) = &first.token {
+            return self.parse_ident_led_statement(first);
         }
 
         let message = format!(
@@ -1438,30 +1438,109 @@ impl<'a, 'src> Parser<'a, 'src> {
         Stmt::new(StmtKind::VarDecl { ty, name, expr }, Span::new(start, end))
     }
 
-    fn parse_assignment_statement(&mut self, target: SpannedToken<'src>, name: String) -> Stmt {
-        let operator = *self.peek();
+    /// A statement led by an identifier: either a declaration led by a
+    /// named type (`vec2 pos = ...`, `pair<int, str> p = ...`, `option<int>
+    /// findEven(...)` — §2.6, §2.9, §2.11), or an expression statement /
+    /// assignment. The type parse is speculative: it rolls back cleanly
+    /// when the tokens do not form a declaration header.
+    fn parse_ident_led_statement(&mut self, first: SpannedToken<'src>) -> Stmt {
+        let save_pos = self.pos;
+        let save_errors = self.errors.len();
 
-        if operator.token == Token::LParen {
-            match self.parse_call_expression(name, target.span) {
-                Ok(expr) => {
-                    return Stmt::new(
-                        StmtKind::Expression { expr },
-                        Span::new(target.span.start, self.tokens[self.pos - 1].span.end),
+        if let Some(ty) = self.parse_type_from_ident(first)
+            && let Token::Ident(_) = self.peek().token
+        {
+            let (decl_name, name_span) = match *self.peek() {
+                SpannedToken {
+                    token: Token::Ident(name),
+                    span,
+                } => (name.to_string(), span),
+                _ => unreachable!(),
+            };
+            match self.tokens.get(self.pos + 1).map(|t| t.token) {
+                Some(Token::LParen) => {
+                    self.advance();
+                    return self.parse_function_declaration_rest(
+                        first.span,
+                        ty,
+                        (decl_name, name_span),
                     );
                 }
-                Err(diagnostic) => {
-                    self.errors.push(diagnostic);
-                    let end = self.skip_to_statement_end(operator.span.end);
-                    return Stmt {
-                        span: Span::new(target.span.start, end),
-                        kind: StmtKind::Invalid {
-                            error: ErrorId(self.errors.len() - 1),
-                        },
-                    };
+                Some(Token::Assign) | Some(Token::Newline) | Some(Token::Eof) | None => {
+                    self.advance();
+                    return self.parse_variable_declaration_rest(
+                        first.span,
+                        ty,
+                        (decl_name, name_span),
+                    );
                 }
+                _ => {}
             }
         }
 
+        // Not a declaration: rewind the speculation and the first token,
+        // then parse an expression statement from the identifier.
+        self.pos = save_pos;
+        self.errors.truncate(save_errors);
+        self.pos -= 1;
+        self.parse_expression_statement()
+    }
+
+    /// The type whose base name is the already-consumed `first` identifier:
+    /// generic arguments, an array suffix, or a plain named type. Consumes
+    /// nothing on failure.
+    fn parse_type_from_ident(&mut self, first: SpannedToken<'src>) -> Option<Type> {
+        let Token::Ident(name) = first.token else {
+            return None;
+        };
+        if self.at(Token::Lt) {
+            self.advance();
+            return self.parse_type_generic_tail(name.to_string());
+        }
+        if self.at(Token::LBracket)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| t.token),
+                Some(Token::RBracket)
+            )
+        {
+            self.advance();
+            self.advance();
+            return Some(self.parse_type_array_suffixes(Type::Named {
+                name: name.to_string(),
+                args: Vec::new(),
+            }));
+        }
+        Some(Type::Named {
+            name: name.to_string(),
+            args: Vec::new(),
+        })
+    }
+
+    /// An assignment or a bare call statement led by an expression: parses
+    /// the full expression, then requires an assignment operator (§2.10,
+    /// §A.7 — targets are variable/field/index chains) or accepts the
+    /// statement as a call (§2.11).
+    fn parse_expression_statement(&mut self) -> Stmt {
+        // The statement's first token sits at the current position; the
+        // expression parse consumes it (and everything it spans).
+        let start = self.peek().span;
+
+        let expr = match self.parse_expression() {
+            Ok(expr) => expr,
+            Err(diagnostic) => {
+                self.errors.push(diagnostic);
+                let end = self.skip_to_statement_end(self.peek().span.end);
+                return Stmt {
+                    span: Span::new(start.start, end),
+                    kind: StmtKind::Invalid {
+                        error: ErrorId(self.errors.len() - 1),
+                    },
+                };
+            }
+        };
+
+        // Assignment (plain or compound) to an lvalue chain (§2.10, §A.7).
+        let operator = *self.peek();
         let compound = match operator.token {
             Token::Assign => None,
             Token::AddAssign => Some(CompoundOp::Add),
@@ -1469,52 +1548,97 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::MulAssign => Some(CompoundOp::Mul),
             Token::DivAssign => Some(CompoundOp::Div),
             Token::RemAssign => Some(CompoundOp::Rem),
-            other => {
-                // A bare identifier with no operator has no recoverable
-                // statement structure; record it as an invalid statement.
-                let end = self.skip_to_statement_end(operator.span.end);
-                let error = self.record(
-                    format!(
-                        "expected an assignment operator, but found {}",
-                        other.describe()
-                    ),
-                    operator.span,
-                );
-                return Stmt {
-                    span: Span::new(target.span.start, end),
-                    kind: StmtKind::Invalid { error },
-                };
-            }
+            _ => None,
         };
-        self.advance();
+        if compound.is_some() || operator.token == Token::Assign {
+            self.advance();
+            let rhs = self.parse_recovered_expression();
+            let kind = match expr_to_lvalue(&expr) {
+                Some(target) => match compound {
+                    None => StmtKind::Assign {
+                        target,
+                        expr: rhs.clone(),
+                    },
+                    Some(op) => StmtKind::CompoundAssign {
+                        target,
+                        op,
+                        expr: rhs.clone(),
+                    },
+                },
+                None => {
+                    // Not an assignable expression: report and keep the
+                    // statement boundary intact.
+                    let error = self.record("invalid assignment target", expr.span);
+                    return Stmt {
+                        span: Span::new(start.start, rhs.span.end),
+                        kind: StmtKind::Invalid { error },
+                    };
+                }
+            };
+            return Stmt::new(kind, Span::new(start.start, rhs.span.end));
+        }
 
-        let expr = self.parse_recovered_expression();
-        let kind = match compound {
-            None => StmtKind::Assign {
-                target: LValue::Var { name },
-                expr: expr.clone(),
-            },
-            Some(op) => StmtKind::CompoundAssign {
-                target: LValue::Var { name },
-                op,
-                expr: expr.clone(),
-            },
-        };
-        Stmt::new(kind, Span::new(target.span.start, expr.span.end))
+        // Otherwise the expression statement must be a call or a
+        // construction (§2.11); anything else is a bare fragment.
+        let is_callable = matches!(
+            &expr.kind,
+            ExprKind::Call { .. } | ExprKind::VariantCall { .. }
+        );
+        if is_callable {
+            let end = expr.span.end;
+            return Stmt::new(StmtKind::Expression { expr }, Span::new(start.start, end));
+        }
+
+        // A bare fragment: one diagnostic, then the statement boundary.
+        let end = self.skip_to_statement_end(operator.span.end);
+        let error = self.record(
+            format!(
+                "expected an assignment operator, but found {}",
+                operator.token.describe()
+            ),
+            operator.span,
+        );
+        Stmt {
+            span: Span::new(start.start, end),
+            kind: StmtKind::Invalid { error },
+        }
     }
 
     fn parse_expression(&mut self) -> Result<Expr, Diagnostic> {
         self.parse_logic_or()
     }
 
-    fn parse_call_expression(&mut self, name: String, start: Span) -> Result<Expr, Diagnostic> {
+    /// The `( args )` of a call or a construction, starting at the `(`.
+    /// Arguments are positional or named (§2.12); mixing the two forms in
+    /// one list is a parse error. Named arguments separate by commas or by
+    /// plain adjacency — the strip pass drops newlines inside parentheses
+    /// (§A.8), so the multi-line named-argument style of §2.12 arrives as
+    /// adjacent `name: value` pairs.
+    fn parse_call_args(&mut self, start: Span) -> Result<(Vec<CallArg>, Span), Diagnostic> {
         self.advance();
         self.skip_newlines();
         let mut args = Vec::new();
+        let mut has_positional = false;
+        let mut has_named = false;
         if !self.at(Token::RParen) {
             loop {
                 self.skip_newlines();
-                args.push(CallArg::Positional(self.parse_expression()?));
+                let arg = if self.at_named_argument() {
+                    let name_tok = self.advance();
+                    self.advance(); // colon
+                    let value = self.parse_expression()?;
+                    has_named = true;
+                    let name = match name_tok.token {
+                        Token::Ident(name) => name.to_string(),
+                        _ => unreachable!("checked by at_named_argument"),
+                    };
+                    CallArg::Named { name, expr: value }
+                } else {
+                    let value = self.parse_expression()?;
+                    has_positional = true;
+                    CallArg::Positional(value)
+                };
+                args.push(arg);
                 self.skip_newlines();
                 if self.at(Token::Comma) {
                     self.advance();
@@ -1522,6 +1646,10 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 if self.at(Token::RParen) {
                     break;
+                }
+                // Adjacent named arguments: `f(x: 1 y: 2)`.
+                if self.at_named_argument() {
+                    continue;
                 }
                 let other = *self.peek();
                 return Err(Self::expected(
@@ -1536,8 +1664,25 @@ impl<'a, 'src> Parser<'a, 'src> {
             return Err(Self::expected("`)`", &closing.token, closing.span));
         }
         self.advance();
-        let span = Span::new(start.start, closing.span.end);
-        Ok(Expr::new(ExprKind::Call { name, args }, span))
+        if has_positional && has_named {
+            // §2.12: mixing positional and named arguments is a
+            // compile-time syntax error.
+            return Err(Diagnostic::parse(
+                "cannot mix positional and named arguments",
+                closing.span,
+            ));
+        }
+        Ok((args, Span::new(start.start, closing.span.end)))
+    }
+
+    /// True when the current token begins a named argument: an identifier
+    /// directly followed by `:` (§2.12).
+    fn at_named_argument(&self) -> bool {
+        matches!(self.peek().token, Token::Ident(_))
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| t.token),
+                Some(Token::Colon)
+            )
     }
 
     fn parse_logic_or(&mut self) -> Result<Expr, Diagnostic> {
@@ -1653,7 +1798,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let unary_op = match self.peek().token {
             Token::Minus => UnaryOp::Neg,
             Token::Not => UnaryOp::Not,
-            _ => return self.parse_primary(),
+            _ => return self.parse_postfix(),
         };
 
         self.advance();
@@ -1693,11 +1838,45 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::KwTrue => Ok(Expr::new(ExprKind::BoolLit(true), token.span)),
             Token::KwFalse => Ok(Expr::new(ExprKind::BoolLit(false), token.span)),
             Token::Ident(name) => {
-                if self.at(Token::LParen) {
-                    self.parse_call_expression(name.to_string(), token.span)
-                } else {
-                    Ok(Expr::new(ExprKind::Ident(name.to_string()), token.span))
+                // A qualified construction: `Enum.Variant(args)` (§2.7).
+                if self.at(Token::Dot)
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| t.token),
+                        Some(Token::Ident(_))
+                    )
+                    && matches!(
+                        self.tokens.get(self.pos + 2).map(|t| t.token),
+                        Some(Token::LParen)
+                    )
+                {
+                    self.advance(); // dot
+                    let variant_tok = self.advance();
+                    let variant = match variant_tok.token {
+                        Token::Ident(variant) => variant.to_string(),
+                        _ => unreachable!("checked by the lookahead"),
+                    };
+                    let (args, span) = self.parse_call_args(token.span)?;
+                    return Ok(Expr::new(
+                        ExprKind::VariantCall {
+                            enum_name: name.to_string(),
+                            variant,
+                            args,
+                        },
+                        span,
+                    ));
                 }
+                // A call by name (§2.11, §2.12).
+                if self.at(Token::LParen) {
+                    let (args, span) = self.parse_call_args(token.span)?;
+                    return Ok(Expr::new(
+                        ExprKind::Call {
+                            name: name.to_string(),
+                            args,
+                        },
+                        span,
+                    ));
+                }
+                Ok(Expr::new(ExprKind::Ident(name.to_string()), token.span))
             }
             Token::LParen => {
                 let expr = self.parse_logic_or()?;
@@ -1718,6 +1897,80 @@ impl<'a, 'src> Parser<'a, 'src> {
             )),
             other => Err(Self::expected("an expression", &other, token.span)),
         }
+    }
+
+    /// A primary expression with its postfix chain: field access (§2.6),
+    /// indexing (§11), and the `?` operator (§2.8). A `(` here can only be
+    /// an attempt to call a non-name expression — functions and
+    /// constructors are called by name in `parse_primary`.
+    fn parse_postfix(&mut self) -> Result<Expr, Diagnostic> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            match self.peek().token {
+                Token::Dot => {
+                    self.advance();
+                    let field_tok = *self.peek();
+                    match field_tok.token {
+                        Token::Ident(name) => {
+                            self.advance();
+                            let span = Span::new(expr.span.start, field_tok.span.end);
+                            expr = Expr::new(
+                                ExprKind::Field {
+                                    obj: Box::new(expr),
+                                    name: name.to_string(),
+                                },
+                                span,
+                            );
+                        }
+                        other => {
+                            return Err(Self::expected(
+                                "a field name after `.`",
+                                &other,
+                                field_tok.span,
+                            ));
+                        }
+                    }
+                }
+                Token::LBracket => {
+                    self.advance();
+                    self.skip_newlines();
+                    let index = self.parse_expression()?;
+                    self.skip_newlines();
+                    let closing = *self.peek();
+                    if closing.token != Token::RBracket {
+                        return Err(Self::expected("`]`", &closing.token, closing.span));
+                    }
+                    self.advance();
+                    let span = Span::new(expr.span.start, closing.span.end);
+                    expr = Expr::new(
+                        ExprKind::Index {
+                            obj: Box::new(expr),
+                            index: Box::new(index),
+                        },
+                        span,
+                    );
+                }
+                Token::Question => {
+                    let question = self.advance();
+                    let span = Span::new(expr.span.start, question.span.end);
+                    expr = Expr::new(
+                        ExprKind::Try {
+                            expr: Box::new(expr),
+                        },
+                        span,
+                    );
+                }
+                Token::LParen => {
+                    let other = *self.peek();
+                    return Err(Diagnostic::parse(
+                        "function calls must name a function or a constructor",
+                        other.span,
+                    ));
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
     }
 }
 
@@ -1746,6 +1999,24 @@ fn multiplicative_operator(token: &Token) -> Option<BinaryOp> {
         Token::Star => Some(BinaryOp::Mul),
         Token::Slash => Some(BinaryOp::Div),
         Token::Percent => Some(BinaryOp::Rem),
+        _ => None,
+    }
+}
+
+/// Converts a parsed expression into an assignment target when its shape is
+/// assignable: a variable, a field of a target, or an index into a target
+/// (§2.10, §2.13, §A.7). Parenthesized and call results are not assignable.
+fn expr_to_lvalue(expr: &Expr) -> Option<LValue> {
+    match &expr.kind {
+        ExprKind::Ident(name) => Some(LValue::Var { name: name.clone() }),
+        ExprKind::Field { obj, name } => Some(LValue::Field {
+            base: Box::new(expr_to_lvalue(obj)?),
+            name: name.clone(),
+        }),
+        ExprKind::Index { obj, index } => Some(LValue::Index {
+            base: Box::new(expr_to_lvalue(obj)?),
+            index: (**index).clone(),
+        }),
         _ => None,
     }
 }

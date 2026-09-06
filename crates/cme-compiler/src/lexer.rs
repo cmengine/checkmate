@@ -41,6 +41,24 @@ fn is_accepted_escape_byte(byte: u8) -> bool {
     matches!(byte, b'n' | b't' | b'\\' | b'"')
 }
 
+/// The callback for [`Token::InterpStrLit`]: the `$"..."` literal validates
+/// escapes exactly like a plain string literal (the `{expr}` islands are
+/// parsed later, at expression level).
+fn interp_str_lit<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<&'src str> {
+    let slice = lex.slice();
+    str_escapes_valid(&slice[1..]).then_some(slice)
+}
+
+/// The callback for [`Token::BlockComment`]: after the regex matches the
+/// `/*` opener, consumes through the first `*/`. `None` (failing the token)
+/// for an unterminated comment — everything from the opener on is comment.
+fn block_comment<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<()> {
+    let rest = lex.remainder();
+    let end = rest.find("*/")?;
+    lex.bump(end + 2);
+    Some(())
+}
+
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(skip r"[ \t\f]+")]
 #[logos(skip r"//[^\r\n]*")]
@@ -57,6 +75,21 @@ pub enum Token<'a> {
     // `UnterminatedString` by rescanning the source.
     #[regex(r#""(?:\\[^\r\n]|\\|[^"\r\n\\])*""#, str_lit)]
     StrLit(&'a str),
+
+    // Interpolated string literals (§2.8/§4.1): a `$` sigil before the
+    // opening quote. Escape validation is identical; `{expr}` islands are
+    // recognized by the parser, not the lexer.
+    #[regex(r#"\$\"(?:\\[^\r\n]|\\|[^\"\r\n\\])*\""#, interp_str_lit)]
+    InterpStrLit(&'a str),
+
+    // Block comments (§2.2). The regex matches the opener and the callback
+    // consumes through the first `*/` with hand-written scanning: logos has
+    // no backtracking, so the pure-regex formulations either over-consume
+    // (`/***/` swallows following code) or dead-end. The token is filtered
+    // out of the stream like whitespace; an unterminated comment fails the
+    // callback, and recovery classifies it as `UnterminatedBlockComment`.
+    #[regex(r"/\*", block_comment)]
+    BlockComment,
 
     // Symbols
     #[token("||")]
@@ -107,8 +140,20 @@ pub enum Token<'a> {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
     #[token(",")]
     Comma,
+    #[token(".")]
+    Dot,
+    #[token(":")]
+    Colon,
+    #[token("=>")]
+    FatArrow,
+    #[token("?")]
+    Question,
 
     // Identifiers (e.g., variable names, function names)
     // This regex matches a letter or underscore, followed by any number of letters, numbers, or underscores.
@@ -140,6 +185,16 @@ pub enum Token<'a> {
     KwTrue,
     #[token("false")]
     KwFalse,
+    #[token("struct")]
+    KwStruct,
+    #[token("enum")]
+    KwEnum,
+    #[token("match")]
+    KwMatch,
+    #[token("for")]
+    KwFor,
+    #[token("in")]
+    KwIn,
 
     // Integer Literals
     // This regex matches digits, and the closure parses it into an i64. A
@@ -174,6 +229,9 @@ pub enum LexError {
     InvalidCharacter { span: Span },
     /// A `"` with no closing `"` before the end of the line/file.
     UnterminatedString { span: Span },
+    /// A `/*` with no closing `*/` before the end of the file. The whole
+    /// remaining source is comment.
+    UnterminatedBlockComment { span: Span },
     /// A backslash inside a string literal that is not followed by one of
     /// the four accepted escape characters (`n`, `t`, `\\`, `"`).
     InvalidEscape { span: Span },
@@ -188,6 +246,7 @@ impl LexError {
         match self {
             LexError::InvalidCharacter { span }
             | LexError::UnterminatedString { span }
+            | LexError::UnterminatedBlockComment { span }
             | LexError::InvalidEscape { span }
             | LexError::IntegerOverflow { span }
             | LexError::FloatOverflow { span } => *span,
@@ -201,6 +260,8 @@ impl<'a> Token<'a> {
         match self {
             Token::Ident(name) => format!("identifier `{name}`"),
             Token::StrLit(_) => "string literal".into(),
+            Token::InterpStrLit(_) => "interpolated string literal".into(),
+            Token::BlockComment => "block comment".into(),
             Token::IntLit(value) => format!("integer literal `{value}`"),
             Token::FloatLit(value) => format!("float literal `{value}`"),
             Token::Newline => "end of statement".into(),
@@ -216,6 +277,11 @@ impl<'a> Token<'a> {
             Token::KwVoid => "`void`".into(),
             Token::KwTrue => "`true`".into(),
             Token::KwFalse => "`false`".into(),
+            Token::KwStruct => "`struct`".into(),
+            Token::KwEnum => "`enum`".into(),
+            Token::KwMatch => "`match`".into(),
+            Token::KwFor => "`for`".into(),
+            Token::KwIn => "`in`".into(),
             Token::Assign => "`=`".into(),
             Token::AddAssign => "`+=`".into(),
             Token::SubAssign => "`-=`".into(),
@@ -240,7 +306,13 @@ impl<'a> Token<'a> {
             Token::RParen => "`)`".into(),
             Token::LBrace => "`{`".into(),
             Token::RBrace => "`}`".into(),
+            Token::LBracket => "`[`".into(),
+            Token::RBracket => "`]`".into(),
             Token::Comma => "`,`".into(),
+            Token::Dot => "`.`".into(),
+            Token::Colon => "`:`".into(),
+            Token::FatArrow => "`=>`".into(),
+            Token::Question => "`?`".into(),
             Token::Eof => "end of file".into(),
         }
     }
@@ -252,6 +324,18 @@ impl<'a> Token<'a> {
             Token::KwInt | Token::KwFloat | Token::KwStr | Token::KwBool | Token::KwInfer
         )
     }
+
+    /// The tokens that can head a statement so decisively that a newline
+    /// before them must stay significant even after a dangling fragment
+    /// (the strip pass uses this to keep broken lines from fusing with the
+    /// declaration typed below them).
+    pub(crate) fn starts_statement(&self) -> bool {
+        self.is_type_keyword()
+            || matches!(
+                self,
+                Token::KwVoid | Token::KwStruct | Token::KwEnum | Token::KwMatch | Token::KwFor
+            )
+    }
 }
 
 impl fmt::Display for LexError {
@@ -259,6 +343,7 @@ impl fmt::Display for LexError {
         let msg = match self {
             LexError::InvalidCharacter { .. } => "invalid character",
             LexError::UnterminatedString { .. } => "unterminated string literal",
+            LexError::UnterminatedBlockComment { .. } => "unterminated block comment",
             LexError::InvalidEscape { .. } => "invalid escape sequence in string literal",
             LexError::IntegerOverflow { .. } => "integer literal is too large",
             LexError::FloatOverflow { .. } => "float literal is too large",
@@ -274,6 +359,11 @@ impl fmt::Display for LexError {
 /// character.
 fn classify_error(source: &str, span: Span) -> LexError {
     let text = &source[span.start..span.end];
+    // A failed region beginning with `/*` is a block comment the regex
+    // could not terminate: everything from there on is comment.
+    if text.starts_with("/*") {
+        return LexError::UnterminatedBlockComment { span };
+    }
     if text.starts_with('"')
         && let Some(error) = classify_string_error(source, span.start)
     {
@@ -398,9 +488,20 @@ pub fn lex_with_errors(source: &str) -> (Vec<SpannedToken<'_>>, Vec<LexError>) {
     while let Some(result) = lexer.next() {
         let span = Span::new(lexer.span().start, lexer.span().end);
         match result {
+            // Block comments are transparent to the token stream (§2.2).
+            Ok(Token::BlockComment) => {}
             Ok(token) => tokens.push(SpannedToken { token, span }),
             Err(()) => {
-                errors.push(classify_error(source, span));
+                let error = classify_error(source, span);
+                let is_unterminated_comment =
+                    matches!(error, LexError::UnterminatedBlockComment { .. });
+                errors.push(error);
+                // An unterminated block comment swallows the rest of the
+                // file: stop lexing rather than recovering into the middle
+                // of the comment.
+                if is_unterminated_comment {
+                    break;
+                }
                 if let Some(newline_span) = skip_to_line_end(&mut lexer, source, &mut errors) {
                     tokens.push(SpannedToken {
                         token: Token::Newline,
@@ -532,7 +633,7 @@ mod tests {
 
     #[test]
     fn lexes_symbols() {
-        let source = "= ( ) { } ,";
+        let source = "= ( ) { } , [ ] . : => ?";
         assert_eq!(
             lex_ok(source),
             vec![
@@ -542,8 +643,101 @@ mod tests {
                 Token::LBrace,
                 Token::RBrace,
                 Token::Comma,
+                Token::LBracket,
+                Token::RBracket,
+                Token::Dot,
+                Token::Colon,
+                Token::FatArrow,
+                Token::Question,
                 Token::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn lexes_new_keywords() {
+        let source = "struct enum match for in";
+        assert_eq!(
+            lex_ok(source),
+            vec![
+                Token::KwStruct,
+                Token::KwEnum,
+                Token::KwMatch,
+                Token::KwFor,
+                Token::KwIn,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_interpolated_string_literals() {
+        assert_eq!(
+            lex_tokens("$\"hello\""),
+            vec![Token::InterpStrLit("$\"hello\""), Token::Eof]
+        );
+        // A `$` that does not open a string is still a bad character.
+        assert!(lex("$").is_err());
+        // Escape validation is identical to plain strings (§2.2).
+        let (tokens, errors) = crate::lexer::lex_with_errors("$\"bad \\q\"");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(tokens.last().map(|t| t.token), Some(Token::Eof)));
+    }
+
+    #[test]
+    fn block_comments_are_transparent() {
+        assert_eq!(
+            lex_tokens("a /* skip me */ b"),
+            vec![Token::Ident("a"), Token::Ident("b"), Token::Eof]
+        );
+        // Multi-line comments vanish, newline tokens included.
+        assert_eq!(
+            lex_tokens("a /* multi\nline\nblock */ b"),
+            vec![Token::Ident("a"), Token::Ident("b"), Token::Eof]
+        );
+        // Star-only comments and comments whose content contains stars.
+        assert_eq!(
+            lex_tokens("x /***/ y /* a ** b */ z"),
+            vec![
+                Token::Ident("x"),
+                Token::Ident("y"),
+                Token::Ident("z"),
+                Token::Eof
+            ]
+        );
+        // The comment ends at the FIRST `*/`; the rest is code.
+        assert_eq!(
+            lex_tokens("/* c */ mid */"),
+            vec![Token::Ident("mid"), Token::Star, Token::Slash, Token::Eof]
+        );
+        // Comments do not disturb statement-terminating newlines.
+        let (tokens, _) = crate::lexer::lex_with_errors("int a = 1 /* tail */\nint b = 2\n");
+        assert!(tokens.iter().any(|spanned| spanned.token == Token::Newline));
+    }
+
+    #[test]
+    fn unterminated_block_comment_is_one_error_and_stops_lexing() {
+        let (tokens, errors) =
+            crate::lexer::lex_with_errors("int a = 1\n/* never closed\nint b = 2\n");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0],
+            LexError::UnterminatedBlockComment {
+                span: Span::new(10, 12)
+            }
+        );
+        // The comment swallows the rest of the file: only the tokens before
+        // it (plus Eof) survive.
+        assert_eq!(tokens.len(), 6); // int a = 1 newline eof
+    }
+
+    #[test]
+    fn line_comment_star_slash_stay_lexable() {
+        // `//` comments already ignore `/*` inside them (the skip regex eats
+        // to end of line), and division still lexes next to `*`-free text.
+        assert_eq!(
+            lex_tokens("// /* not a block\nint x"),
+            vec![Token::Newline, Token::KwInt, Token::Ident("x"), Token::Eof]
         );
     }
 
@@ -552,6 +746,7 @@ mod tests {
         let cases: Vec<(Token<'_>, &str)> = vec![
             (Token::Ident("x"), "identifier `x`"),
             (Token::StrLit("\"x\""), "string literal"),
+            (Token::InterpStrLit("$\"x\""), "interpolated string literal"),
             (Token::IntLit(42), "integer literal `42`"),
             (Token::FloatLit(4.2), "float literal `4.2`"),
             (Token::Newline, "end of statement"),
@@ -567,6 +762,11 @@ mod tests {
             (Token::KwVoid, "`void`"),
             (Token::KwTrue, "`true`"),
             (Token::KwFalse, "`false`"),
+            (Token::KwStruct, "`struct`"),
+            (Token::KwEnum, "`enum`"),
+            (Token::KwMatch, "`match`"),
+            (Token::KwFor, "`for`"),
+            (Token::KwIn, "`in`"),
             (Token::Assign, "`=`"),
             (Token::AddAssign, "`+=`"),
             (Token::SubAssign, "`-=`"),
@@ -592,6 +792,12 @@ mod tests {
             (Token::LBrace, "`{`"),
             (Token::RBrace, "`}`"),
             (Token::Comma, "`,`"),
+            (Token::Dot, "`.`"),
+            (Token::Colon, "`:`"),
+            (Token::FatArrow, "`=>`"),
+            (Token::Question, "`?`"),
+            (Token::LBracket, "`[`"),
+            (Token::RBracket, "`]`"),
             (Token::Eof, "end of file"),
         ];
 
@@ -717,7 +923,11 @@ mod tests {
     #[test]
     fn rejects_unrecognized_characters() {
         assert!(lex("$").is_err());
-        assert!(lex("1.2.3").is_err());
+        assert!(lex("@").is_err());
+        // `1.2.3` used to fail at lex level because `.` had no token; with
+        // field access (§2.6) `.` is a token, so the malformed shape now
+        // lexes as `1.2` `.` `3` and is rejected later, at parse level.
+        assert!(lex("1.2.3").is_ok());
     }
 
     #[test]

@@ -336,8 +336,8 @@ impl Checker {
             }
             StmtKind::Assign { target, expr } => {
                 let rhs = self.type_expr(expr);
-                match var_target_name(target) {
-                    Some(name) => match self.lookup(name) {
+                if let Some(name) = var_target_name(target) {
+                    match self.lookup(name) {
                         Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {
                         }
                         Some(declared) if rhs != declared => {
@@ -350,19 +350,18 @@ impl Checker {
                         }
                         Some(_) => {}
                         None => self.report(format!("unknown name `{name}`"), stmt.span),
-                    },
-                    // Only `Var` targets exist at this stage; field and index
-                    // targets arrive with the postfix parser.
-                    None => {}
+                    }
                 }
+                // Non-Var targets (field/index) arrive with the postfix
+                // parser; nothing to check there yet.
             }
             StmtKind::CompoundAssign { target, op, expr } => {
                 // §A.7: `x op= e` is exactly `x = x op e`, so the operator
                 // rules of §A.4/§A.6 apply with the target as the left
                 // operand and the result must equal the target's type.
                 let rhs = self.type_expr(expr);
-                match var_target_name(target) {
-                    Some(target) => match self.lookup(target) {
+                if let Some(target) = var_target_name(target) {
+                    match self.lookup(target) {
                         Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {
                         }
                         Some(declared) => {
@@ -381,8 +380,7 @@ impl Checker {
                         None => {
                             self.report(format!("unknown name `{target}`"), stmt.span);
                         }
-                    },
-                    None => {}
+                    }
                 }
             }
             StmtKind::Expression { expr } => match &expr.kind {

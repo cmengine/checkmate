@@ -445,6 +445,66 @@ mod tests {
     fn rejects_unbalanced_brackets() {
         assert!(Parser::strip_insignificant_newlines(spanned_tokens(")")).is_err());
         assert!(Parser::strip_insignificant_newlines(spanned_tokens("(")).is_err());
+        assert!(Parser::strip_insignificant_newlines(spanned_tokens("[")).is_err());
+        assert!(Parser::strip_insignificant_newlines(spanned_tokens("{ x: 1")).is_err());
+        // A closing bracket inside the wrong bracket kind is unbalanced.
+        assert!(Parser::strip_insignificant_newlines(spanned_tokens("[1)")).is_err());
+    }
+
+    #[test]
+    fn newline_significance_follows_the_innermost_bracket() {
+        // Inside parens (§A.8): newlines are dropped.
+        let source = "(\nvalue\n)";
+        let tokens: Vec<Token> = Parser::strip_insignificant_newlines(spanned_tokens(source))
+            .unwrap()
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect();
+        assert_eq!(
+            tokens,
+            [
+                Token::LParen,
+                Token::Ident("value"),
+                Token::RParen,
+                Token::Eof
+            ]
+        );
+
+        // Inside brackets and braces: newlines are kept — array elements,
+        // map entries, and arm bodies are newline-delimited (§11.1, §2.15).
+        for source in ["[\n1\n2\n]", "{\n\"k\": 1\n}", "match (x) {\nA() => 1\n}"] {
+            let tokens = Parser::strip_insignificant_newlines(spanned_tokens(source)).unwrap();
+            assert!(
+                tokens.iter().any(|t| t.token == Token::Newline),
+                "{source:?}: newline inside brackets/braces must survive"
+            );
+        }
+
+        // Brackets inside parens re-enable significance for their interior
+        // (the leading newline after `[` is kept too — element lists skip
+        // leading separators).
+        let source = "f([\n1\n2\n])";
+        let tokens = Parser::strip_insignificant_newlines(spanned_tokens(source)).unwrap();
+        assert_eq!(
+            tokens.iter().filter(|t| t.token == Token::Newline).count(),
+            3
+        );
+    }
+
+    #[test]
+    fn stray_closing_brackets_pass_through_to_the_parser() {
+        // A stray `]` or `}` at the top of the stream is a plain token the
+        // parser reports as an unrecognizable statement (boom.cm pins the
+        // `}` variant); only a stray `)` is a strip-level error.
+        let (tokens, errors) =
+            Parser::strip_insignificant_newlines_with_errors(spanned_tokens("]"));
+        assert!(errors.is_empty());
+        assert!(tokens.iter().any(|t| t.token == Token::RBracket));
+
+        let (tokens, errors) =
+            Parser::strip_insignificant_newlines_with_errors(spanned_tokens("}"));
+        assert!(errors.is_empty());
+        assert!(tokens.iter().any(|t| t.token == Token::RBrace));
     }
 
     #[test]
@@ -1372,56 +1432,18 @@ mod tests {
                 }
             }
             StmtKind::Block(block) => audit_block(block, source_len),
-            StmtKind::For {
-                iterable,
-                elem_ty,
-                body,
-                ..
-            } => {
+            StmtKind::For { iterable, body, .. } => {
                 audit_expr(iterable, source_len);
-                audit_type(elem_ty, source_len);
                 audit_block(body, source_len);
             }
             StmtKind::Match { scrutinee, arms } => {
                 audit_expr(scrutinee, source_len);
                 for arm in arms {
-                    if let cme_core::ast::Pattern::Variant { bindings, .. } = &arm.pattern {
-                        for field in bindings {
-                            audit_type(&field.ty, source_len);
-                        }
-                    }
                     audit_block(&arm.body, source_len);
                 }
             }
-            StmtKind::StructDecl { fields, .. } => {
-                for field in fields {
-                    audit_type(&field.ty, source_len);
-                }
-            }
-            StmtKind::EnumDecl { variants, .. } => {
-                for variant in variants {
-                    for field in &variant.fields {
-                        audit_type(&field.ty, source_len);
-                    }
-                }
-            }
+            StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => {}
             StmtKind::Invalid { .. } => panic!("clean basic.cm must not contain Invalid"),
-        }
-    }
-
-    fn audit_type(ty: &Type, source_len: usize) {
-        match ty {
-            Type::Array(elem) => audit_type(elem, source_len),
-            Type::Map { key, value } => {
-                audit_type(key, source_len);
-                audit_type(value, source_len);
-            }
-            Type::Named { args, .. } => {
-                for arg in args {
-                    audit_type(arg, source_len);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -1714,9 +1736,11 @@ mod tests {
 
         // Healthy survivor spot checks: `q` still holds 1 + 2, and the
         // lexer/strip diagnostics come from exactly the damaged lines
-        // (eight lexer errors: five bad-character lines in §9 with `@ $`
-        // now recorded twice, one unterminated string, the `1.2.3` float
-        // shape, and the overflow digit run).
+        // (seven lexer errors: four bad-character lines in §9 — `@ $`
+        // records both characters — one unterminated string, and the
+        // overflow digit run; the `1.2.3` float shape now lexes as
+        // `1.2` `.` `3` and is a parse error instead, since `.` is a token
+        // now that field access exists).
         assert!(matches!(
             &stmts[42],
             Stmt {
@@ -1740,7 +1764,7 @@ mod tests {
                     matches!(error.kind(), crate::diagnostics::DiagnosticKind::Lex(_))
                 })
                 .count(),
-            8
+            7
         );
         assert_eq!(
             errors

@@ -151,9 +151,15 @@ impl<'a, 'src> Parser<'a, 'src> {
     pub fn strip_insignificant_newlines_with_errors(
         tokens: Vec<SpannedToken>,
     ) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
+        // Stack of currently open brackets. A newline is insignificant only
+        // inside parentheses (§A.8): expressions and argument lists wrap
+        // freely there. Inside brackets and braces a newline is always
+        // significant — array elements, map entries, match arms, struct
+        // fields, and block statements are newline-delimited (§2.6, §2.12,
+        // §2.15, §11.1).
+        let mut stack: Vec<BracketKind> = Vec::new();
         let mut out = Vec::with_capacity(tokens.len());
         let mut errors = Vec::new();
-        let mut bracket_depth = 0usize;
         let mut prev_can_end = false;
         let mut prev_was_type_kw = false;
 
@@ -162,48 +168,85 @@ impl<'a, 'src> Parser<'a, 'src> {
             let SpannedToken { token: tok, span } = tokens[index];
             match tok {
                 Token::Newline => {
-                    // A newline survives at depth zero when it genuinely ends
-                    // a statement — or when it follows a region the parser
-                    // must still see as broken on its own line:
+                    // A newline survives at the top of the stack when it
+                    // genuinely ends a statement — or when it follows a
+                    // region the parser must still see as broken on its own
+                    // line:
                     //   - a dangling type keyword (`float` alone) can never
                     //     continue onto the next line, and
-                    //   - a type keyword can only START a statement, so a
-                    //     line ending in a dangling operator (`int count =`)
+                    //   - a declaration head can only START a statement, so
+                    //     a line ending in a dangling operator (`int count =`)
                     //     must not swallow the declaration typed below it.
                     // Without this, recovery would fuse the broken line with
                     // the next one and eat the very declaration an LSP needs.
                     let next_starts_statement = tokens
                         .get(index + 1)
-                        .is_some_and(|next| next.token.is_type_keyword());
-                    if bracket_depth == 0
-                        && (prev_can_end || prev_was_type_kw || next_starts_statement)
-                    {
+                        .is_some_and(|next| next.token.starts_statement());
+                    let significant = match stack.last() {
+                        Some(BracketKind::Paren) => false,
+                        Some(BracketKind::Bracket) | Some(BracketKind::Brace) => true,
+                        None => prev_can_end || prev_was_type_kw || next_starts_statement,
+                    };
+                    if significant {
                         out.push(SpannedToken { token: tok, span });
                         prev_can_end = false;
                         prev_was_type_kw = false;
                     }
                 }
                 Token::LParen => {
-                    bracket_depth += 1;
+                    stack.push(BracketKind::Paren);
                     prev_can_end = false;
                     prev_was_type_kw = false;
                     out.push(SpannedToken { token: tok, span });
                 }
-                Token::RParen => {
-                    if bracket_depth == 0 {
-                        errors.push(Diagnostic::parse("unbalanced closing parenthesis", span));
+                Token::LBracket => {
+                    stack.push(BracketKind::Bracket);
+                    prev_can_end = false;
+                    prev_was_type_kw = false;
+                    out.push(SpannedToken { token: tok, span });
+                }
+                Token::LBrace => {
+                    stack.push(BracketKind::Brace);
+                    prev_can_end = false;
+                    prev_was_type_kw = false;
+                    out.push(SpannedToken { token: tok, span });
+                }
+                Token::RParen | Token::RBracket | Token::RBrace => {
+                    let expected = match tok {
+                        Token::RParen => BracketKind::Paren,
+                        Token::RBracket => BracketKind::Bracket,
+                        _ => BracketKind::Brace,
+                    };
+                    if stack.last() == Some(&expected) {
+                        stack.pop();
+                        prev_can_end = true;
+                        prev_was_type_kw = false;
+                        out.push(SpannedToken { token: tok, span });
+                    } else if stack.is_empty() && matches!(tok, Token::RBracket | Token::RBrace) {
+                        // A stray `]` or `}` at the top of the stream is kept
+                        // as a plain token: the parser reports it as an
+                        // unrecognizable statement (boom.cm pins this).
+                        prev_can_end = can_end_statement(&tok);
+                        prev_was_type_kw = false;
+                        out.push(SpannedToken { token: tok, span });
+                    } else {
+                        // A mismatched or dangling closing bracket: report,
+                        // resynchronize at the next statement boundary, and
+                        // reset the stack.
+                        let what = match tok {
+                            Token::RParen => "closing parenthesis",
+                            Token::RBracket => "closing bracket",
+                            _ => "closing brace",
+                        };
+                        errors.push(Diagnostic::parse(format!("unbalanced {what}"), span));
                         if let Some(token) = skip_to_next_statement(&tokens, &mut index) {
                             out.push(token);
                         }
-                        bracket_depth = 0;
+                        stack.clear();
                         prev_can_end = false;
                         prev_was_type_kw = false;
                         continue;
                     }
-                    bracket_depth -= 1;
-                    prev_can_end = true;
-                    prev_was_type_kw = false;
-                    out.push(SpannedToken { token: tok, span });
                 }
                 _ => {
                     prev_can_end = can_end_statement(&tok);
@@ -214,15 +257,17 @@ impl<'a, 'src> Parser<'a, 'src> {
             index += 1;
         }
 
-        if bracket_depth != 0 {
+        if let Some(kind) = stack.last() {
             let eof_span = tokens
                 .last()
                 .filter(|token| token.token == Token::Eof)
                 .map_or(Span::new(0, 0), |token| token.span);
-            errors.push(Diagnostic::parse(
-                "unbalanced opening parenthesis",
-                eof_span,
-            ));
+            let what = match kind {
+                BracketKind::Paren => "unbalanced opening parenthesis",
+                BracketKind::Bracket => "unbalanced opening bracket",
+                BracketKind::Brace => "unbalanced opening brace",
+            };
+            errors.push(Diagnostic::parse(what, eof_span));
         }
 
         (out, errors)
@@ -1179,6 +1224,14 @@ fn multiplicative_operator(token: &Token) -> Option<BinaryOp> {
     }
 }
 
+/// The bracket kinds tracked by the newline strip pass.
+#[derive(Clone, Copy, PartialEq)]
+enum BracketKind {
+    Paren,
+    Bracket,
+    Brace,
+}
+
 fn skip_to_next_statement<'a>(
     tokens: &[SpannedToken<'a>],
     pos: &mut usize,
@@ -1203,9 +1256,12 @@ fn can_end_statement(t: &Token) -> bool {
             | Token::IntLit(_)
             | Token::FloatLit(_)
             | Token::StrLit(_)
+            | Token::InterpStrLit(_)
             | Token::KwTrue
             | Token::KwFalse
             | Token::RParen
             | Token::RBrace
+            | Token::RBracket
+            | Token::Question
     )
 }

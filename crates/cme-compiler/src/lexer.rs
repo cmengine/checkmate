@@ -231,6 +231,8 @@ pub enum LexError {
     InvalidCharacter { span: Span },
     /// A `"` with no closing `"` before the end of the line/file.
     UnterminatedString { span: Span },
+    /// A `$"` with no closing `"` before the end of the line/file.
+    UnterminatedInterpolatedString { span: Span },
     /// A `/*` with no closing `*/` before the end of the file. The whole
     /// remaining source is comment.
     UnterminatedBlockComment { span: Span },
@@ -248,6 +250,7 @@ impl LexError {
         match self {
             LexError::InvalidCharacter { span }
             | LexError::UnterminatedString { span }
+            | LexError::UnterminatedInterpolatedString { span }
             | LexError::UnterminatedBlockComment { span }
             | LexError::InvalidEscape { span }
             | LexError::IntegerOverflow { span }
@@ -351,6 +354,9 @@ impl fmt::Display for LexError {
         let msg = match self {
             LexError::InvalidCharacter { .. } => "invalid character",
             LexError::UnterminatedString { .. } => "unterminated string literal",
+            LexError::UnterminatedInterpolatedString { .. } => {
+                "unterminated interpolated string literal"
+            }
             LexError::UnterminatedBlockComment { .. } => "unterminated block comment",
             LexError::InvalidEscape { .. } => "invalid escape sequence in string literal",
             LexError::IntegerOverflow { .. } => "integer literal is too large",
@@ -371,6 +377,17 @@ fn classify_error(source: &str, span: Span) -> LexError {
     // could not terminate: everything from there on is comment.
     if text.starts_with("/*") {
         return LexError::UnterminatedBlockComment { span };
+    }
+    if source[span.start..].starts_with("$\"") {
+        match classify_string_error(source, span.start + 1) {
+            Some(LexError::UnterminatedString { span: inner }) => {
+                return LexError::UnterminatedInterpolatedString {
+                    span: Span::new(span.start, inner.end),
+                };
+            }
+            Some(error) => return error,
+            None => {}
+        }
     }
     if text.starts_with('"')
         && let Some(error) = classify_string_error(source, span.start)
@@ -503,12 +520,26 @@ pub fn lex_with_errors(source: &str) -> (Vec<SpannedToken<'_>>, Vec<LexError>) {
                 let error = classify_error(source, span);
                 let is_unterminated_comment =
                     matches!(error, LexError::UnterminatedBlockComment { .. });
+                let is_unterminated_interp =
+                    matches!(error, LexError::UnterminatedInterpolatedString { .. });
                 errors.push(error);
                 // An unterminated block comment swallows the rest of the
                 // file: stop lexing rather than recovering into the middle
                 // of the comment.
                 if is_unterminated_comment {
                     break;
+                }
+                if is_unterminated_interp {
+                    // The interpolated error already spans the rest of the
+                    // line: resynchronize silently so the `"` remainder does
+                    // not report a second unterminated-string error.
+                    if let Some(newline_span) = skip_to_line_end_silent(&mut lexer) {
+                        tokens.push(SpannedToken {
+                            token: Token::Newline,
+                            span: newline_span,
+                        });
+                    }
+                    continue;
                 }
                 if let Some(newline_span) = skip_to_line_end(&mut lexer, source, &mut errors) {
                     tokens.push(SpannedToken {
@@ -544,6 +575,18 @@ fn skip_to_line_end<'src>(
             Ok(Token::Newline) => return Some(span),
             Ok(_) => {}
             Err(()) => errors.push(classify_error(source, span)),
+        }
+    }
+    None
+}
+
+/// Silent variant for an already-spanning interpolated-string error: drops
+/// the rest of the line without recording further lexer errors.
+fn skip_to_line_end_silent<'src>(lexer: &mut logos::Lexer<'src, Token<'src>>) -> Option<Span> {
+    while let Some(result) = lexer.next() {
+        let span = Span::new(lexer.span().start, lexer.span().end);
+        if matches!(result, Ok(Token::Newline)) {
+            return Some(span);
         }
     }
     None

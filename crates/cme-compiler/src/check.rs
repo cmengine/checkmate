@@ -1648,6 +1648,21 @@ impl Checker {
             })
             .collect();
 
+        let mut seen: Vec<&str> = Vec::new();
+        for (field_name, value) in &named {
+            if seen.contains(field_name) {
+                self.report(
+                    format!(
+                        "duplicate field `{field_name}` in construction of `{}`",
+                        def.name
+                    ),
+                    value.span,
+                );
+            } else {
+                seen.push(field_name);
+            }
+        }
+
         // Generic argument bindings: pre-filled from the expected type,
         // then crystallized from the field value types.
         let mut bindings: Vec<Option<Ty>> = vec![None; def.params.len()];

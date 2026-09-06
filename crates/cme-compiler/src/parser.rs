@@ -126,6 +126,10 @@ impl<'a, 'src> Parser<'a, 'src> {
             match token {
                 Token::Newline => self.pos += 1,
                 Token::Eof => {}
+                // Recovery inside a declaration body (struct/enum) leaves the
+                // cursor on the next declaration head with no intervening
+                // newline: that is a valid boundary, not a missing separator.
+                _ if token.starts_statement() => {}
                 _ => {
                     let span = self.peek().span;
                     self.errors
@@ -1044,7 +1048,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 kind: StmtKind::Invalid { error },
             };
         }
-        let _open_brace = self.advance().span.start;
+        let open_brace_span = self.advance().span;
 
         let mut fields = Vec::new();
         let end = self.parse_decl_member_list(
@@ -1053,6 +1057,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 parser.parse_decl_member()
             },
             &mut fields,
+            open_brace_span,
         );
 
         Stmt::new(
@@ -1110,11 +1115,14 @@ impl<'a, 'src> Parser<'a, 'src> {
                 kind: StmtKind::Invalid { error },
             };
         }
-        let _open_brace = self.advance().span.start;
+        let open_brace_span = self.advance().span;
 
         let mut variants = Vec::new();
-        let end =
-            self.parse_decl_member_list(&mut |parser| parser.parse_enum_variant(), &mut variants);
+        let end = self.parse_decl_member_list(
+            &mut |parser| parser.parse_enum_variant(),
+            &mut variants,
+            open_brace_span,
+        );
 
         Stmt::new(
             StmtKind::EnumDecl {
@@ -1241,11 +1249,16 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// The shared newline-delimited body of struct/enum declarations: each
     /// line is one member parsed by `member`; damaged members are reported
     /// and skipped, and commas between members are rejected (§2.6: fields
-    /// are newline-delimited, no commas). Returns the body end offset.
+    /// are newline-delimited, no commas). A declaration-starting token
+    /// (`struct`/`enum`/`impl` or a function return-type keyword heading a
+    /// `Type name(` signature) closes the broken declaration at that point:
+    /// the partial declaration is kept and the token re-dispatches as the
+    /// next statement. Returns the body end offset.
     fn parse_decl_member_list<T>(
         &mut self,
         member: &mut dyn FnMut(&mut Self) -> Option<T>,
         out: &mut Vec<T>,
+        open_brace: Span,
     ) -> usize {
         loop {
             self.skip_newlines();
@@ -1257,6 +1270,11 @@ impl<'a, 'src> Parser<'a, 'src> {
                 let eof_span = self.eof_span();
                 let _ = self.record("expected `}` before end of file", eof_span);
                 return eof_span.end;
+            }
+            if self.at_decl_recovery_boundary() {
+                let end = self.peek().span.start;
+                let _ = self.record("unbalanced opening brace", open_brace);
+                return end;
             }
 
             if let Some(value) = member(self) {
@@ -1287,6 +1305,22 @@ impl<'a, 'src> Parser<'a, 'src> {
             }
             // A failed member already reported and positioned itself at the
             // next boundary; nothing more to do here.
+        }
+    }
+
+    /// True when the cursor sits on a token that starts a new declaration
+    /// rather than a struct/enum member: `struct`/`enum`/`impl`, or a
+    /// function return-type keyword (`int`/`float`/`str`/`bool`/`infer`/
+    /// `void`) heading a `Type name(` signature.
+    fn at_decl_recovery_boundary(&self) -> bool {
+        match self.peek().token {
+            Token::KwStruct | Token::KwEnum | Token::KwImpl => true,
+            token if token.is_type_keyword() || token == Token::KwVoid => {
+                let next = self.tokens.get(self.pos + 1).map(|t| t.token);
+                let after = self.tokens.get(self.pos + 2).map(|t| t.token);
+                matches!(next, Some(Token::Ident(_))) && after == Some(Token::LParen)
+            }
+            _ => false,
         }
     }
 
@@ -2609,7 +2643,12 @@ impl<'a, 'src> Parser<'a, 'src> {
             })
             .collect();
         let mut parser = Parser::new(&tokens);
-        let expr = parser.parse_expression()?;
+        let expr = match parser.parse_expression() {
+            Ok(expr) => expr,
+            Err(diagnostic) => {
+                return Err(remap_island_eof(diagnostic, offset + island.len()));
+            }
+        };
         if !parser.at_eof() {
             let other = *parser.peek();
             return Err(Self::expected(
@@ -2758,6 +2797,18 @@ fn unescape_interp_literal(chunk: &str) -> String {
     out
 }
 
+/// An island expression is parsed from its own token stream, so a dangling
+/// operator meets that stream's end of file. The missing token is really the
+/// island's closing `}` in the outer source, so report `}` instead.
+fn remap_island_eof(error: Diagnostic, island_end: usize) -> Diagnostic {
+    if error.message().contains("end of file") {
+        let span = Span::new(island_end, island_end + 1);
+        let message = error.message().replace("end of file", "`}`");
+        return Diagnostic::parse(message, span);
+    }
+    error
+}
+
 /// Shifts a lexer error span (relative to an island's text) to the island's
 /// absolute position in the source.
 fn shift_lex_error(error: crate::lexer::LexError, offset: usize) -> crate::lexer::LexError {
@@ -2766,6 +2817,9 @@ fn shift_lex_error(error: crate::lexer::LexError, offset: usize) -> crate::lexer
     match error {
         LexError::InvalidCharacter { span } => LexError::InvalidCharacter { span: shift(span) },
         LexError::UnterminatedString { span } => LexError::UnterminatedString { span: shift(span) },
+        LexError::UnterminatedInterpolatedString { span } => {
+            LexError::UnterminatedInterpolatedString { span: shift(span) }
+        }
         LexError::UnterminatedBlockComment { span } => {
             LexError::UnterminatedBlockComment { span: shift(span) }
         }

@@ -1632,6 +1632,36 @@ mod tests {
     }
 
     #[test]
+    fn unclosed_struct_closes_at_decl_start_and_sibling_survives() {
+        let source = "struct unclosed {\n    int x\n\nstruct survivor {\n    int fine\n}\nint survivorCheck() {\n    survivor s = survivor(fine: 7)\n    return s.fine\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.to_string().contains("unbalanced opening brace")),
+            "{errors:#?}"
+        );
+        let names: Vec<String> = stmts
+            .iter()
+            .filter_map(|stmt| match &stmt.kind {
+                StmtKind::StructDecl { name, .. } => Some(name.clone()),
+                StmtKind::FuncDecl { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"unclosed".to_string()), "{names:?}");
+        assert!(names.contains(&"survivor".to_string()), "{names:?}");
+        assert!(names.contains(&"survivorCheck".to_string()), "{names:?}");
+        let diagnostics = crate::check::check(&stmts);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.to_string().contains("unknown")),
+            "{diagnostics:#?}"
+        );
+    }
+
+    #[test]
     fn struct_declarations_reject_comma_separated_fields() {
         // §2.6: fields are newline-delimited — no commas.
         let source = "struct s {\n    int a,\n    int b\n}\n";
@@ -2186,14 +2216,14 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].to_string(), "empty interpolation island");
 
-        // Syntax error inside an island (the island lexes as its own
-        // stream, so a dangling operator meets end of file).
+        // Syntax error inside an island: the dangling operator meets the
+        // island's closing `}` in the outer source.
         let source = "str f() {\nstr s = $\"val {1 +}\"\nreturn s\n}\n";
         let (_, errors) = parse_program_parts(source);
         assert_eq!(errors.len(), 1);
         assert_eq!(
             errors[0].to_string(),
-            "expected an expression, but found end of file"
+            "expected an expression, but found `}`"
         );
     }
 

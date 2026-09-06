@@ -56,7 +56,9 @@ use std::collections::HashMap;
 use std::fmt;
 
 use cme_core::Span;
-use cme_core::ast::{BinaryOp, Block, CompoundOp, Expr, ExprKind, Stmt, StmtKind, Type, UnaryOp};
+use cme_core::ast::{
+    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, LValue, Stmt, StmtKind, Type, UnaryOp,
+};
 
 /// The call-depth limit. A fixed constant per the current spec (§5.5 allows
 /// host-configurable limits only in the future Engine API); native Rust
@@ -274,18 +276,24 @@ impl<'env, 'a> Runner<'env, 'a> {
                 self.declare_variable(name, value, stmt.span)?;
                 Ok(Flow::Normal)
             }
-            StmtKind::Assign { name, expr } => {
+            StmtKind::Assign { target, expr } => {
                 let value = self.eval(expr)?;
+                let Some(name) = var_target_name(target) else {
+                    return Err(InterpError::new("invalid assignment target", stmt.span));
+                };
                 self.write_variable(name, value, stmt.span)?;
                 Ok(Flow::Normal)
             }
             // §A.7: `x op= e` is exactly `x = x op e`.
             StmtKind::CompoundAssign { target, op, expr } => {
-                let current = self.read_variable(target, stmt.span)?;
+                let Some(name) = var_target_name(target) else {
+                    return Err(InterpError::new("invalid assignment target", stmt.span));
+                };
+                let current = self.read_variable(name, stmt.span)?;
                 let right = self.eval(expr)?;
                 let result =
                     self.apply_binary(compound_to_binary(*op), current, right, stmt.span)?;
-                self.write_variable(target, result, stmt.span)?;
+                self.write_variable(name, result, stmt.span)?;
                 Ok(Flow::Normal)
             }
             StmtKind::If {
@@ -336,6 +344,17 @@ impl<'env, 'a> Runner<'env, 'a> {
                 Ok(Flow::Return(value))
             }
             StmtKind::Block(block) => self.exec_block(block),
+            // Type declarations and the full-surface statements arrive with
+            // the parser and interpreter extensions; a hand-built tree that
+            // reaches them today is a clean defensive error, never a panic.
+            StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => Err(InterpError::new(
+                "type declarations are not executable statements",
+                stmt.span,
+            )),
+            StmtKind::For { .. } | StmtKind::Match { .. } => Err(InterpError::new(
+                "statement form is not supported by this interpreter build",
+                stmt.span,
+            )),
             // Only reachable through a hand-built (unchecked) tree; the
             // checker rejects both shapes.
             StmtKind::FuncDecl { .. } => Err(InterpError::new(
@@ -360,6 +379,20 @@ impl<'env, 'a> Runner<'env, 'a> {
             ExprKind::Unary { op, expr: inner } => self.eval_unary(*op, inner, expr.span),
             ExprKind::Binary { op, lhs, rhs } => self.eval_binary(*op, lhs, rhs, expr.span),
             ExprKind::Call { name, args } => self.eval_call(name, args, expr.span),
+            // The full-surface expression forms arrive with the interpreter
+            // extension; a hand-built tree that reaches them today is a clean
+            // defensive error, never a panic.
+            ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::VariantCall { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::ArrayLit { .. }
+            | ExprKind::MapLit { .. }
+            | ExprKind::Interpolated { .. }
+            | ExprKind::Try { .. } => Err(InterpError::new(
+                "expression form is not supported by this interpreter build",
+                expr.span,
+            )),
             // Only reachable through a hand-built (unchecked) tree: the
             // parser gates execution on a clean diagnostics list.
             ExprKind::Invalid { .. } => Err(InterpError::new(
@@ -455,7 +488,7 @@ impl<'env, 'a> Runner<'env, 'a> {
     fn eval_call(
         &mut self,
         name: &str,
-        args: &'a [Expr],
+        args: &'a [CallArg],
         span: Span,
     ) -> Result<Value, InterpError> {
         let Some(&declaration) = self.functions.get(name) else {
@@ -463,7 +496,10 @@ impl<'env, 'a> Runner<'env, 'a> {
         };
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
-            values.push(self.eval(arg)?);
+            let expr = match arg {
+                CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+            };
+            values.push(self.eval(expr)?);
         }
         self.call_function(declaration, name, values, span)
     }
@@ -645,6 +681,14 @@ fn stringify(value: &Value) -> Option<String> {
     match value {
         Value::Void => None,
         other => Some(other.to_string()),
+    }
+}
+
+/// The variable name of a plain `Var` lvalue target, if any.
+fn var_target_name(target: &LValue) -> Option<&str> {
+    match target {
+        LValue::Var { name } => Some(name),
+        LValue::Field { .. } | LValue::Index { .. } => None,
     }
 }
 

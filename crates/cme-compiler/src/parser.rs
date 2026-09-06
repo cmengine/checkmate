@@ -4,8 +4,8 @@ use crate::validate;
 
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, Block, CompoundOp, ErrorId, Expr, ExprKind, Param, PrimitiveType, Stmt, StmtKind,
-    Type, UnaryOp,
+    BinaryOp, Block, CallArg, CompoundOp, ErrorId, Expr, ExprKind, LValue, Param, PrimitiveType,
+    Stmt, StmtKind, Type, UnaryOp,
 };
 
 pub struct Parser<'a, 'src> {
@@ -920,11 +920,11 @@ impl<'a, 'src> Parser<'a, 'src> {
         let expr = self.parse_recovered_expression();
         let kind = match compound {
             None => StmtKind::Assign {
-                name,
+                target: LValue::Var { name },
                 expr: expr.clone(),
             },
             Some(op) => StmtKind::CompoundAssign {
-                target: name,
+                target: LValue::Var { name },
                 op,
                 expr: expr.clone(),
             },
@@ -943,7 +943,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         if !self.at(Token::RParen) {
             loop {
                 self.skip_newlines();
-                args.push(self.parse_expression()?);
+                args.push(CallArg::Positional(self.parse_expression()?));
                 self.skip_newlines();
                 if self.at(Token::Comma) {
                     self.advance();

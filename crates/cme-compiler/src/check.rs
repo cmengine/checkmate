@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use crate::diagnostics::Diagnostic;
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, Block, CompoundOp, Expr, ExprKind, Param, PrimitiveType, Stmt, StmtKind, Type,
-    UnaryOp,
+    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, LValue, Param, PrimitiveType, Stmt,
+    StmtKind, Type, UnaryOp,
 };
 
 /// A function signature collected in the first pass. `poisoned` marks a
@@ -77,7 +77,17 @@ fn value_ty_of(ty: &Type) -> ValueTy {
         Type::Prim(PrimitiveType::Bool) => ValueTy::Bool,
         Type::Prim(PrimitiveType::Str) => ValueTy::Str,
         Type::Void => ValueTy::Void,
-        Type::Infer => ValueTy::Poison,
+        // Named, array, and map types carry no scalar type; the full-surface
+        // checker resolves them. Hand-built trees see poison here.
+        Type::Infer | Type::Named { .. } | Type::Array(_) | Type::Map { .. } => ValueTy::Poison,
+    }
+}
+
+/// The variable name of a plain `Var` lvalue target, if any.
+fn var_target_name(target: &LValue) -> Option<&str> {
+    match target {
+        LValue::Var { name } => Some(name),
+        LValue::Field { .. } | LValue::Index { .. } => None,
     }
 }
 
@@ -273,6 +283,13 @@ impl Checker {
                     stmt.span,
                 );
             }
+            StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => {
+                self.report("type declarations are only allowed at top level", stmt.span);
+            }
+            // For and match statements arrive with the full-surface parser;
+            // a hand-built tree reaching them here is skipped without a
+            // cascade.
+            StmtKind::For { .. } | StmtKind::Match { .. } => {}
             StmtKind::VarDecl { ty, name, expr } => {
                 // §2.16: the initializer is typed before the name exists,
                 // so `int a = a` reports the unknown name.
@@ -295,6 +312,12 @@ impl Checker {
                         self.report("`void` is only valid as a function return type", stmt.span);
                         self.declare(name, ValueTy::Poison, stmt.span);
                     }
+                    // Named, array, and map declared types arrive with the
+                    // full-surface checker; hand-built trees declare poison.
+                    Type::Named { .. } | Type::Array(_) | Type::Map { .. } => {
+                        let _ = init;
+                        self.declare(name, ValueTy::Poison, stmt.span);
+                    }
                     Type::Prim(_) => {
                         let declared = value_ty_of(ty);
                         if init != ValueTy::Poison && init != declared {
@@ -311,20 +334,26 @@ impl Checker {
                     }
                 }
             }
-            StmtKind::Assign { name, expr } => {
+            StmtKind::Assign { target, expr } => {
                 let rhs = self.type_expr(expr);
-                match self.lookup(name) {
-                    Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {}
-                    Some(declared) if rhs != declared => {
-                        self.report(
-                            format!(
-                                "type mismatch in assignment to `{name}`: expected `{declared}`, found `{rhs}`"
-                            ),
-                            stmt.span,
-                        );
-                    }
-                    Some(_) => {}
-                    None => self.report(format!("unknown name `{name}`"), stmt.span),
+                match var_target_name(target) {
+                    Some(name) => match self.lookup(name) {
+                        Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {
+                        }
+                        Some(declared) if rhs != declared => {
+                            self.report(
+                                format!(
+                                    "type mismatch in assignment to `{name}`: expected `{declared}`, found `{rhs}`"
+                                ),
+                                stmt.span,
+                            );
+                        }
+                        Some(_) => {}
+                        None => self.report(format!("unknown name `{name}`"), stmt.span),
+                    },
+                    // Only `Var` targets exist at this stage; field and index
+                    // targets arrive with the postfix parser.
+                    None => {}
                 }
             }
             StmtKind::CompoundAssign { target, op, expr } => {
@@ -332,22 +361,28 @@ impl Checker {
                 // rules of §A.4/§A.6 apply with the target as the left
                 // operand and the result must equal the target's type.
                 let rhs = self.type_expr(expr);
-                match self.lookup(target) {
-                    Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {}
-                    Some(declared) => {
-                        let matches = binary_result(compound_to_binary(*op), declared, rhs)
-                            .is_some_and(|result| result == declared);
-                        if !matches {
-                            self.report(
-                                format!(
-                                    "cannot apply `{}` to `{declared}` and `{rhs}`",
-                                    compound_op_symbol(*op)
-                                ),
-                                stmt.span,
-                            );
+                match var_target_name(target) {
+                    Some(target) => match self.lookup(target) {
+                        Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {
                         }
-                    }
-                    None => self.report(format!("unknown name `{target}`"), stmt.span),
+                        Some(declared) => {
+                            let matches = binary_result(compound_to_binary(*op), declared, rhs)
+                                .is_some_and(|result| result == declared);
+                            if !matches {
+                                self.report(
+                                    format!(
+                                        "cannot apply `{}` to `{declared}` and `{rhs}`",
+                                        compound_op_symbol(*op)
+                                    ),
+                                    stmt.span,
+                                );
+                            }
+                        }
+                        None => {
+                            self.report(format!("unknown name `{target}`"), stmt.span);
+                        }
+                    },
+                    None => {}
                 }
             }
             StmtKind::Expression { expr } => match &expr.kind {
@@ -430,6 +465,13 @@ impl Checker {
                     }
                 }
             },
+            // Named, array, and map return types arrive with the full-surface
+            // checker; resolve the value without a scalar comparison.
+            Type::Named { .. } | Type::Array(_) | Type::Map { .. } => {
+                if let Some(expr) = value {
+                    self.type_expr(expr);
+                }
+            }
         }
     }
 
@@ -447,6 +489,17 @@ impl Checker {
             }),
             ExprKind::Paren { expr } => self.type_expr(expr),
             ExprKind::Call { name, args } => self.type_call(name, args, expr.span),
+            // Field, index, variant construction, match, and interpolation
+            // arrive with the full-surface parser; a hand-built tree that
+            // reaches them today is untypable without cascading.
+            ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::VariantCall { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::ArrayLit { .. }
+            | ExprKind::MapLit { .. }
+            | ExprKind::Interpolated { .. }
+            | ExprKind::Try { .. } => ValueTy::Poison,
             ExprKind::Unary { op, expr: inner } => {
                 let operand = self.type_expr(inner);
                 if operand == ValueTy::Poison {
@@ -488,11 +541,17 @@ impl Checker {
         }
     }
 
-    fn type_call(&mut self, name: &str, args: &[Expr], span: Span) -> ValueTy {
+    fn type_call(&mut self, name: &str, args: &[CallArg], span: Span) -> ValueTy {
+        let arg_exprs: Vec<&Expr> = args
+            .iter()
+            .map(|arg| match arg {
+                CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+            })
+            .collect();
         let Some(sig) = self.functions.get(name) else {
             // Arguments are still typed so unknown names inside them are
             // reported rather than swallowed.
-            for arg in args {
+            for arg in arg_exprs {
                 self.type_expr(arg);
             }
             self.report(format!("unknown function `{name}`"), span);
@@ -517,18 +576,24 @@ impl Checker {
         }
 
         let mut arg_types = Vec::with_capacity(args.len());
-        for arg in args {
+        for arg in arg_exprs {
             arg_types.push(self.type_expr(arg));
         }
 
         if !poisoned {
-            for ((arg, arg_ty), param_ty) in args.iter().zip(&arg_types).zip(&expected) {
+            let arg_spans: Vec<Span> = args
+                .iter()
+                .map(|arg| match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr.span,
+                })
+                .collect();
+            for ((arg_span, arg_ty), param_ty) in arg_spans.iter().zip(&arg_types).zip(&expected) {
                 if *arg_ty != ValueTy::Poison && arg_ty != param_ty {
                     self.report(
                         format!(
                             "wrong argument type in call to `{name}`: expected `{param_ty}`, found `{arg_ty}`"
                         ),
-                        arg.span,
+                        *arg_span,
                     );
                 }
             }

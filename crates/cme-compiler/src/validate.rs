@@ -10,7 +10,7 @@
 //! violation produces exactly one diagnostic.
 
 use cme_core::Span;
-use cme_core::ast::{BinaryOp, Block, Expr, ExprKind, Stmt, StmtKind};
+use cme_core::ast::{BinaryOp, Block, CallArg, Expr, ExprKind, Stmt, StmtKind};
 
 use crate::diagnostics::Diagnostic;
 
@@ -49,8 +49,60 @@ fn validate_statement(statement: &Stmt, diagnostics: &mut Vec<Diagnostic>) {
             validate_block(body, diagnostics);
         }
         StmtKind::FuncDecl { body, .. } => validate_block(body, diagnostics),
+        StmtKind::StructDecl { fields, .. } => {
+            for field in fields {
+                validate_type(&field.ty, diagnostics);
+            }
+        }
+        StmtKind::EnumDecl { variants, .. } => {
+            for variant in variants {
+                for field in &variant.fields {
+                    validate_type(&field.ty, diagnostics);
+                }
+            }
+        }
+        StmtKind::For {
+            iterable,
+            elem_ty,
+            body,
+            ..
+        } => {
+            validate_expression(iterable, diagnostics);
+            validate_type(elem_ty, diagnostics);
+            validate_block(body, diagnostics);
+        }
+        StmtKind::Match { scrutinee, arms } => {
+            validate_expression(scrutinee, diagnostics);
+            for arm in arms {
+                if let cme_core::ast::Pattern::Variant { bindings, .. } = &arm.pattern {
+                    for field in bindings {
+                        validate_type(&field.ty, diagnostics);
+                    }
+                }
+                validate_block(&arm.body, diagnostics);
+            }
+        }
         StmtKind::Block(block) => validate_block(block, diagnostics),
         StmtKind::Invalid { .. } => {}
+    }
+}
+
+/// Checks for `Invalid` inside declared types: array/map element types and
+/// generic arguments are the only positions where a broken type expression
+/// can hide.
+fn validate_type(ty: &cme_core::ast::Type, diagnostics: &mut Vec<Diagnostic>) {
+    match ty {
+        cme_core::ast::Type::Array(elem) => validate_type(elem, diagnostics),
+        cme_core::ast::Type::Map { key, value } => {
+            validate_type(key, diagnostics);
+            validate_type(value, diagnostics);
+        }
+        cme_core::ast::Type::Named { args, .. } => {
+            for arg in args {
+                validate_type(arg, diagnostics);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -66,8 +118,51 @@ fn validate_expression(expr: &Expr, diagnostics: &mut Vec<Diagnostic>) {
         ExprKind::Unary { expr, .. } => validate_expression(expr, diagnostics),
         ExprKind::Call { args, .. } => {
             for arg in args {
-                validate_expression(arg, diagnostics);
+                match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => {
+                        validate_expression(expr, diagnostics);
+                    }
+                }
             }
+        }
+        ExprKind::VariantCall { args, .. } => {
+            for arg in args {
+                match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => {
+                        validate_expression(expr, diagnostics);
+                    }
+                }
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            validate_expression(scrutinee, diagnostics);
+            for arm in arms {
+                validate_expression(&arm.body, diagnostics);
+            }
+        }
+        ExprKind::ArrayLit { elements } => {
+            for element in elements {
+                validate_expression(element, diagnostics);
+            }
+        }
+        ExprKind::MapLit { entries } => {
+            for (key, value) in entries {
+                validate_expression(key, diagnostics);
+                validate_expression(value, diagnostics);
+            }
+        }
+        ExprKind::Interpolated { parts } => {
+            for part in parts {
+                if let cme_core::ast::InterpPart::Expr(expr) = part {
+                    validate_expression(expr, diagnostics);
+                }
+            }
+        }
+        ExprKind::Try { expr } => validate_expression(expr, diagnostics),
+        ExprKind::Field { obj, .. } => validate_expression(obj, diagnostics),
+        ExprKind::Index { obj, index } => {
+            validate_expression(obj, diagnostics);
+            validate_expression(index, diagnostics);
         }
         ExprKind::Binary { op, lhs, rhs } => {
             match op {

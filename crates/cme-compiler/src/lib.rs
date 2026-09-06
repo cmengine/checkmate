@@ -42,7 +42,8 @@ mod tests {
     use crate::diagnostics::Diagnostic;
     use cme_core::Span;
     use cme_core::ast::{
-        BinaryOp, Block, CompoundOp, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
+        BinaryOp, Block, CompoundOp, Expr, ExprKind, LValue, PrimitiveType, Stmt, StmtKind, Type,
+        UnaryOp,
     };
 
     fn expr(kind: ExprKind) -> Expr {
@@ -85,7 +86,9 @@ mod tests {
     fn compound(target: &str, op: cme_core::ast::CompoundOp, expr: Expr) -> Stmt {
         Stmt::new(
             StmtKind::CompoundAssign {
-                target: target.to_string(),
+                target: LValue::Var {
+                    name: target.to_string(),
+                },
                 op,
                 expr,
             },
@@ -294,7 +297,7 @@ mod tests {
             parse_statement_ok("x = 1"),
             Stmt::new(
                 StmtKind::Assign {
-                    name: "x".into(),
+                    target: LValue::Var { name: "x".into() },
                     expr: expr(ExprKind::IntLit(1)),
                 },
                 Span::missing(0),
@@ -874,7 +877,7 @@ mod tests {
                         kind: ExprKind::Invalid { .. },
                     },
             } => {
-                assert_eq!(target, "x");
+                assert_eq!(target, LValue::Var { name: "x".into() });
                 assert_eq!(span, Span::new(5, 10)); // covers "str y"
             }
             other => panic!("expected a surviving compound assignment, got {other:?}"),
@@ -1369,7 +1372,56 @@ mod tests {
                 }
             }
             StmtKind::Block(block) => audit_block(block, source_len),
+            StmtKind::For {
+                iterable,
+                elem_ty,
+                body,
+                ..
+            } => {
+                audit_expr(iterable, source_len);
+                audit_type(elem_ty, source_len);
+                audit_block(body, source_len);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                audit_expr(scrutinee, source_len);
+                for arm in arms {
+                    if let cme_core::ast::Pattern::Variant { bindings, .. } = &arm.pattern {
+                        for field in bindings {
+                            audit_type(&field.ty, source_len);
+                        }
+                    }
+                    audit_block(&arm.body, source_len);
+                }
+            }
+            StmtKind::StructDecl { fields, .. } => {
+                for field in fields {
+                    audit_type(&field.ty, source_len);
+                }
+            }
+            StmtKind::EnumDecl { variants, .. } => {
+                for variant in variants {
+                    for field in &variant.fields {
+                        audit_type(&field.ty, source_len);
+                    }
+                }
+            }
             StmtKind::Invalid { .. } => panic!("clean basic.cm must not contain Invalid"),
+        }
+    }
+
+    fn audit_type(ty: &Type, source_len: usize) {
+        match ty {
+            Type::Array(elem) => audit_type(elem, source_len),
+            Type::Map { key, value } => {
+                audit_type(key, source_len);
+                audit_type(value, source_len);
+            }
+            Type::Named { args, .. } => {
+                for arg in args {
+                    audit_type(arg, source_len);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1475,6 +1527,7 @@ mod tests {
     fn expr_has_call_with_arity(expr: &Expr, min_args: usize) -> bool {
         match &expr.kind {
             ExprKind::Call { args, .. } if args.len() >= min_args => true,
+            ExprKind::VariantCall { args, .. } => args.len() >= min_args,
             ExprKind::Binary { lhs, rhs, .. } => {
                 expr_has_call_with_arity(lhs, min_args) || expr_has_call_with_arity(rhs, min_args)
             }
@@ -1496,11 +1549,20 @@ mod tests {
                         Type::Prim(PrimitiveType::Str) => "Str",
                         Type::Infer => "None",
                         Type::Void => "Void",
+                        _ => "Other",
                     }
                 )
             }
-            StmtKind::Assign { name, .. } => format!("assign:{name}"),
-            StmtKind::CompoundAssign { target, .. } => format!("compound:{target}"),
+            StmtKind::Assign { target, .. } => match target {
+                LValue::Var { name } => format!("assign:{name}"),
+                LValue::Field { name, .. } => format!("assign-field:{name}"),
+                LValue::Index { .. } => "assign-index".to_string(),
+            },
+            StmtKind::CompoundAssign { target, .. } => match target {
+                LValue::Var { name } => format!("compound:{name}"),
+                LValue::Field { name, .. } => format!("compound-field:{name}"),
+                LValue::Index { .. } => "compound-index".to_string(),
+            },
             StmtKind::Invalid { .. } => "invalid".to_string(),
             _ => "invalid".to_string(),
         }
@@ -1517,20 +1579,21 @@ mod tests {
                 ..
             }
             | StmtKind::Assign {
+                target: _,
                 expr:
                     Expr {
                         span: _,
                         kind: ExprKind::Invalid { .. },
                     },
-                ..
             }
             | StmtKind::CompoundAssign {
+                target: _,
+                op: _,
                 expr:
                     Expr {
                         span: _,
                         kind: ExprKind::Invalid { .. },
                     },
-                ..
             }
             | StmtKind::Invalid { .. } => Some(stmt.span),
             _ => None,

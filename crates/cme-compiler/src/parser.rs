@@ -4,8 +4,9 @@ use crate::validate;
 
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, Block, CallArg, CompoundOp, ErrorId, Expr, ExprKind, FieldDef, LValue, Param,
-    PrimitiveType, Stmt, StmtKind, Type, UnaryOp, VariantDecl,
+    BinaryOp, Block, CallArg, CompoundOp, ErrorId, Expr, ExprKind, FieldDef, InterpPart, LValue,
+    MatchArmExpr, MatchArmStmt, Param, Pattern, PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
+    VariantDecl,
 };
 
 pub struct Parser<'a, 'src> {
@@ -395,6 +396,12 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
         if first.token == Token::KwStruct {
             return self.parse_struct_declaration(first);
+        }
+        if first.token == Token::KwMatch {
+            return self.parse_match_statement(first);
+        }
+        if first.token == Token::KwFor {
+            return self.parse_for_statement(first);
         }
         if first.token == Token::KwEnum {
             return self.parse_enum_declaration(first);
@@ -1604,6 +1611,391 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
+    /// A `match` statement (§2.15): `match (scrutinee) { arms }` where every
+    /// arm is `pattern => { block }`. The statement survives broken arms:
+    /// each damaged arm is reported and skipped at the next line boundary.
+    fn parse_match_statement(&mut self, match_token: SpannedToken<'src>) -> Stmt {
+        let (scrutinee, ok) = self.parse_condition_parens();
+        if !ok {
+            let error = ErrorId(self.errors.len().saturating_sub(1));
+            let end = self.recover_to_next_statement(self.peek().span.end);
+            return Stmt {
+                span: Span::new(match_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        if !self.at(Token::LBrace) {
+            let other = *self.peek();
+            let end = self.recover_to_next_statement(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(match_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+        self.advance(); // the match body’s `{`
+
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(Token::RBrace) {
+                let closing = self.advance();
+                return Stmt::new(
+                    StmtKind::Match { scrutinee, arms },
+                    Span::new(match_token.span.start, closing.span.end),
+                );
+            }
+            if self.at_eof() {
+                let eof_span = self.eof_span();
+                let _ = self.record("expected `}` before end of file", eof_span);
+                return Stmt::new(
+                    StmtKind::Match { scrutinee, arms },
+                    Span::new(match_token.span.start, eof_span.end),
+                );
+            }
+
+            let pattern = match self.parse_pattern() {
+                Ok(pattern) => pattern,
+                Err(diagnostic) => {
+                    self.errors.push(diagnostic);
+                    self.skip_arm_to_boundary();
+                    continue;
+                }
+            };
+
+            if !self.at(Token::FatArrow) {
+                let other = *self.peek();
+                let _ = self.record(
+                    format!(
+                        "expected `=>` after pattern, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                self.skip_arm_to_boundary();
+                continue;
+            }
+            self.advance();
+
+            if !self.at(Token::LBrace) {
+                let other = *self.peek();
+                let _ = self.record(
+                    format!(
+                        "expected `{{` for the arm body, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                self.skip_arm_to_boundary();
+                continue;
+            }
+            let arm_open = self.advance().span.start;
+            let body = self.parse_block_body(arm_open);
+            arms.push(MatchArmStmt { pattern, body });
+
+            match self.peek().token {
+                Token::Newline => {
+                    self.pos += 1;
+                }
+                Token::RBrace | Token::Eof => {}
+                other => {
+                    let _ = self.record(
+                        format!(
+                            "expected a newline or `}}` between match arms, but found {}",
+                            other.describe()
+                        ),
+                        self.peek().span,
+                    );
+                    self.skip_arm_to_boundary();
+                }
+            }
+        }
+    }
+
+    /// A `match` expression (§2.15): `match (scrutinee) { arms }` where
+    /// every arm yields an expression.
+    fn parse_match_expression(
+        &mut self,
+        match_token: SpannedToken<'src>,
+    ) -> Result<Expr, Diagnostic> {
+        let scrutinee = self.parse_paren_group_expr()?;
+        if !self.at(Token::LBrace) {
+            let other = *self.peek();
+            return Err(Self::expected("`{`", &other.token, other.span));
+        }
+        self.advance();
+
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(Token::RBrace) {
+                let closing = self.advance();
+                return Ok(Expr::new(
+                    ExprKind::Match {
+                        scrutinee: Box::new(scrutinee),
+                        arms,
+                    },
+                    Span::new(match_token.span.start, closing.span.end),
+                ));
+            }
+            if self.at_eof() {
+                let eof_span = self.eof_span();
+                return Err(Diagnostic::parse(
+                    "expected `}` before end of file",
+                    eof_span,
+                ));
+            }
+
+            let pattern = self.parse_pattern()?;
+            if !self.at(Token::FatArrow) {
+                let other = *self.peek();
+                return Err(Self::expected(
+                    "`=>` after pattern",
+                    &other.token,
+                    other.span,
+                ));
+            }
+            self.advance();
+            self.skip_newlines();
+            let body = self.parse_expression()?;
+            arms.push(MatchArmExpr { pattern, body });
+
+            match self.peek().token {
+                Token::Newline => {
+                    self.pos += 1;
+                }
+                Token::RBrace | Token::Eof => {}
+                other => {
+                    return Err(Self::expected(
+                        "a newline or `}` between match arms",
+                        &other,
+                        self.peek().span,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// `( expr )` in expression context: a non-recording variant of the
+    /// statement-level condition parse.
+    fn parse_paren_group_expr(&mut self) -> Result<Expr, Diagnostic> {
+        if !self.at(Token::LParen) {
+            let other = *self.peek();
+            return Err(Self::expected("`(`", &other.token, other.span));
+        }
+        self.advance();
+        self.skip_newlines();
+        let expr = self.parse_expression()?;
+        self.skip_newlines();
+        if !self.at(Token::RParen) {
+            let other = *self.peek();
+            return Err(Self::expected("`)`", &other.token, other.span));
+        }
+        self.advance();
+        Ok(expr)
+    }
+
+    /// After a broken arm: skip to the newline (consumed), the closing brace,
+    /// or end of file (both left in place).
+    fn skip_arm_to_boundary(&mut self) {
+        loop {
+            let token = self.peek().token;
+            if matches!(token, Token::Newline | Token::RBrace | Token::Eof) {
+                if token == Token::Newline {
+                    self.pos += 1;
+                }
+                return;
+            }
+            self.advance();
+        }
+    }
+
+    /// One match arm pattern (§2.15): a variant of the scrutinee's enum with
+    /// typed payload bindings, or the `_` wildcard.
+    fn parse_pattern(&mut self) -> Result<Pattern, Diagnostic> {
+        let token = *self.peek();
+        let Token::Ident(name) = token.token else {
+            return Err(Self::expected("a pattern", &token.token, token.span));
+        };
+        self.advance();
+
+        if name == "_" {
+            if self.at(Token::LParen) {
+                let other = *self.peek();
+                return Err(Diagnostic::parse(
+                    "the wildcard `_` takes no payload",
+                    other.span,
+                ));
+            }
+            return Ok(Pattern::Wildcard);
+        }
+
+        if !self.at(Token::LParen) {
+            let other = *self.peek();
+            return Err(Self::expected(
+                "`(` after the variant name",
+                &other.token,
+                other.span,
+            ));
+        }
+        self.advance();
+
+        let mut bindings = Vec::new();
+        self.skip_newlines();
+        if !self.at(Token::RParen) {
+            loop {
+                self.skip_newlines();
+                let type_token = *self.peek();
+                let Some(ty) = self.parse_type() else {
+                    return Err(Self::expected(
+                        "a payload type",
+                        &type_token.token,
+                        type_token.span,
+                    ));
+                };
+                let name_tok = *self.peek();
+                let Token::Ident(binding) = name_tok.token else {
+                    return Err(Self::expected(
+                        "a payload name",
+                        &name_tok.token,
+                        name_tok.span,
+                    ));
+                };
+                self.advance();
+                bindings.push(FieldDef {
+                    ty,
+                    name: binding.to_string(),
+                });
+                self.skip_newlines();
+                if self.at(Token::Comma) {
+                    self.advance();
+                    continue;
+                }
+                if self.at(Token::RParen) {
+                    break;
+                }
+                let other = *self.peek();
+                return Err(Self::expected("`,` or `)`", &other.token, other.span));
+            }
+        }
+        self.skip_newlines();
+        let closing = *self.peek();
+        if closing.token != Token::RParen {
+            return Err(Self::expected("`)`", &closing.token, closing.span));
+        }
+        self.advance();
+        Ok(Pattern::Variant {
+            variant: name.to_string(),
+            bindings,
+        })
+    }
+
+    /// A `for` statement (§2.14): `for (Type name in iterable) { body }`.
+    fn parse_for_statement(&mut self, for_token: SpannedToken<'src>) -> Stmt {
+        let recover = |parser: &mut Self| -> Stmt {
+            let end = parser.skip_to_statement_end(parser.peek().span.end);
+            let error = ErrorId(parser.errors.len().saturating_sub(1));
+            Stmt {
+                span: Span::new(for_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            }
+        };
+
+        if !self.at(Token::LParen) {
+            let other = *self.peek();
+            let _ = self.record(
+                format!("expected `(`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return recover(self);
+        }
+        self.advance();
+        self.skip_newlines();
+
+        let type_token = *self.peek();
+        let Some(elem_ty) = self.parse_type() else {
+            let _ = self.record(
+                format!(
+                    "expected an element type, but found {}",
+                    type_token.token.describe()
+                ),
+                type_token.span,
+            );
+            return recover(self);
+        };
+        let elem_name = match *self.peek() {
+            SpannedToken {
+                token: Token::Ident(name),
+                ..
+            } => {
+                self.advance();
+                name.to_string()
+            }
+            other => {
+                let _ = self.record(
+                    format!(
+                        "expected an element name, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                return recover(self);
+            }
+        };
+
+        if !self.at(Token::KwIn) {
+            let other = *self.peek();
+            let _ = self.record(
+                format!("expected `in`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return recover(self);
+        }
+        self.advance();
+
+        let iterable = self.parse_recovered_expression();
+
+        if !self.at(Token::RParen) {
+            let other = *self.peek();
+            let _ = self.record(
+                format!("expected `)`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return recover(self);
+        }
+        self.advance();
+
+        if !self.at(Token::LBrace) {
+            let other = *self.peek();
+            let end = self.recover_to_next_statement(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(for_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+        let open_brace = self.advance().span.start;
+        let body = self.parse_block_body(open_brace);
+
+        let end = self.tokens[self.pos - 1].span.end;
+        Stmt::new(
+            StmtKind::For {
+                elem_ty,
+                elem_name,
+                iterable,
+                body,
+            },
+            Span::new(for_token.span.start, end),
+        )
+    }
+
     fn parse_expression(&mut self) -> Result<Expr, Diagnostic> {
         self.parse_logic_or()
     }
@@ -1837,6 +2229,13 @@ impl<'a, 'src> Parser<'a, 'src> {
             )),
             Token::KwTrue => Ok(Expr::new(ExprKind::BoolLit(true), token.span)),
             Token::KwFalse => Ok(Expr::new(ExprKind::BoolLit(false), token.span)),
+            Token::InterpStrLit(raw) => {
+                let parts = self.parse_interp_parts(raw, token.span)?;
+                Ok(Expr::new(ExprKind::Interpolated { parts }, token.span))
+            }
+            Token::LBracket => self.parse_array_literal(token),
+            Token::LBrace => self.parse_map_literal(token),
+            Token::KwMatch => self.parse_match_expression(token),
             Token::Ident(name) => {
                 // A qualified construction: `Enum.Variant(args)` (§2.7).
                 if self.at(Token::Dot)
@@ -1899,6 +2298,206 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
+    /// An array literal (§11): `[a, b, c]`. Elements separate by commas or
+    /// newlines (newlines are significant inside brackets, §11.1 CMON
+    /// style); a trailing comma is rejected, trailing newlines close.
+    fn parse_array_literal(&mut self, open: SpannedToken<'src>) -> Result<Expr, Diagnostic> {
+        // The `[` is already consumed.
+        self.skip_newlines();
+        let mut elements = Vec::new();
+        if !self.at(Token::RBracket) {
+            loop {
+                elements.push(self.parse_expression()?);
+                if self.at(Token::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    if self.at(Token::RBracket) {
+                        let other = *self.peek();
+                        return Err(Self::expected(
+                            "an element after `,`",
+                            &other.token,
+                            other.span,
+                        ));
+                    }
+                    continue;
+                }
+                if self.at(Token::Newline) {
+                    self.skip_newlines();
+                    if self.at(Token::RBracket) {
+                        break;
+                    }
+                    continue;
+                }
+                if self.at(Token::RBracket) {
+                    break;
+                }
+                let other = *self.peek();
+                return Err(Self::expected(
+                    "`,`, a newline, or `]` in array literal",
+                    &other.token,
+                    other.span,
+                ));
+            }
+        }
+        let closing = *self.peek();
+        if closing.token != Token::RBracket {
+            return Err(Self::expected("`]`", &closing.token, closing.span));
+        }
+        self.advance();
+        Ok(Expr::new(
+            ExprKind::ArrayLit { elements },
+            Span::new(open.span.start, closing.span.end),
+        ))
+    }
+
+    /// A map literal (§11): `{ key: value }`. Entries separate by commas or
+    /// newlines (newlines are significant inside braces); a trailing comma
+    /// is rejected, trailing newlines close.
+    fn parse_map_literal(&mut self, open: SpannedToken<'src>) -> Result<Expr, Diagnostic> {
+        // The `{` is already consumed.
+        self.skip_newlines();
+        let mut entries = Vec::new();
+        if !self.at(Token::RBrace) {
+            loop {
+                let key = self.parse_expression()?;
+                let colon = *self.peek();
+                if colon.token != Token::Colon {
+                    return Err(Self::expected(
+                        "`:` after the map key",
+                        &colon.token,
+                        colon.span,
+                    ));
+                }
+                self.advance();
+                let value = self.parse_expression()?;
+                entries.push((key, value));
+                if self.at(Token::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    if self.at(Token::RBrace) {
+                        let other = *self.peek();
+                        return Err(Self::expected(
+                            "an entry after `,`",
+                            &other.token,
+                            other.span,
+                        ));
+                    }
+                    continue;
+                }
+                if self.at(Token::Newline) {
+                    self.skip_newlines();
+                    if self.at(Token::RBrace) {
+                        break;
+                    }
+                    continue;
+                }
+                if self.at(Token::RBrace) {
+                    break;
+                }
+                let other = *self.peek();
+                return Err(Self::expected(
+                    "`,`, a newline, or `}` in map literal",
+                    &other.token,
+                    other.span,
+                ));
+            }
+        }
+        let closing = *self.peek();
+        if closing.token != Token::RBrace {
+            return Err(Self::expected("`}`", &closing.token, closing.span));
+        }
+        self.advance();
+        Ok(Expr::new(
+            ExprKind::MapLit { entries },
+            Span::new(open.span.start, closing.span.end),
+        ))
+    }
+
+    /// The parts of an interpolated string (§2.8/§4.1): literal chunks and
+    /// `{expr}` islands. Escapes decode only in the literal chunks; islands
+    /// are re-lexed and parsed as expressions with spans offset to the
+    /// island's absolute position.
+    fn parse_interp_parts(&mut self, raw: &str, span: Span) -> Result<Vec<InterpPart>, Diagnostic> {
+        // raw = `$"..."` including the sigil and both quotes.
+        let content = &raw[2..raw.len() - 1];
+        let base = span.start + 2;
+        let mut parts = Vec::new();
+        let mut literal_start = 0;
+        let mut idx = 0;
+        let bytes = content.as_bytes();
+        while idx < bytes.len() {
+            if bytes[idx] == b'{' {
+                // The literal chunk before the island (never empty here).
+                parts.push(InterpPart::Literal(unescape_interp_literal(
+                    &content[literal_start..idx],
+                )));
+                // Find the matching `}` (nested braces come from struct and
+                // map literals inside the island).
+                let mut depth = 1usize;
+                let mut close = idx + 1;
+                while close < bytes.len() && depth > 0 {
+                    match bytes[close] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    close += 1;
+                }
+                if depth != 0 {
+                    return Err(Diagnostic::parse(
+                        "unterminated interpolation island",
+                        Span::new(base + idx, span.end - 1),
+                    ));
+                }
+                let island = &content[idx + 1..close - 1];
+                if island.trim().is_empty() {
+                    return Err(Diagnostic::parse(
+                        "empty interpolation island",
+                        Span::new(base + idx, base + close),
+                    ));
+                }
+                let expr = self.parse_island_expr(island, base + idx + 1)?;
+                parts.push(InterpPart::Expr(Box::new(expr)));
+                idx = close;
+                literal_start = close;
+            } else {
+                idx += 1;
+            }
+        }
+        parts.push(InterpPart::Literal(unescape_interp_literal(
+            &content[literal_start..],
+        )));
+        Ok(parts)
+    }
+
+    /// Parses the text of one `{...}` island as an expression: lexes it with
+    /// the standard lexer, offsets every span to the island's absolute
+    /// position, and parses one expression with no trailing tokens.
+    fn parse_island_expr(&mut self, island: &str, offset: usize) -> Result<Expr, Diagnostic> {
+        let (tokens, errors) = crate::lexer::lex_with_errors(island);
+        if let Some(error) = errors.into_iter().next() {
+            let shifted = shift_lex_error(error, offset);
+            return Err(Diagnostic::lex(shifted));
+        }
+        let tokens: Vec<SpannedToken> = tokens
+            .into_iter()
+            .map(|spanned| SpannedToken {
+                token: spanned.token,
+                span: Span::new(spanned.span.start + offset, spanned.span.end + offset),
+            })
+            .collect();
+        let mut parser = Parser::new(&tokens);
+        let expr = parser.parse_expression()?;
+        if !parser.at_eof() {
+            let other = *parser.peek();
+            return Err(Self::expected(
+                "end of interpolation",
+                &other.token,
+                other.span,
+            ));
+        }
+        Ok(expr)
+    }
     /// A primary expression with its postfix chain: field access (§2.6),
     /// indexing (§11), and the `?` operator (§2.8). A `(` here can only be
     /// an attempt to call a non-name expression — functions and
@@ -1922,10 +2521,10 @@ impl<'a, 'src> Parser<'a, 'src> {
                                 span,
                             );
                         }
-                        other => {
+                        _ => {
                             return Err(Self::expected(
                                 "a field name after `.`",
-                                &other,
+                                &field_tok.token,
                                 field_tok.span,
                             ));
                         }
@@ -2000,6 +2599,57 @@ fn multiplicative_operator(token: &Token) -> Option<BinaryOp> {
         Token::Slash => Some(BinaryOp::Div),
         Token::Percent => Some(BinaryOp::Rem),
         _ => None,
+    }
+}
+
+/// Decodes the four accepted escape pairs in an interpolated string's
+/// literal chunk (the lexer has already validated them, §2.2).
+fn unescape_interp_literal(chunk: &str) -> String {
+    // The four accepted escapes (n, t, \\, ") — the lexer validated them.
+    let mut out = String::with_capacity(chunk.len());
+    let mut chars = chunk.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('n') => {
+                chars.next();
+                out.push('\n');
+            }
+            Some('t') => {
+                chars.next();
+                out.push('\t');
+            }
+            Some('\\') => {
+                chars.next();
+                out.push('\\');
+            }
+            Some('"') => {
+                chars.next();
+                out.push('"');
+            }
+            _ => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Shifts a lexer error span (relative to an island's text) to the island's
+/// absolute position in the source.
+fn shift_lex_error(error: crate::lexer::LexError, offset: usize) -> crate::lexer::LexError {
+    use crate::lexer::LexError;
+    let shift = |span: Span| Span::new(span.start + offset, span.end + offset);
+    match error {
+        LexError::InvalidCharacter { span } => LexError::InvalidCharacter { span: shift(span) },
+        LexError::UnterminatedString { span } => LexError::UnterminatedString { span: shift(span) },
+        LexError::UnterminatedBlockComment { span } => {
+            LexError::UnterminatedBlockComment { span: shift(span) }
+        }
+        LexError::InvalidEscape { span } => LexError::InvalidEscape { span: shift(span) },
+        LexError::IntegerOverflow { span } => LexError::IntegerOverflow { span: shift(span) },
+        LexError::FloatOverflow { span } => LexError::FloatOverflow { span: shift(span) },
     }
 }
 

@@ -1811,6 +1811,221 @@ mod tests {
     }
 
     #[test]
+    fn parses_match_statement_with_block_arms() {
+        use cme_core::ast::{MatchArmStmt, Pattern, StmtKind::Match as MatchStmt};
+        let source = "void f(gameEvent evt) {\nmatch (evt) {\nDamage(int amount) => { g(1) }\nPlayerDied() => {}\n_ => {}\n}\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => match &body.stmts[0].kind {
+                MatchStmt { arms, .. } => {
+                    assert_eq!(arms.len(), 3);
+                    assert!(matches!(
+                        arms[0].pattern,
+                        Pattern::Variant { ref variant, ref bindings } if variant == "Damage" && bindings.len() == 1
+                    ));
+                    assert!(
+                        matches!(arms[1].pattern, Pattern::Variant { ref variant, ref bindings } if variant == "PlayerDied" && bindings.is_empty())
+                    );
+                    assert!(matches!(arms[2].pattern, Pattern::Wildcard));
+                    assert!(matches!(arms[0], MatchArmStmt { .. }));
+                }
+                other => panic!("expected a match statement, got {other:?}"),
+            },
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_match_expression_with_expression_arms() {
+        let source = "str f(gameEvent evt) {\nstr label = match (evt) {\nDamage(int amount) => \"dmg\"\n_ => \"other\"\n}\nreturn label\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        match &init.kind {
+            ExprKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(&arms[0].body.kind, ExprKind::StrLit(_)));
+            }
+            other => panic!("expected a match expression, got {other:?}"),
+        }
+
+        // Match in return position (§2.15).
+        let source = "bool f(gameEvent evt) {\nreturn match (evt) {\nDamage(int amount) => true\n_ => false\n}\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => match &body.stmts[0].kind {
+                StmtKind::Return { value: Some(value) } => {
+                    assert!(matches!(value.kind, ExprKind::Match { .. }));
+                }
+                other => panic!("expected a return, got {other:?}"),
+            },
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_statement_recovers_from_broken_arms() {
+        let source = "void f(gameEvent evt) {\nmatch (evt) {\nDamage(int amount) => { g(1) }\n??? => ???\n_ => {}\n}\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => match &body.stmts[0].kind {
+                StmtKind::Match { arms, .. } => {
+                    // The broken arm is skipped; the wildcard survives.
+                    assert_eq!(arms.len(), 2);
+                }
+                other => panic!("expected a match statement, got {other:?}"),
+            },
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_for_in_loops() {
+        let source = "int sum(int[] xs) {\nint total = 0\nfor (int v in xs) {\ntotal += v\n}\nreturn total\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { body, .. } => match &body.stmts[1].kind {
+                StmtKind::For {
+                    elem_ty,
+                    elem_name,
+                    iterable,
+                    ..
+                } => {
+                    assert_eq!(elem_name, "v");
+                    assert_eq!(*elem_ty, Type::Prim(PrimitiveType::Int));
+                    assert!(matches!(&iterable.kind, ExprKind::Ident(name) if name == "xs"));
+                }
+                other => panic!("expected a for loop, got {other:?}"),
+            },
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_array_literals_with_both_separator_styles() {
+        // Comma-separated (one line) and newline-separated (§11.1 CMON).
+        let source = "int main() {\nint[] a = [1, 2, 3]\nint[] b = [\n1\n3\n5\n]\nint[] empty = []\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let a = stmts[0].declaration_expr_of(0);
+        let b = stmts[0].declaration_expr_of(1);
+        let empty = stmts[0].declaration_expr_of(2);
+        match &a.kind {
+            ExprKind::ArrayLit { elements } => assert_eq!(elements.len(), 3),
+            other => panic!("expected an array literal, got {other:?}"),
+        }
+        match &b.kind {
+            ExprKind::ArrayLit { elements } => assert_eq!(elements.len(), 3),
+            other => panic!("expected an array literal, got {other:?}"),
+        }
+        match &empty.kind {
+            ExprKind::ArrayLit { elements } => assert!(elements.is_empty()),
+            other => panic!("expected an empty array literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_map_literals_with_both_separator_styles() {
+        let source = "int main() {\nmap<str, int> a = {\"x\": 1, \"y\": 2}\nmap<str, int> b = {\n\"x\": 1\n\"y\": 2\n}\nmap<str, int> empty = {}\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        for index in 0..2 {
+            let init = stmts[0].declaration_expr_of(index);
+            match &init.kind {
+                ExprKind::MapLit { entries } => assert_eq!(entries.len(), 2),
+                other => panic!("expected a map literal, got {other:?}"),
+            }
+        }
+        let empty = stmts[0].declaration_expr_of(2);
+        assert!(matches!(&empty.kind, ExprKind::MapLit { entries } if entries.is_empty()));
+    }
+
+    #[test]
+    fn trailing_commas_in_literals_are_rejected() {
+        let source = "int main() {\nint[] a = [1, 2,]\nreturn 0\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("an element after `,`"));
+
+        let source = "int main() {\nmap<str, int> m = {\"x\": 1,}\nreturn 0\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("an entry after `,`"));
+    }
+
+    #[test]
+    fn parses_interpolated_strings() {
+        use cme_core::ast::InterpPart;
+        // Scalar and expression islands (§2.8/§4.1).
+        let source = "str f(int hp, vec2 p) {\nstr s = $\"hp={hp} pos=({p.x},{p.y}) v={hp * 2 + 1}\"\nreturn s\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        match &init.kind {
+            ExprKind::Interpolated { parts } => {
+                let literal_count = parts
+                    .iter()
+                    .filter(|p| matches!(p, InterpPart::Literal(_)))
+                    .count();
+                let expr_count = parts
+                    .iter()
+                    .filter(|p| matches!(p, InterpPart::Expr(_)))
+                    .count();
+                // "hp=", " pos=(", ",", ")", " v=" -> 5 literals, 4 islands.
+                assert_eq!(literal_count, 5);
+                assert_eq!(expr_count, 4);
+            }
+            other => panic!("expected an interpolated string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interpolated_string_escapes_decode_only_in_literals() {
+        let source = "str f(int hp) {\nstr s = $\"line1\\nline2 hp={hp}\"\nreturn s\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let init = stmts[0].declaration_expr_of(0);
+        match &init.kind {
+            ExprKind::Interpolated { parts } => match &parts[0] {
+                cme_core::ast::InterpPart::Literal(text) => {
+                    assert_eq!(text, "line1\nline2 hp=")
+                }
+                other => panic!("expected a literal part, got {other:?}"),
+            },
+            other => panic!("expected an interpolated string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn broken_interpolation_islands_report_clean_diagnostics() {
+        // Unterminated island.
+        let source = "str f() {\nstr s = $\"oops {x\"\nreturn s\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].to_string(), "unterminated interpolation island");
+
+        // Empty island.
+        let source = "str f() {\nstr s = $\"oops {}\"\nreturn s\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].to_string(), "empty interpolation island");
+
+        // Syntax error inside an island (the island lexes as its own
+        // stream, so a dangling operator meets end of file).
+        let source = "str f() {\nstr s = $\"val {1 +}\"\nreturn s\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "expected an expression, but found end of file"
+        );
+    }
+
+    #[test]
     fn infer_function_return_type_is_rejected() {
         let (stmts, errors) = parse_program_parts("infer f() {\nreturn 1\n}\n");
         assert_eq!(errors.len(), 1);

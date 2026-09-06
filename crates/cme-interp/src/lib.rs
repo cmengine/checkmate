@@ -2,7 +2,8 @@
 //!
 //! Normative sources: WHITEPAPER §2.6–§2.16 (declarations, structs, enums,
 //! generics, functions, control flow, pattern matching), §2.4 (overflow-
-//! checked scalar types), §2.8 (option / result and `?`), §11 (arrays and
+//! checked scalar types), §2.8 (option / result and `?`), §10.4 (impl
+//! blocks and qualified member calls), §11 (arrays and
 //! maps), and Appendix A (§A.4 operand typing, §A.5 evaluation semantics,
 //! §A.6 string concatenation, §A.7 compound assignment).
 //!
@@ -245,15 +246,20 @@ pub struct Interpreter<'a> {
     functions: HashMap<&'a str, &'a Stmt>,
     structs: HashMap<&'a str, &'a Stmt>,
     enums: HashMap<&'a str, &'a Stmt>,
+    /// Impl member declarations (§10.4), keyed by the joined target path
+    /// then by member name — the runtime mirror of the checker's registry.
+    impls: HashMap<String, HashMap<String, &'a Stmt>>,
 }
 
 impl<'a> Interpreter<'a> {
-    /// Collects every top-level `FuncDecl`, `StructDecl`, and `EnumDecl`
-    /// into the runtime registries.
+    /// Collects every top-level `FuncDecl`, `StructDecl`, `EnumDecl`, and
+    /// impl member into the runtime registries. Impl blocks for the same
+    /// target union; the checker guarantees no duplicate members.
     pub fn new(statements: &'a [Stmt]) -> Self {
         let mut functions = HashMap::new();
         let mut structs = HashMap::new();
         let mut enums = HashMap::new();
+        let mut impls: HashMap<String, HashMap<String, &'a Stmt>> = HashMap::new();
         for statement in statements {
             match &statement.kind {
                 StmtKind::FuncDecl { name, .. } => {
@@ -265,6 +271,15 @@ impl<'a> Interpreter<'a> {
                 StmtKind::EnumDecl { name, .. } => {
                     enums.entry(name.as_str()).or_insert(statement);
                 }
+                StmtKind::ImplDecl { target, members } => {
+                    let joined = target.join(".");
+                    let registry = impls.entry(joined).or_default();
+                    for member in members {
+                        if let StmtKind::FuncDecl { name, .. } = &member.kind {
+                            registry.entry(name.clone()).or_insert(member);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -272,6 +287,7 @@ impl<'a> Interpreter<'a> {
             functions,
             structs,
             enums,
+            impls,
         }
     }
 
@@ -289,6 +305,7 @@ impl<'a> Interpreter<'a> {
             functions: &self.functions,
             structs: &self.structs,
             enums: &self.enums,
+            impls: &self.impls,
             scopes: Vec::new(),
             depth: 0,
         };
@@ -318,6 +335,7 @@ struct Runner<'env, 'a> {
     functions: &'env HashMap<&'a str, &'a Stmt>,
     structs: &'env HashMap<&'a str, &'a Stmt>,
     enums: &'env HashMap<&'a str, &'a Stmt>,
+    impls: &'env HashMap<String, HashMap<String, &'a Stmt>>,
     scopes: Vec<HashMap<String, Value>>,
     depth: usize,
 }
@@ -609,16 +627,7 @@ impl<'env, 'a> Runner<'env, 'a> {
                 variant,
                 args,
             } => self.eval_variant_call(enum_name, variant, args, expr.span),
-            // Placeholder until the runtime lands in this series: nothing
-            // can parse a path call yet, so only a hand-built tree reaches
-            // this arm.
-            ExprKind::PathCall { path, .. } => Err(InterpError::new(
-                format!(
-                    "qualified path calls are not implemented yet: `{}`",
-                    path.join(".")
-                ),
-                expr.span,
-            )),
+            ExprKind::PathCall { path, args } => self.eval_path_call(path, args, expr.span),
             ExprKind::Field { obj, name } => {
                 let value = self.eval(obj)?;
                 read_field(&value, name, expr.span)
@@ -839,6 +848,65 @@ impl<'env, 'a> Runner<'env, 'a> {
         }
     }
 
+    /// Evaluates call arguments for a function-shaped declaration
+    /// (§2.12): positional arguments keep their positions; named arguments
+    /// bind by parameter NAME — evaluation itself still runs in source
+    /// order so side effects stay left-to-right. Mixing the forms was
+    /// rejected by the parser; a stray positional among named arguments
+    /// (only reachable through a hand-built tree) is a defensive error.
+    fn eval_args_for(
+        &mut self,
+        declaration: &'a Stmt,
+        args: &'a [CallArg],
+        span: Span,
+    ) -> Result<Vec<Value>, InterpError> {
+        if args.iter().all(|arg| matches!(arg, CallArg::Positional(_))) {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                if let CallArg::Positional(expr) = arg {
+                    values.push(self.eval(expr)?);
+                }
+            }
+            return Ok(values);
+        }
+        let StmtKind::FuncDecl { params, .. } = &declaration.kind else {
+            return Err(InterpError::new(
+                "internal error: not a function declaration",
+                span,
+            ));
+        };
+        let mut provided: Vec<(&str, Value)> = Vec::with_capacity(args.len());
+        for arg in args {
+            match arg {
+                CallArg::Named { name, expr } => {
+                    provided.push((name.as_str(), self.eval(expr)?));
+                }
+                CallArg::Positional(expr) => {
+                    return Err(InterpError::new(
+                        "positional and named arguments cannot mix",
+                        expr.span,
+                    ));
+                }
+            }
+        }
+        let mut values = Vec::with_capacity(params.len());
+        for param in params {
+            match provided
+                .iter()
+                .find(|(arg_name, _)| *arg_name == param.name.as_str())
+            {
+                Some((_, value)) => values.push(value.clone()),
+                None => {
+                    return Err(InterpError::new(
+                        format!("missing argument `{}`", param.name),
+                        span,
+                    ));
+                }
+            }
+        }
+        Ok(values)
+    }
+
     fn eval_call(
         &mut self,
         name: &str,
@@ -848,13 +916,7 @@ impl<'env, 'a> Runner<'env, 'a> {
         // Resolution order mirrors the checker: user functions, built-in
         // constructors, then struct constructions.
         if let Some(&declaration) = self.functions.get(name) {
-            let mut values = Vec::with_capacity(args.len());
-            for arg in args {
-                let expr = match arg {
-                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
-                };
-                values.push(self.eval(expr)?);
-            }
+            let values = self.eval_args_for(declaration, args, span)?;
             return self.call_function(declaration, name, values, span);
         }
         if let Some(value) = self.eval_builtin_ctor(name, args, span)? {
@@ -972,12 +1034,105 @@ impl<'env, 'a> Runner<'env, 'a> {
         })
     }
 
-    /// A qualified enum construction `Enum.Variant(args)` (§2.7), including
-    /// the qualified builtins `option.Some` / `result.Ok`.
+    /// A qualified call `Target.name(args)` (§2.7, §10.4): an enum variant
+    /// construction — including the qualified builtins `option.Some` /
+    /// `result.Ok` — when `Target` is an enum declaring that variant, or an
+    /// impl member call otherwise. The resolution order mirrors the
+    /// checker: variant first, member second.
     fn eval_variant_call(
         &mut self,
         enum_name: &str,
         variant: &str,
+        args: &'a [CallArg],
+        span: Span,
+    ) -> Result<Value, InterpError> {
+        // The built-in enums construct directly; the checker rejects impls
+        // on them, so no member fallback applies here.
+        if enum_name == "option" || enum_name == "result" {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                values.push(self.eval(expr)?);
+            }
+            return Ok(Value::Enum {
+                name: enum_name.to_string(),
+                variant: variant.to_string(),
+                payload: values,
+            });
+        }
+        // §2.7: a declared variant of a declared enum wins.
+        if let Some(&declaration) = self.enums.get(enum_name)
+            && let StmtKind::EnumDecl { variants, .. } = &declaration.kind
+            && let Some(variant_def) = variants.iter().find(|v| v.name == variant)
+        {
+            return self.construct_variant(enum_name, variant, variant_def, args, span);
+        }
+        // §10.4: an impl member on the same target.
+        if let Some(&declaration) = self
+            .impls
+            .get(enum_name)
+            .and_then(|registry| registry.get(variant))
+        {
+            let display = format!("{enum_name}.{variant}");
+            let values = self.eval_args_for(declaration, args, span)?;
+            return self.call_function(declaration, &display, values, span);
+        }
+        // Error shapes mirror the checker's diagnostics.
+        if self.enums.contains_key(enum_name) {
+            Err(InterpError::new(
+                format!("unknown variant `{variant}` in `{enum_name}`"),
+                span,
+            ))
+        } else if self.structs.contains_key(enum_name) {
+            Err(InterpError::new(
+                format!("unknown member `{variant}` in `{enum_name}`"),
+                span,
+            ))
+        } else {
+            Err(InterpError::new(
+                format!("unknown enum `{enum_name}`"),
+                span,
+            ))
+        }
+    }
+
+    /// A call through a dotted path of three or more segments (§2.3,
+    /// §10.4): the last segment names an impl member; the leading segments
+    /// name its target.
+    fn eval_path_call(
+        &mut self,
+        path: &[String],
+        args: &'a [CallArg],
+        span: Span,
+    ) -> Result<Value, InterpError> {
+        if path.len() >= 2 {
+            let member = &path[path.len() - 1];
+            let target = path[..path.len() - 1].join(".");
+            if let Some(&declaration) = self
+                .impls
+                .get(&target)
+                .and_then(|registry| registry.get(member.as_str()))
+            {
+                let display = format!("{target}.{member}");
+                let values = self.eval_args_for(declaration, args, span)?;
+                return self.call_function(declaration, &display, values, span);
+            }
+        }
+        Err(InterpError::new(
+            format!("unknown function `{}`", path.join(".")),
+            span,
+        ))
+    }
+
+    /// Evaluates a variant's positional payload values and checks their
+    /// count (§2.7).
+    fn construct_variant(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        variant_def: &cme_core::ast::VariantDecl,
         args: &'a [CallArg],
         span: Span,
     ) -> Result<Value, InterpError> {
@@ -988,35 +1143,10 @@ impl<'env, 'a> Runner<'env, 'a> {
             };
             values.push(self.eval(expr)?);
         }
-        if enum_name == "option" || enum_name == "result" {
-            return Ok(Value::Enum {
-                name: enum_name.to_string(),
-                variant: variant.to_string(),
-                payload: values,
-            });
-        }
-        let Some(&declaration) = self.enums.get(enum_name) else {
-            return Err(InterpError::new(
-                format!("unknown enum `{enum_name}`"),
-                span,
-            ));
-        };
-        let StmtKind::EnumDecl { name, variants, .. } = &declaration.kind else {
-            return Err(InterpError::new(
-                "internal error: not an enum declaration",
-                span,
-            ));
-        };
-        let Some(variant_def) = variants.iter().find(|v| v.name == variant) else {
-            return Err(InterpError::new(
-                format!("unknown variant `{variant}` in `{name}`"),
-                span,
-            ));
-        };
         if values.len() != variant_def.fields.len() {
             return Err(InterpError::new(
                 format!(
-                    "wrong number of payload values for `{name}.{variant}`: expected {}, found {}",
+                    "wrong number of payload values for `{enum_name}.{variant}`: expected {}, found {}",
                     variant_def.fields.len(),
                     values.len()
                 ),
@@ -1024,7 +1154,7 @@ impl<'env, 'a> Runner<'env, 'a> {
             ));
         }
         Ok(Value::Enum {
-            name: name.clone(),
+            name: enum_name.to_string(),
             variant: variant.to_string(),
             payload: values,
         })
@@ -1819,5 +1949,83 @@ mod tests {
         // resetFirst mutates its own copy; the caller's array is untouched.
         let source = "void resetFirst(int[] xs) {\nxs[0] = 0\n}\nint main() {\nint[] a = [1, 2, 3]\nresetFirst(a)\nif (a[0] == 1) {\nreturn 1\n}\nreturn 0\n}\n";
         assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    // ------------------------------------------------------------------
+    // §10.4 — impl blocks
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn impl_members_on_structs_execute() {
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nint main() {\ncounter c = counter(value: 41)\nreturn counter.peek(c)\n}\n";
+        assert_eq!(ok_full(source), Value::Int(41));
+    }
+
+    #[test]
+    fn impl_member_value_semantics_never_escape_the_caller() {
+        // bump mutates its own clone; the caller's counter is untouched
+        // (§2.13), and bump returns the incremented copy.
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    counter bump(counter c) {\n        c.value += 1\n        return c\n    }\n}\nint main() {\ncounter c = counter(value: 41)\ncounter bumped = counter.bump(c)\nif (c.value != 41) {\nreturn 0\n}\nreturn bumped.value\n}\n";
+        assert_eq!(ok_full(source), Value::Int(42));
+    }
+
+    #[test]
+    fn impl_blocks_union_and_members_call_each_other() {
+        // Two blocks for the same target; a member of the second calls a
+        // member of the first (forward reference across blocks, §10.4).
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nimpl counter {\n    int peekTwice(counter c) {\n        return counter.peek(c) + counter.peek(c)\n    }\n}\nint main() {\ncounter c = counter(value: 21)\nreturn counter.peekTwice(c)\n}\n";
+        assert_eq!(ok_full(source), Value::Int(42));
+    }
+
+    #[test]
+    fn impl_members_on_enums_execute() {
+        let source = "enum suit {\n    Clubs()\n    Hearts()\n}\nimpl suit {\n    str label(suit s) {\nstr name = match (s) {\n    Clubs() => \"clubs\"\n    Hearts() => \"hearts\"\n}\nreturn name\n    }\n}\nint main() {\nif (suit.label(suit.Clubs()) == \"clubs\") {\nreturn 1\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn host_style_path_impl_members_execute() {
+        let source = "struct GameConfig {\n    int startingScore\n}\nstruct GameState {\n    int score\n}\nimpl engine.gamemode {\n    GameState InitGame(GameConfig config) {\n        return GameState(score: config.startingScore)\n    }\n    void OnTick(GameState state) {\n        state.score += 1\n    }\n}\nint main() {\nGameConfig config = GameConfig(startingScore: 100)\nGameState state = engine.gamemode.InitGame(config)\nengine.gamemode.OnTick(state)\nreturn state.score\n}\n";
+        assert_eq!(ok_full(source), Value::Int(100));
+    }
+
+    #[test]
+    fn impl_members_accept_named_arguments_bound_by_name() {
+        // Named arguments bind by NAME (§2.12): the out-of-order call still
+        // binds low/high correctly, for impl members and plain functions.
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int clampAround(counter c, int low, int high) {\nif (c.value < low) {\n    return low\n}\nif (c.value > high) {\n    return high\n}\nreturn c.value\n    }\n}\nint main() {\ncounter c = counter(value: 50)\nreturn counter.clampAround(high: 10, low: 0, c: c)\n}\n";
+        assert_eq!(ok_full(source), Value::Int(10));
+    }
+
+    #[test]
+    fn plain_function_named_arguments_bind_by_name() {
+        // The same fix applies to top-level functions: evaluation order
+        // stays source-left-to-right, binding follows parameter names.
+        let source = "int clamp(int value, int low, int high) {\nif (value < low) {\nreturn low\n}\nif (value > high) {\nreturn high\n}\nreturn value\n}\nint main() {\nreturn clamp(high: 10, value: 50, low: 0)\n}\n";
+        assert_eq!(ok_full(source), Value::Int(10));
+    }
+
+    #[test]
+    fn impl_member_recursion_runs() {
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int sumTo(counter c) {\nif (c.value <= 0) {\n    return 0\n}\nc.value -= 1\nreturn c.value + counter.sumTo(c)\n    }\n}\nint main() {\ncounter c = counter(value: 5)\nreturn counter.sumTo(c)\n}\n";
+        assert_eq!(ok_full(source), Value::Int(10));
+    }
+
+    #[test]
+    fn unknown_impl_members_are_clean_errors() {
+        // Gated off at check time in the host pipeline; the interpreter
+        // still errors cleanly (never panics) on the unregistered member.
+        let source =
+            "struct counter {\n    int value\n}\nint main() {\nreturn counter.peek(1)\n}\n";
+        let error = run_ungated(source).expect_err("unknown member must error");
+        assert!(error.message.contains("unknown member `peek` in `counter`"));
+
+        let source = "int main() {\nreturn engine.graphics.DrawTexture(1)\n}\n";
+        let error = run_ungated(source).expect_err("unknown path must error");
+        assert!(
+            error
+                .message
+                .contains("unknown function `engine.graphics.DrawTexture`")
+        );
     }
 }

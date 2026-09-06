@@ -957,7 +957,9 @@ impl Checker {
                 }
             }
             StmtKind::Expression { expr } => match &expr.kind {
-                ExprKind::Call { .. } | ExprKind::VariantCall { .. } | ExprKind::PathCall { .. } => {
+                ExprKind::Call { .. }
+                | ExprKind::VariantCall { .. }
+                | ExprKind::PathCall { .. } => {
                     self.type_expr(expr, None);
                 }
                 ExprKind::Invalid { .. } => {}

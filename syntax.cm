@@ -1,0 +1,747 @@
+// ============================================================================
+// syntax.cm — the full Checkmate language-surface fixture
+// ============================================================================
+//
+// Exercises every pure-language syntax feature described in WHITEPAPER.md:
+//
+//   §2.2    line comments and /* multi-line block comments */
+//   §2.4    int / float / bool / str / void scalar types
+//   §2.6    structs: declaration, named-field construction, field access
+//   §2.7    enums (ADTs): payload-carrying variants, qualified constructors
+//   §2.8    option<T> / result<T, E>, bare Ok / Err / Some / None, `?`
+//   §2.9    generics on structs and enums
+//   §2.10   mutable variables, plain and compound assignment
+//   §2.11   functions with typed parameters and return types
+//   §2.12   positional vs named arguments (never mixed in one call)
+//   §2.13   value semantics: mutation never escapes the caller
+//   §2.14   if / else if / else, while, for-in
+//   §2.15   match: expression and statement forms, destructuring, wildcard,
+//            exhaustiveness
+//   §2.16   `infer` crystallization for every construct
+//   §11     arrays (T[]) with indexing and .length, maps (map<K, V>)
+//   §A      the full operator table, precedence, evaluation, stringification
+//   §2.8/§4.1  $"..." string interpolation with {expr} islands
+//
+// Every section function returns the number of failed checks within it
+// (0 == all checks passed). main() returns the grand total: 0 == success.
+//
+// Deliberately out of scope here (per owner direction): host schema imports
+// and capability namespaces (§2.3, §9), impl blocks (§10.4), megaprogramming
+// `magic` (§8), and the bytecode / AOT backends (§5) — this file targets the
+// tree-walking interpreter.
+// ============================================================================
+
+/* A multi-line block comment. It is completely ignored by the toolchain,
+   even though it contains things that { look } like syntax: int x = 1,
+   an unmatched " quote, dangling operators + and stray brackets ) ] }.
+   It ends at the closing delimiter below. */
+
+// ----------------------------------------------------------------------------
+// §2.6 — struct declarations (newline-delimited fields, no commas)
+// ----------------------------------------------------------------------------
+
+struct vec2 {
+    float x
+    float y
+}
+
+struct player {
+    str name
+    vec2 position
+    int health
+    bool alive
+}
+
+struct party {
+    str name
+    int[] scores
+    player leader
+}
+
+struct combatLog {
+    gameEvent event
+    int tick
+}
+
+// ----------------------------------------------------------------------------
+// §2.9 — generic structs
+// ----------------------------------------------------------------------------
+
+struct pair<A, B> {
+    A first
+    B second
+}
+
+// ----------------------------------------------------------------------------
+// §2.7 — enum declarations (tagged unions with typed payloads)
+// ----------------------------------------------------------------------------
+
+enum gameEvent {
+    Damage(int amount)
+    Heal(int amount)
+    Spawn(str enemyKind, vec2 position)
+    PlayerDied()
+}
+
+enum maybe<T> {
+    Just(T value)
+    Nothing()
+}
+
+// ----------------------------------------------------------------------------
+// §2.11 — plain helper functions
+// ----------------------------------------------------------------------------
+
+int expect(bool ok) {
+    if (ok) {
+        return 0
+    }
+    return 1
+}
+
+int fib(int n) {
+    if (n <= 1) {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+float distanceSq(vec2 a, vec2 b) {
+    float dx = b.x - a.x
+    float dy = b.y - a.y
+    return dx * dx + dy * dy
+}
+
+player damage(player p, int amount) {
+    p.health = p.health - amount
+    if (p.health <= 0) {
+        p.alive = false
+    }
+    return p
+}
+
+str grade(int score) {
+    if (score >= 90) {
+        return "A"
+    } else if (score >= 80) {
+        return "B"
+    } else if (score >= 70) {
+        return "C"
+    } else {
+        return "F"
+    }
+}
+
+int sumDown(int n) {
+    if (n <= 0) {
+        return 0
+    }
+    return n + sumDown(n - 1)
+}
+
+int sumAll(int[] values) {
+    int total = 0
+    for (int v in values) {
+        total += v
+    }
+    return total
+}
+
+int clamp(int value, int low, int high) {
+    if (value < low) {
+        return low
+    }
+    if (value > high) {
+        return high
+    }
+    return value
+}
+
+void resetFirst(int[] values) {
+    values[0] = 0
+}
+
+void ping() {
+    return
+}
+
+// ----------------------------------------------------------------------------
+// §2.15 — match helpers
+// ----------------------------------------------------------------------------
+
+str describeEvent(gameEvent evt) {
+    return match (evt) {
+        Damage(int amount) => "damage:" + amount
+        Heal(int amount) => "heal:" + amount
+        Spawn(str enemyKind, vec2 position) => $"spawn:{enemyKind}@{position.x},{position.y}"
+        PlayerDied() => "died"
+    }
+}
+
+bool isDamage(gameEvent evt) {
+    return match (evt) {
+        Damage(int amount) => true
+        _ => false
+    }
+}
+
+int classifyEvent(gameEvent evt) {
+    match (evt) {
+        Damage(int amount) => { return 1 }
+        Heal(int amount) => { return 2 }
+        Spawn(str enemyKind, vec2 position) => { return 3 }
+        PlayerDied() => { return 4 }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// §2.8 — option / result helpers
+// ----------------------------------------------------------------------------
+
+option<int> findEven(int[] values) {
+    for (int v in values) {
+        if (v % 2 == 0) {
+            return Some(v)
+        }
+    }
+    return None()
+}
+
+int optionOrDefault(int[] values, int fallback) {
+    option<int> found = findEven(values)
+    int outcome = fallback
+    match (found) {
+        Some(int v) => { outcome = v }
+        None() => {}
+    }
+    return outcome
+}
+
+result<int, str> safeDiv(int a, int b) {
+    if (b == 0) {
+        return Err("division by zero")
+    }
+    return Ok(a / b)
+}
+
+result<int, str> chain(int a, int b, int c) {
+    int first = safeDiv(a, b)?
+    int second = safeDiv(first, c)?
+    return Ok(first + second)
+}
+
+result<int, str> deepChain(int a, int b, int c) {
+    int first = safeDiv(a, b)?
+    int second = safeDiv(first, c)?
+    return Ok((first + second) / 2)
+}
+
+// ----------------------------------------------------------------------------
+// §2.6 / §2.13 — structs, fields, value semantics
+// ----------------------------------------------------------------------------
+
+int checkStructs() {
+    int failures = 0
+
+    // Named-field construction across lines, newline-delimited (§2.6).
+    vec2 pos = vec2(
+        x: 10.0
+        y: 5.0
+    )
+    // The same construction on one line with commas (§10.4 style).
+    vec2 flat = vec2(x: 10.0, y: 5.0)
+    failures += expect(pos == flat)
+
+    player hero = player(
+        name: "Hero"
+        position: pos
+        health: 100
+        alive: true
+    )
+
+    // Field access (§2.11 distance example style).
+    failures += expect(hero.health == 100)
+    failures += expect(hero.position.x == 10.0)
+
+    // Field assignment (§2.13) and compound assignment to a field (§A.7).
+    hero.health -= 10
+    failures += expect(hero.health == 90)
+    hero.position.x = 12.5
+    failures += expect(hero.position.x == 12.5)
+
+    // Value semantics (§2.13): damage returns an updated copy; the caller's
+    // instance is untouched, so the update must be re-assigned to apply.
+    player hurt = damage(hero, 60)
+    failures += expect(hurt.health == 30)
+    failures += expect(hero.health == 90)
+    failures += expect(hurt.alive == true)
+
+    // Struct equality is structural (§A.4).
+    player hero2 = player(name: "Hero", position: vec2(x: 12.5, y: 5.0), health: 90, alive: true)
+    failures += expect(hero == hero2)
+
+    // A struct with an array field, a struct field, and deep mutation.
+    party squad = party(
+        name: "alpha"
+        scores: [10, 20, 30]
+        leader: hero
+    )
+    squad.leader.position.x = 40.0
+    squad.scores[1] += 5
+    squad.scores[0] = squad.scores[0] * 2
+    failures += expect(squad.leader.position.x == 40.0)
+    failures += expect(squad.scores[1] == 25)
+    failures += expect(squad.scores[0] == 20)
+    // squad.leader is a copy of hero (value semantics, §2.13).
+    failures += expect(hero.position.x == 12.5)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §2.9 — generics
+// ----------------------------------------------------------------------------
+
+int checkGenerics() {
+    int failures = 0
+
+    pair<int, str> pr = pair(
+        first: 7
+        second: "seven"
+    )
+    failures += expect(pr.first == 7)
+    failures += expect(pr.second == "seven")
+
+    // Nested generic arguments close with two separate `>` tokens.
+    pair<int, pair<str, bool>> nested = pair(first: 1, second: pair(first: "x", second: true))
+    failures += expect(nested.second.first == "x")
+    failures += expect(nested.second.second == true)
+
+    pair<vec2, vec2> box = pair(
+        first: vec2(x: 1.0, y: 2.0)
+        second: vec2(x: 3.0, y: 4.0)
+    )
+    failures += expect(distanceSq(box.first, box.second) == 8.0)
+
+    // Generic enums crystallize their arguments from payloads (§2.9).
+    maybe<vec2> spot = maybe.Just(vec2(x: 8.0, y: 9.0))
+    match (spot) {
+        Just(vec2 p) => {
+            failures += expect(p.x == 8.0)
+        }
+        Nothing() => {
+            failures += 1
+        }
+    }
+
+    // Payload-free constructors pin their arguments from the declared type.
+    maybe<int> absent = maybe.Nothing()
+    match (absent) {
+        Just(int v) => { failures += 1 }
+        Nothing() => {}
+    }
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §2.7 / §2.15 — enums and pattern matching
+// ----------------------------------------------------------------------------
+
+int checkEnums() {
+    int failures = 0
+
+    gameEvent evt = gameEvent.Spawn("goblin", vec2(x: 2.0, y: 3.0))
+    failures += expect(describeEvent(evt) == "spawn:goblin@2,3")
+
+    // match as an initializer, exhaustive without a wildcard (§2.15).
+    str label = match (evt) {
+        Damage(int amount) => "damage:" + amount
+        Heal(int amount) => "heal:" + amount
+        Spawn(str enemyKind, vec2 position) => $"spawn:{enemyKind}@{position.x},{position.y}"
+        PlayerDied() => "died"
+    }
+    failures += expect(label == "spawn:goblin@2,3")
+
+    // match as a statement whose arms transfer control (§2.14/§2.15).
+    failures += expect(classifyEvent(evt) == 3)
+    failures += expect(classifyEvent(gameEvent.Damage(25)) == 1)
+    failures += expect(classifyEvent(gameEvent.PlayerDied()) == 4)
+
+    // A wildcard arm with match in return position.
+    failures += expect(isDamage(gameEvent.Damage(1)))
+    failures += expect(!isDamage(gameEvent.Heal(2)))
+
+    // Structural equality on enums (§A.4).
+    failures += expect(gameEvent.Damage(5) == gameEvent.Damage(5))
+    failures += expect(gameEvent.Damage(5) != gameEvent.Damage(6))
+
+    // An enum stored in a struct field, matched through the field (§2.6).
+    combatLog entry = combatLog(event: gameEvent.Heal(9), tick: 42)
+    failures += expect(entry.tick == 42)
+    match (entry.event) {
+        Heal(int amount) => { failures += expect(amount == 9) }
+        _ => { failures += 1 }
+    }
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §2.8 — option, result, and the ? operator
+// ----------------------------------------------------------------------------
+
+int checkOptionResult() {
+    int failures = 0
+
+    int[] values = [3, 9, 14, 20]
+    option<int> found = findEven(values)
+    match (found) {
+        Some(int v) => { failures += expect(v == 14) }
+        None() => { failures += 1 }
+    }
+
+    option<int> missing = findEven([1, 3, 5])
+    match (missing) {
+        Some(int v) => { failures += 1 }
+        None() => {}
+    }
+
+    failures += expect(optionOrDefault([3, 9, 14], -1) == 14)
+    failures += expect(optionOrDefault([1, 3], -1) == -1)
+
+    // The ? operator unwraps Ok and propagates Err with the exact error
+    // type of the enclosing function (§2.8).
+    result<int, str> good = chain(64, 4, 2)
+    match (good) {
+        Ok(int total) => { failures += expect(total == 24) }
+        Err(str reason) => { failures += 1 }
+    }
+
+    result<int, str> bad = chain(64, 0, 2)
+    match (bad) {
+        Ok(int total) => { failures += 1 }
+        Err(str reason) => { failures += expect(reason == "division by zero") }
+    }
+
+    result<int, str> deep = deepChain(100, 5, 2)
+    match (deep) {
+        Ok(int v) => { failures += expect(v == 12) }
+        Err(str reason) => { failures += 1 }
+    }
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §11 / §2.14 — arrays and for-in
+// ----------------------------------------------------------------------------
+
+int checkArrays() {
+    int failures = 0
+
+    // Comma-separated literal.
+    int[] evens = [2, 4, 6, 8]
+    failures += expect(evens.length == 4)
+    failures += expect(evens[0] == 2)
+    failures += expect(evens[3] == 8)
+
+    // Newline-delimited literal (CMON style, §11.1).
+    int[] odds = [
+        1
+        3
+        5
+    ]
+    failures += expect(odds.length == 3)
+
+    // for-in iteration (§2.14).
+    failures += expect(sumAll(odds) == 9)
+
+    // Nested arrays and index chains.
+    int[][] grid = [
+        [1, 2]
+        [3, 4]
+    ]
+    failures += expect(grid[1][0] == 3)
+    grid[0][1] = 20
+    failures += expect(grid[0][1] == 20)
+
+    // Arrays of structs; field access through an index (§11.1).
+    vec2[] points = [
+        vec2(x: 1.0, y: 2.0)
+        vec2(x: 3.0, y: 4.0)
+    ]
+    failures += expect(points[1].x == 3.0)
+    points[1] = vec2(x: 30.0, y: 40.0)
+    failures += expect(points[1].y == 40.0)
+
+    // Value semantics: arrays are cloned on assignment (§2.13).
+    int[] copy = evens
+    copy[0] = 99
+    failures += expect(evens[0] == 2)
+
+    // Parameters receive copies too.
+    resetFirst(odds)
+    failures += expect(odds[0] == 1)
+
+    // Empty collections need a declared type (§2.16 rejects `infer x = []`).
+    int[] empty = []
+    failures += expect(empty.length == 0)
+
+    // `infer` crystallizes the element type from the literal (§2.16).
+    infer triples = [3, 6, 9]
+    failures += expect(triples.length == 3)
+    triples[0] = 10
+    failures += expect(triples[0] == 10)
+
+    // Array equality is element-wise (§A.4 value equality).
+    failures += expect([1, 2] == [1, 2])
+    failures += expect(evens != odds)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §11 — maps
+// ----------------------------------------------------------------------------
+
+int checkMaps() {
+    int failures = 0
+
+    map<str, int> loot = {
+        "gold": 120
+        "gems": 3
+    }
+    failures += expect(loot["gold"] == 120)
+
+    // Index read, compound index write, and insert via index assignment.
+    loot["gold"] += 30
+    failures += expect(loot["gold"] == 150)
+    loot["arrows"] = 60
+    failures += expect(loot["arrows"] == 60)
+
+    // One-line comma-separated form.
+    map<str, int> tally = {"a": 1, "b": 2}
+    failures += expect(tally["b"] == 2)
+
+    // Maps with struct values (§11.1 settings shape).
+    map<str, vec2> spawns = {
+        "goblin": vec2(x: 2.0, y: 3.0)
+        "orc": vec2(x: 4.0, y: 5.0)
+    }
+    failures += expect(spawns["goblin"].y == 3.0)
+    spawns["orc"].x = 40.0
+    failures += expect(spawns["orc"].x == 40.0)
+
+    // Non-str keys.
+    map<int, str> names = {
+        1: "one"
+        2: "two"
+    }
+    failures += expect(names[2] == "two")
+
+    // An empty map literal with a declared key/value type.
+    map<str, int> fresh = {}
+    fresh["k"] = 1
+    failures += expect(fresh["k"] == 1)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// $"..." — string interpolation
+// ----------------------------------------------------------------------------
+
+int checkInterpolation() {
+    int failures = 0
+
+    int hp = 100
+    vec2 p = vec2(x: 3.5, y: -1.5)
+    bool armed = true
+
+    // Scalar islands.
+    str s1 = $"hp={hp}"
+    failures += expect(s1 == "hp=100")
+
+    // Field islands and expression islands.
+    str s2 = $"pos=({p.x},{p.y})"
+    failures += expect(s2 == "pos=(3.5,-1.5)")
+
+    // Operator expressions, calls, and bool stringification (§A.6).
+    str s3 = $"score={hp * 2 + 1} next={fib(7)} armed={armed}"
+    failures += expect(s3 == "score=201 next=13 armed=true")
+
+    // Escapes still decode inside literal parts (§2.2).
+    str s4 = $"line1\nline2 hp={hp}"
+    failures += expect(s4 == "line1\nline2 hp=100")
+
+    // Interpolation composes with concatenation.
+    str s5 = "report: " + $"hp={hp}"
+    failures += expect(s5 == "report: hp=100")
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §2.12 — positional and named arguments
+// ----------------------------------------------------------------------------
+
+int checkNamedArgs() {
+    int failures = 0
+
+    // Positional (§2.12).
+    failures += expect(clamp(15, 0, 10) == 10)
+    // Named on one line with commas (§4.2 generated-code style).
+    failures += expect(clamp(value: 15, low: 0, high: 10) == 10)
+    // Named across lines, newline-delimited (§2.12).
+    failures += expect(clamp(
+        value: -5
+        low: 0
+        high: 10
+    ) == 0)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §2.16 — type crystallization with `infer`
+// ----------------------------------------------------------------------------
+
+int checkInfer() {
+    int failures = 0
+
+    infer health = 100
+    infer speed = 4.5
+    infer name = "Hero"
+    infer active = true
+    infer pos = vec2(x: 1.0, y: 2.0)
+    infer evt = gameEvent.Damage(7)
+    infer numbers = [1, 2, 3]
+    infer tally = {"k": 4}
+    infer computed = fib(9)
+
+    health += 5
+    speed *= 2.0
+    name += "!"
+    numbers[0] = 10
+
+    failures += expect(health == 105)
+    failures += expect(speed == 9.0)
+    failures += expect(name == "Hero!")
+    failures += expect(pos.y == 2.0)
+    match (evt) {
+        Damage(int amount) => { failures += expect(amount == 7) }
+        _ => { failures += 1 }
+    }
+    failures += expect(numbers[0] == 10)
+    failures += expect(tally["k"] == 4)
+    failures += expect(computed == 34)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// Appendix A — operators and evaluation semantics
+// ----------------------------------------------------------------------------
+
+int checkOperators() {
+    int failures = 0
+
+    // §A.2 precedence and associativity.
+    failures += expect(1 + 2 * 3 == 7)
+    failures += expect(10 - 4 - 3 == 3)
+    failures += expect(-3 * 4 == -12)
+    failures += expect(!!true)
+
+    // §A.5 integer division and remainder truncate toward zero.
+    failures += expect(7 / 2 == 3)
+    failures += expect(-7 / 2 == -3)
+    failures += expect(-7 % 2 == -1)
+    failures += expect(7 % -2 == 1)
+    failures += expect(7.0 / 2.0 == 3.5)
+
+    // §A.5 short-circuiting: the right operand is never evaluated here.
+    bool t = true
+    bool f = false
+    bool sc = f && 1 / 0 == 1
+    bool sc2 = t || 1 / 0 == 1
+    failures += expect(sc == false)
+    failures += expect(sc2)
+
+    // §A.6 stringification inside concatenation.
+    str concat1 = "HP: " + 100
+    failures += expect(concat1 == "HP: 100")
+    str concat2 = "ok: " + true
+    failures += expect(concat2 == "ok: true")
+    str concat3 = 1.5 + "x"
+    failures += expect(concat3 == "1.5x")
+    str concat4 = "a" + 1 + 2
+    failures += expect(concat4 == "a12")
+    str concat5 = 1 + 2 + "a"
+    failures += expect(concat5 == "3a")
+
+    // §A.7 compound assignment expands exactly.
+    int x = 10
+    x += 5
+    x -= 3
+    x *= 2
+    x /= 7
+    x %= 3
+    failures += expect(x == 0)
+
+    // §A.3 mixing logical operators requires parentheses.
+    bool mix = (t && f) || t
+    failures += expect(mix)
+
+    // §A.2 unary operators nest freely: --x is -(-x).
+    int n = 5
+    failures += expect(--n == 5)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// §2.14 — control flow
+// ----------------------------------------------------------------------------
+
+int checkControl() {
+    int failures = 0
+
+    int count = 0
+    int total = 0
+    while (count < 5) {
+        total += fib(count)
+        count += 1
+    }
+    failures += expect(total == 7)
+
+    failures += expect(grade(95) == "A")
+    failures += expect(grade(85) == "B")
+    failures += expect(grade(75) == "C")
+    failures += expect(grade(42) == "F")
+
+    failures += expect(sumDown(5) == 15)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
+// Entry point (CLI convention — the host picks the target, §2.1)
+// ----------------------------------------------------------------------------
+
+int main() {
+    int failures = 0
+    failures += checkStructs()
+    failures += checkGenerics()
+    failures += checkEnums()
+    failures += checkOptionResult()
+    failures += checkArrays()
+    failures += checkMaps()
+    failures += checkInterpolation()
+    failures += checkNamedArgs()
+    failures += checkInfer()
+    failures += checkOperators()
+    failures += checkControl()
+    ping()
+    return failures
+}

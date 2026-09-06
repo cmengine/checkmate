@@ -1512,10 +1512,11 @@ impl<'a, 'src> Parser<'a, 'src> {
         {
             self.advance();
             self.advance();
-            return Some(self.parse_type_array_suffixes(Type::Named {
+            let array = Type::Array(Box::new(Type::Named {
                 name: name.to_string(),
                 args: Vec::new(),
             }));
+            return Some(self.parse_type_array_suffixes(array));
         }
         Some(Type::Named {
             name: name.to_string(),

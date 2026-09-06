@@ -1,119 +1,183 @@
-//! The static type checker for the basic subset. Normative sources:
-//! WHITEPAPER §2.10–2.16 for declarations, functions, control flow, and
-//! `infer` crystallization; Appendix A (§A.4–§A.7) for operand typing,
+//! The static type checker for the full language surface. Normative sources:
+//! WHITEPAPER §2.6–§2.16 for declarations, structs, enums, generics, option /
+//! result, control flow, pattern matching, and `infer` crystallization;
+//! §11 for arrays and maps; Appendix A (§A.4–§A.7) for operand typing,
 //! string concatenation, and compound assignment.
 //!
-//! The checker is two-pass: all function signatures are collected first
-//! (so forward references and recursion resolve), then bodies are checked
-//! against per-function scopes. It runs on any input: [`Invalid`] nodes
-//! and untypable regions are skipped without cascading — a declaration
-//! with a broken initializer still declares its name, and nothing inside
-//! a broken subtree is reported twice. Function declarations are legal
-//! only at top level: nested ones are reported and their bodies skipped.
+//! The checker is two-pass: all top-level declarations — functions AND types
+//! — are collected first (so forward references, recursion, and
+//! mutually-referencing types resolve), then bodies and members are checked
+//! against per-function scopes. It runs on any input: [`Invalid`] nodes and
+//! untypable regions are skipped without cascading — a declaration with a
+//! broken initializer still declares its name, and nothing inside a broken
+//! subtree is reported twice.
+//!
+//! Types resolve to [`Ty`]: the four scalars, `void`, and structural
+//! references into a registry of the program's struct and enum
+//! declarations. The built-in generic enums `option<T>` and `result<T, E>`
+//! are registered before user declarations, and their constructor names
+//! (`Ok`, `Err`, `Some`, `None`) plus the type names `option`, `result`,
+//! and `map` are reserved.
+//!
+//! Constructor typing is bidirectional where the whitepaper requires it: a
+//! payload-free or one-sided constructor (`None()`, `Ok(v)`, `Err(e)`)
+//! crystallizes its missing type argument from the expected type of its
+//! context — the declared type of a variable, a function's return type, a
+//! parameter, a field, or a collection element (§2.8, §2.16).
 //!
 //! ```
 //! let outcome = cme_compiler::parse_source("int f() {\nint hp = 100\nhp += 5\nreturn hp\n}\n");
 //! assert!(cme_compiler::check::check(&outcome.statements).is_empty());
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::diagnostics::Diagnostic;
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, LValue, Param, PrimitiveType, Stmt,
-    StmtKind, Type, UnaryOp,
+    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, FieldDef, LValue, Param, Pattern,
+    PrimitiveType, Stmt, StmtKind, Type, UnaryOp, VariantDecl,
 };
 
-/// A function signature collected in the first pass. `poisoned` marks a
-/// signature the checker cannot use (an `infer` return type or an
-/// `infer`/`void` parameter — both already rejected at parse level);
-/// poisoned functions stay in the table so calls to them resolve silently
-/// instead of reporting phantom "unknown function" errors.
+/// A registered struct declaration (§2.6, §2.9).
+#[derive(Clone)]
+struct StructDef {
+    name: String,
+    params: Vec<String>,
+    fields: Vec<FieldDef>,
+}
+
+/// A registered enum declaration (§2.7, §2.9).
+#[derive(Clone)]
+struct EnumDef {
+    name: String,
+    params: Vec<String>,
+    variants: Vec<VariantDecl>,
+}
+
+/// One registered type declaration, in declaration order.
+#[derive(Clone)]
+enum TypeDef {
+    Struct(StructDef),
+    Enum(EnumDef),
+}
+
+impl TypeDef {
+    fn name_str(&self) -> &str {
+        match self {
+            TypeDef::Struct(def) => &def.name,
+            TypeDef::Enum(def) => &def.name,
+        }
+    }
+
+    fn params(&self) -> &[String] {
+        match self {
+            TypeDef::Struct(def) => &def.params,
+            TypeDef::Enum(def) => &def.params,
+        }
+    }
+}
+
+/// A function signature collected in the first pass, with its parameter and
+/// return types already resolved. `poisoned` marks a signature the checker
+/// cannot use (unresolvable types, or an `infer`/`void` placement — both
+/// already rejected at parse level); poisoned functions stay in the table
+/// so calls to them resolve silently instead of reporting phantom errors.
+#[derive(Clone)]
 struct FnSig {
-    params: Vec<Param>,
-    return_ty: Type,
+    params: Vec<(String, Ty)>,
+    return_ty: Ty,
     poisoned: bool,
 }
 
-/// The type of an expression during checking. `Void` only arises from
-/// calling a void function where a value is needed (§2.4: void returns no
-/// value). `Poison` marks a region already reported or unrecoverable
-/// (an [`Invalid`] subtree, an untypable initializer); every check against
-/// it passes silently so recovery diagnostics never cascade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValueTy {
+/// The resolved type of an expression or declaration.
+#[derive(Debug, Clone, PartialEq)]
+enum Ty {
     Int,
     Float,
     Bool,
     Str,
     Void,
+    /// Already reported or unrecoverable; every check against it passes
+    /// silently so recovery diagnostics never cascade.
     Poison,
+    /// The initializer could not crystallize a type on its own (an empty
+    /// collection, a bare `None()`): like `Poison` everywhere, except the
+    /// `infer` declaration path turns it into the §2.16 message.
+    Ambiguous,
+    Struct(usize, Vec<Ty>),
+    Enum(usize, Vec<Ty>),
+    Array(Box<Ty>),
+    Map(Box<Ty>, Box<Ty>),
 }
 
-impl ValueTy {
-    fn name(self) -> &'static str {
+impl Ty {
+    fn is_poison(&self) -> bool {
+        matches!(self, Ty::Poison | Ty::Ambiguous)
+    }
+
+    /// True when any type argument inside is poison.
+    fn has_poison(&self) -> bool {
         match self {
-            ValueTy::Int => "int",
-            ValueTy::Float => "float",
-            ValueTy::Bool => "bool",
-            ValueTy::Str => "str",
-            ValueTy::Void => "void",
-            ValueTy::Poison => "poison",
+            Ty::Poison | Ty::Ambiguous => true,
+            Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().any(Ty::has_poison),
+            Ty::Array(elem) => elem.has_poison(),
+            Ty::Map(key, value) => key.has_poison() || value.has_poison(),
+            _ => false,
+        }
+    }
+
+    /// The canonical type name for diagnostics (§A.6 display rules).
+    fn name(&self, registry: &[TypeDef]) -> String {
+        match self {
+            Ty::Int => "int".into(),
+            Ty::Float => "float".into(),
+            Ty::Bool => "bool".into(),
+            Ty::Str => "str".into(),
+            Ty::Void => "void".into(),
+            Ty::Poison => "poison".into(),
+            Ty::Ambiguous => "ambiguous".into(),
+            Ty::Struct(idx, args) | Ty::Enum(idx, args) => {
+                let def_name = registry
+                    .get(*idx)
+                    .map(|def| def.name_str().to_string())
+                    .unwrap_or_default();
+                if args.is_empty() {
+                    def_name
+                } else {
+                    let inner: Vec<String> = args.iter().map(|arg| arg.name(registry)).collect();
+                    format!("{def_name}<{}>", inner.join(", "))
+                }
+            }
+            Ty::Array(elem) => format!("{}[]", elem.name(registry)),
+            Ty::Map(key, value) => {
+                format!("map<{}, {}>", key.name(registry), value.name(registry))
+            }
         }
     }
 }
 
-impl std::fmt::Display for ValueTy {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.name())
-    }
-}
+/// The constructor names of the built-in enums (§2.8), which no user
+/// declaration may take.
+const BUILTIN_CONSTRUCTORS: [&str; 4] = ["Ok", "Err", "Some", "None"];
 
-fn value_ty_of(ty: &Type) -> ValueTy {
-    match ty {
-        Type::Prim(PrimitiveType::Int) => ValueTy::Int,
-        Type::Prim(PrimitiveType::Float) => ValueTy::Float,
-        Type::Prim(PrimitiveType::Bool) => ValueTy::Bool,
-        Type::Prim(PrimitiveType::Str) => ValueTy::Str,
-        Type::Void => ValueTy::Void,
-        // Named, array, and map types carry no scalar type; the full-surface
-        // checker resolves them. Hand-built trees see poison here.
-        Type::Infer | Type::Named { .. } | Type::Array(_) | Type::Map { .. } => ValueTy::Poison,
-    }
-}
+/// Type names the language owns (§2.8, §11); user declarations may not
+/// take them.
+const RESERVED_TYPE_NAMES: [&str; 3] = ["option", "result", "map"];
 
-/// The variable name of a plain `Var` lvalue target, if any.
-fn var_target_name(target: &LValue) -> Option<&str> {
-    match target {
-        LValue::Var { name } => Some(name),
-        LValue::Field { .. } | LValue::Index { .. } => None,
-    }
-}
-
-/// True when a function's signature is unusable by the checker: `infer`
-/// as a return type (§2.16: local declarations only) or `infer`/`void`
-/// as a parameter type (§1: parameters are explicitly typed). Both are
-/// parse-level errors already; poisoning only prevents cascades.
-fn signature_poisoned(return_ty: &Type, params: &[Param]) -> bool {
-    *return_ty == Type::Infer
-        || params
-            .iter()
-            .any(|param| matches!(param.ty, Type::Infer | Type::Void))
-}
-
-/// Type-checks a whole program. Returns every violation found; the list
-/// is empty exactly when the program satisfies §2.10–2.16 and §A.4–§A.7
-/// for the basic subset.
+/// Type-checks a whole program. Returns every violation found; the list is
+/// empty exactly when the program satisfies §2.6–§2.16, §11, and §A.4–§A.7.
 pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
     let mut checker = Checker::new();
 
-    // Pass 1: top-level shape and function signatures. Forward references
-    // and recursion resolve because every signature is registered before
-    // any body is visited. Only the first registration of a name wins:
-    // later duplicates are reported here and skipped everywhere else,
-    // exactly like the calls that resolve to the first registration.
-    let mut registered: Vec<usize> = Vec::new();
+    // Pass 1: register every top-level declaration. Forward references and
+    // recursion resolve because every signature and type is registered
+    // before any body or member is visited. Only the first registration of
+    // a name wins: later duplicates are reported here and skipped
+    // everywhere else, exactly like the calls that resolve to the first
+    // registration.
+    let mut function_bodies: Vec<usize> = Vec::new();
+    let mut type_members: Vec<usize> = Vec::new();
     for (index, statement) in statements.iter().enumerate() {
         match &statement.kind {
             StmtKind::FuncDecl {
@@ -122,46 +186,58 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
                 return_ty,
                 ..
             } => {
-                if checker.functions.contains_key(name) {
-                    checker.report(format!("duplicate function `{name}`"), statement.span);
-                } else {
-                    checker.check_duplicate_params(params, statement.span);
-                    checker.functions.insert(
-                        name.clone(),
-                        FnSig {
-                            params: params.clone(),
-                            return_ty: return_ty.clone(),
-                            poisoned: signature_poisoned(return_ty, params),
-                        },
-                    );
-                    registered.push(index);
+                if checker.declaration_name_conflicts(name, statement.span) {
+                    continue;
                 }
+                checker.check_duplicate_params(params, statement.span);
+                checker.register_function(name, params, return_ty, statement.span);
+                function_bodies.push(index);
+            }
+            StmtKind::StructDecl {
+                name,
+                type_params,
+                fields,
+            } => {
+                if checker.declaration_name_conflicts(name, statement.span) {
+                    continue;
+                }
+                checker.register_struct(name, type_params, fields, statement.span);
+                type_members.push(index);
+            }
+            StmtKind::EnumDecl {
+                name,
+                type_params,
+                variants,
+            } => {
+                if checker.declaration_name_conflicts(name, statement.span) {
+                    continue;
+                }
+                checker.register_enum(name, type_params, variants, statement.span);
+                type_members.push(index);
             }
             // Already reported at parse level; never cascaded here.
             StmtKind::Invalid { .. } => {}
             _ => checker.report(
-                "only function declarations are allowed at top level",
+                "only function and type declarations are allowed at top level",
                 statement.span,
             ),
         }
     }
 
-    // Pass 2: bodies, each against its own signature and fresh scopes. A
-    // duplicate's body is not checked: calls resolve to the first
+    // Pass 2: bodies and members, each against its own signature and fresh
+    // scopes. A duplicate's body is not checked: calls resolve to the first
     // registration, so a dead definition's errors would only be noise on
     // top of the duplicate report.
-    for index in registered {
+    for index in function_bodies {
         if let StmtKind::FuncDecl {
-            name,
-            params,
-            return_ty,
-            body,
-            ..
+            name, params, body, ..
         } = &statements[index].kind
-            && !signature_poisoned(return_ty, params)
         {
-            checker.check_function(name, params, return_ty, body);
+            checker.check_function(name, params, body);
         }
+    }
+    for index in type_members {
+        checker.check_type_members(&statements[index]);
     }
 
     checker.diagnostics
@@ -170,26 +246,95 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
 struct Checker {
     diagnostics: Vec<Diagnostic>,
     functions: HashMap<String, FnSig>,
-    /// Scope stack for the function currently being checked. Index 0
-    /// holds the parameters together with the body's top-level statements
+    /// The registry of type declarations, in registration order. Indices 0
+    /// and 1 are the built-in `option` and `result`.
+    types: Vec<TypeDef>,
+    type_index: HashMap<String, usize>,
+    /// Scope stack for the function currently being checked. Index 0 holds
+    /// the parameters together with the body's top-level statements
     /// (redeclaring a parameter there is a duplicate, not a shadow).
-    scopes: Vec<HashMap<String, ValueTy>>,
-    /// The function whose body is being checked, for `return` validation.
-    current_fn: Option<(String, Type)>,
+    scopes: Vec<HashMap<String, Ty>>,
+    /// The function whose body is being checked, for `return` and `?`
+    /// validation.
+    current_fn: Option<(String, Ty)>,
 }
 
 impl Checker {
     fn new() -> Self {
-        Self {
+        let mut checker = Self {
             diagnostics: Vec::new(),
             functions: HashMap::new(),
+            types: Vec::new(),
+            type_index: HashMap::new(),
             scopes: Vec::new(),
             current_fn: None,
-        }
+        };
+        checker.register_builtin(
+            "option",
+            &["T"],
+            &[("Some", &[("T", "value")]), ("None", &[])],
+        );
+        checker.register_builtin(
+            "result",
+            &["T", "E"],
+            &[("Ok", &[("T", "value")]), ("Err", &[("E", "error")])],
+        );
+        checker
+    }
+
+    /// Registers one built-in generic enum (§2.8).
+    fn register_builtin(
+        &mut self,
+        name: &str,
+        params: &[&str],
+        variants: &[(&str, &[(&str, &str)])],
+    ) {
+        let def = EnumDef {
+            name: name.to_string(),
+            params: params.iter().map(|p| p.to_string()).collect(),
+            variants: variants
+                .iter()
+                .map(|(variant, fields)| VariantDecl {
+                    name: variant.to_string(),
+                    fields: fields
+                        .iter()
+                        .map(|(ty, fname)| FieldDef {
+                            ty: Type::Named {
+                                name: ty.to_string(),
+                                args: Vec::new(),
+                            },
+                            name: fname.to_string(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let idx = self.types.len();
+        self.types.push(TypeDef::Enum(def));
+        self.type_index.insert(name.to_string(), idx);
     }
 
     fn report(&mut self, message: impl Into<String>, span: Span) {
         self.diagnostics.push(Diagnostic::type_error(message, span));
+    }
+
+    /// The display name of a registry type (for messages).
+    /// True when the name collides with an existing function, type, or
+    /// reserved builtin name; the collision is reported here.
+    fn declaration_name_conflicts(&mut self, name: &str, span: Span) -> bool {
+        if BUILTIN_CONSTRUCTORS.contains(&name) || RESERVED_TYPE_NAMES.contains(&name) {
+            self.report(format!("`{name}` is a reserved builtin name"), span);
+            return true;
+        }
+        if self.functions.contains_key(name) {
+            self.report(format!("duplicate function `{name}`"), span);
+            return true;
+        }
+        if self.type_index.contains_key(name) {
+            self.report(format!("duplicate type `{name}`"), span);
+            return true;
+        }
+        false
     }
 
     fn check_duplicate_params(&mut self, params: &[Param], span: Span) {
@@ -203,12 +348,249 @@ impl Checker {
         }
     }
 
-    fn check_function(&mut self, name: &str, params: &[Param], return_ty: &Type, body: &Block) {
-        self.current_fn = Some((name.to_string(), return_ty.clone()));
+    fn register_function(&mut self, name: &str, params: &[Param], return_ty: &Type, span: Span) {
+        let resolved: Vec<(String, Ty)> = params
+            .iter()
+            .map(|param| (param.name.clone(), self.resolve_type(&param.ty, span)))
+            .collect();
+        let ret = self.resolve_type(return_ty, span);
+        let poisoned = resolved.iter().any(|(_, ty)| ty.is_poison()) || ret.is_poison();
+        self.functions.insert(
+            name.to_string(),
+            FnSig {
+                params: resolved,
+                return_ty: ret,
+                poisoned,
+            },
+        );
+    }
+
+    fn register_struct(
+        &mut self,
+        name: &str,
+        type_params: &[String],
+        fields: &[FieldDef],
+        span: Span,
+    ) {
+        self.check_duplicate_type_params(name, type_params, span);
+        let mut seen: Vec<&str> = Vec::new();
+        for field in fields {
+            if seen.contains(&field.name.as_str()) {
+                self.report(
+                    format!("duplicate field `{}` in struct `{name}`", field.name),
+                    span,
+                );
+            } else {
+                seen.push(&field.name);
+            }
+        }
+        let idx = self.types.len();
+        self.types.push(TypeDef::Struct(StructDef {
+            name: name.to_string(),
+            params: type_params.to_vec(),
+            fields: fields.to_vec(),
+        }));
+        self.type_index.insert(name.to_string(), idx);
+    }
+
+    fn register_enum(
+        &mut self,
+        name: &str,
+        type_params: &[String],
+        variants: &[VariantDecl],
+        span: Span,
+    ) {
+        self.check_duplicate_type_params(name, type_params, span);
+        let mut seen: Vec<&str> = Vec::new();
+        for variant in variants {
+            if seen.contains(&variant.name.as_str()) {
+                self.report(
+                    format!("duplicate variant `{}` in enum `{name}`", variant.name),
+                    span,
+                );
+            } else {
+                seen.push(&variant.name);
+                let mut bound: Vec<&str> = Vec::new();
+                for field in &variant.fields {
+                    if bound.contains(&field.name.as_str()) {
+                        self.report(
+                            format!(
+                                "duplicate payload name `{}` in variant `{}` of enum `{name}`",
+                                field.name, variant.name
+                            ),
+                            span,
+                        );
+                    } else {
+                        bound.push(&field.name);
+                    }
+                }
+            }
+        }
+        let idx = self.types.len();
+        self.types.push(TypeDef::Enum(EnumDef {
+            name: name.to_string(),
+            params: type_params.to_vec(),
+            variants: variants.to_vec(),
+        }));
+        self.type_index.insert(name.to_string(), idx);
+    }
+
+    fn check_duplicate_type_params(&mut self, name: &str, params: &[String], span: Span) {
+        let mut seen: Vec<&str> = Vec::new();
+        for param in params {
+            if seen.contains(&param.as_str()) {
+                self.report(
+                    format!("duplicate type parameter `{param}` in `{name}`"),
+                    span,
+                );
+            } else {
+                seen.push(param);
+            }
+        }
+    }
+
+    /// Pass-2 validation of a type declaration's member types: every type
+    /// reference must resolve, and type parameters must be used bare.
+    fn check_type_members(&mut self, statement: &Stmt) {
+        let span = statement.span;
+        match &statement.kind {
+            StmtKind::StructDecl {
+                type_params,
+                fields,
+                ..
+            } => {
+                for field in fields {
+                    self.validate_decl_type(&field.ty, type_params, span);
+                }
+            }
+            StmtKind::EnumDecl {
+                type_params,
+                variants,
+                ..
+            } => {
+                for variant in variants {
+                    for field in &variant.fields {
+                        self.validate_decl_type(&field.ty, type_params, span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn validate_decl_type(&mut self, ty: &Type, params: &[String], span: Span) {
+        match ty {
+            Type::Array(elem) => self.validate_decl_type(elem, params, span),
+            Type::Map { key, value } => {
+                self.validate_decl_type(key, params, span);
+                self.validate_decl_type(value, params, span);
+            }
+            Type::Named { name, args } => {
+                if params.iter().any(|p| p == name) {
+                    if !args.is_empty() {
+                        self.report(
+                            format!("type parameter `{name}` cannot take arguments"),
+                            span,
+                        );
+                    }
+                    return;
+                }
+                match self.type_index.get(name) {
+                    None => self.report(format!("unknown type `{name}`"), span),
+                    Some(&idx) => {
+                        let expected = self.types[idx].params().len();
+                        if args.len() != expected {
+                            self.report(
+                                format!(
+                                    "wrong number of type arguments for `{name}`: expected {expected}, found {}",
+                                    args.len()
+                                ),
+                                span,
+                            );
+                        }
+                    }
+                }
+                for arg in args {
+                    self.validate_decl_type(arg, params, span);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Resolves a declared type at a use site (no type parameters in
+    /// scope).
+    fn resolve_type(&mut self, ty: &Type, span: Span) -> Ty {
+        self.subst_type(ty, &[], &[], span)
+    }
+
+    /// Resolves a declared type with `params` substituted by `args` (§2.9).
+    /// An unbound parameter resolves to `Poison` — the enclosing
+    /// declaration's members are validated separately.
+    fn subst_type(&mut self, ty: &Type, params: &[String], args: &[Ty], span: Span) -> Ty {
+        match ty {
+            Type::Infer => Ty::Poison,
+            Type::Void => Ty::Void,
+            Type::Prim(PrimitiveType::Int) => Ty::Int,
+            Type::Prim(PrimitiveType::Float) => Ty::Float,
+            Type::Prim(PrimitiveType::Bool) => Ty::Bool,
+            Type::Prim(PrimitiveType::Str) => Ty::Str,
+            Type::Array(elem) => Ty::Array(Box::new(self.subst_type(elem, params, args, span))),
+            Type::Map { key, value } => Ty::Map(
+                Box::new(self.subst_type(key, params, args, span)),
+                Box::new(self.subst_type(value, params, args, span)),
+            ),
+            Type::Named {
+                name,
+                args: type_args,
+            } => {
+                if let Some(pos) = params.iter().position(|p| p == name) {
+                    if !type_args.is_empty() {
+                        self.report(
+                            format!("type parameter `{name}` cannot take arguments"),
+                            span,
+                        );
+                        return Ty::Poison;
+                    }
+                    return args.get(pos).cloned().unwrap_or(Ty::Poison);
+                }
+                let Some(&idx) = self.type_index.get(name) else {
+                    self.report(format!("unknown type `{name}`"), span);
+                    return Ty::Poison;
+                };
+                let expected = self.types[idx].params().len();
+                if type_args.len() != expected {
+                    self.report(
+                        format!(
+                            "wrong number of type arguments for `{name}`: expected {expected}, found {}",
+                            type_args.len()
+                        ),
+                        span,
+                    );
+                    return Ty::Poison;
+                }
+                let resolved: Vec<Ty> = type_args
+                    .iter()
+                    .map(|arg| self.subst_type(arg, params, args, span))
+                    .collect();
+                if self.types[idx].is_struct() {
+                    Ty::Struct(idx, resolved)
+                } else {
+                    Ty::Enum(idx, resolved)
+                }
+            }
+        }
+    }
+
+    fn check_function(&mut self, name: &str, _params: &[Param], body: &Block) {
+        let Some(sig) = self.functions.get(name).cloned() else {
+            return;
+        };
+        self.current_fn = Some((name.to_string(), sig.return_ty.clone()));
 
         let mut scope = HashMap::new();
-        for param in params {
-            scope.insert(param.name.clone(), value_ty_of(&param.ty));
+        for (param_name, ty) in &sig.params {
+            scope.insert(param_name.clone(), ty.clone());
         }
         self.scopes.push(scope);
 
@@ -217,10 +599,10 @@ impl Checker {
         }
 
         // §2.11 + the owner ruling: a non-void function must not be able
-        // to fall off the end. Simple structural walk — an `if` without
-        // `else` does not count, `while` never counts, and `if`/`else`
-        // counts only when both branches transfer control.
-        if *return_ty != Type::Void && !block_returns(body) {
+        // to fall off the end. `while` and `for` never count, `if` without
+        // `else` does not count, `if`/`else` counts only when both branches
+        // transfer control, and a `match` counts only when every arm does.
+        if sig.return_ty != Ty::Void && !block_returns(body) {
             self.report(
                 format!("missing return in non-void function `{name}`"),
                 body.span,
@@ -243,7 +625,7 @@ impl Checker {
     /// the same scope and shadowing of an enclosing scope (owner ruling:
     /// shadowing is forbidden). A declaration enters scope *after* its
     /// own initializer, so callers type the initializer first.
-    fn declare(&mut self, name: &str, ty: ValueTy, span: Span) {
+    fn declare(&mut self, name: &str, ty: Ty, span: Span) {
         if let Some(index) = self
             .scopes
             .iter()
@@ -263,20 +645,20 @@ impl Checker {
         }
     }
 
-    fn lookup(&self, name: &str) -> Option<ValueTy> {
+    fn lookup(&self, name: &str) -> Option<Ty> {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(name).copied())
+            .find_map(|scope| scope.get(name).cloned())
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Invalid { .. } => {}
-            // Nested declarations parse (tolerance) but are illegal: the
-            // subset only has top-level function declarations. The body
-            // of the illegal declaration is skipped, and calls to its
-            // name stay unknown (it never registers).
+            // Nested declarations parse (tolerance) but are illegal: only
+            // the top level declares functions and types. The body of the
+            // illegal declaration is skipped, and calls to its name stay
+            // unknown (it never registers).
             StmtKind::FuncDecl { .. } => {
                 self.report(
                     "function declarations are only allowed at top level",
@@ -286,44 +668,55 @@ impl Checker {
             StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => {
                 self.report("type declarations are only allowed at top level", stmt.span);
             }
-            // For and match statements arrive with the full-surface parser;
-            // a hand-built tree reaching them here is skipped without a
-            // cascade.
-            StmtKind::For { .. } | StmtKind::Match { .. } => {}
             StmtKind::VarDecl { ty, name, expr } => {
                 // §2.16: the initializer is typed before the name exists,
-                // so `int a = a` reports the unknown name.
-                let init = self.type_expr(expr);
+                // so `int a = a` reports the unknown name. Where the
+                // declared type is known it threads into the initializer
+                // so bare constructors crystallize (§2.8).
                 match ty {
-                    Type::Infer => match init {
-                        ValueTy::Void => {
-                            self.report(
-                                format!("cannot infer type for '{name}'; void initializer"),
-                                stmt.span,
-                            );
-                            self.declare(name, ValueTy::Poison, stmt.span);
+                    Type::Infer => {
+                        let init = self.type_expr(expr, None);
+                        match init {
+                            Ty::Void => {
+                                self.report(
+                                    format!("cannot infer type for '{name}'; void initializer"),
+                                    stmt.span,
+                                );
+                                self.declare(name, Ty::Poison, stmt.span);
+                            }
+                            Ty::Ambiguous => {
+                                self.report(
+                                    format!(
+                                        "cannot infer type for '{name}'; ambiguous initializer"
+                                    ),
+                                    stmt.span,
+                                );
+                                self.declare(name, Ty::Poison, stmt.span);
+                            }
+                            other => self.declare(name, other, stmt.span),
                         }
-                        ValueTy::Poison => self.declare(name, ValueTy::Poison, stmt.span),
-                        crystallized => self.declare(name, crystallized, stmt.span),
-                    },
+                    }
                     // §2.4: void returns no value; parse rejects this from
                     // source, hand-built trees get the same message here.
                     Type::Void => {
+                        self.type_expr(expr, None);
                         self.report("`void` is only valid as a function return type", stmt.span);
-                        self.declare(name, ValueTy::Poison, stmt.span);
+                        self.declare(name, Ty::Poison, stmt.span);
                     }
-                    // Named, array, and map declared types arrive with the
-                    // full-surface checker; hand-built trees declare poison.
-                    Type::Named { .. } | Type::Array(_) | Type::Map { .. } => {
-                        let _ = init;
-                        self.declare(name, ValueTy::Poison, stmt.span);
-                    }
-                    Type::Prim(_) => {
-                        let declared = value_ty_of(ty);
-                        if init != ValueTy::Poison && init != declared {
+                    _ => {
+                        let declared = self.resolve_type(ty, stmt.span);
+                        let expected = if declared.is_poison() {
+                            None
+                        } else {
+                            Some(declared.clone())
+                        };
+                        let init = self.type_expr(expr, expected.as_ref());
+                        if !init.is_poison() && !declared.is_poison() && init != declared {
                             self.report(
                                 format!(
-                                    "type mismatch in declaration of `{name}`: expected `{declared}`, found `{init}`"
+                                    "type mismatch in declaration of `{name}`: expected `{}`, found `{}`",
+                                    declared.name(&self.types),
+                                    init.name(&self.types)
                                 ),
                                 stmt.span,
                             );
@@ -335,60 +728,53 @@ impl Checker {
                 }
             }
             StmtKind::Assign { target, expr } => {
-                let rhs = self.type_expr(expr);
-                if let Some(name) = var_target_name(target) {
-                    match self.lookup(name) {
-                        Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {
-                        }
-                        Some(declared) if rhs != declared => {
-                            self.report(
-                                format!(
-                                    "type mismatch in assignment to `{name}`: expected `{declared}`, found `{rhs}`"
-                                ),
-                                stmt.span,
-                            );
-                        }
-                        Some(_) => {}
-                        None => self.report(format!("unknown name `{name}`"), stmt.span),
-                    }
+                let target_ty = self.resolve_lvalue(target, stmt.span);
+                let expected = if target_ty.is_poison() {
+                    None
+                } else {
+                    Some(target_ty.clone())
+                };
+                let rhs = self.type_expr(expr, expected.as_ref());
+                if !target_ty.is_poison() && !rhs.is_poison() && rhs != target_ty {
+                    self.report(
+                        format!(
+                            "type mismatch in assignment to `{}`: expected `{}`, found `{}`",
+                            lvalue_name(target),
+                            target_ty.name(&self.types),
+                            rhs.name(&self.types)
+                        ),
+                        stmt.span,
+                    );
                 }
-                // Non-Var targets (field/index) arrive with the postfix
-                // parser; nothing to check there yet.
             }
             StmtKind::CompoundAssign { target, op, expr } => {
                 // §A.7: `x op= e` is exactly `x = x op e`, so the operator
                 // rules of §A.4/§A.6 apply with the target as the left
                 // operand and the result must equal the target's type.
-                let rhs = self.type_expr(expr);
-                if let Some(target) = var_target_name(target) {
-                    match self.lookup(target) {
-                        Some(declared) if declared == ValueTy::Poison || rhs == ValueTy::Poison => {
-                        }
-                        Some(declared) => {
-                            let matches = binary_result(compound_to_binary(*op), declared, rhs)
-                                .is_some_and(|result| result == declared);
-                            if !matches {
-                                self.report(
-                                    format!(
-                                        "cannot apply `{}` to `{declared}` and `{rhs}`",
-                                        compound_op_symbol(*op)
-                                    ),
-                                    stmt.span,
-                                );
-                            }
-                        }
-                        None => {
-                            self.report(format!("unknown name `{target}`"), stmt.span);
-                        }
+                let target_ty = self.resolve_lvalue(target, stmt.span);
+                let rhs = self.type_expr(expr, None);
+                if !target_ty.is_poison() && !rhs.is_poison() {
+                    let matches = binary_result(compound_to_binary(*op), &target_ty, &rhs)
+                        .is_some_and(|result| result == target_ty);
+                    if !matches {
+                        self.report(
+                            format!(
+                                "cannot apply `{}` to `{}` and `{}`",
+                                compound_op_symbol(*op),
+                                target_ty.name(&self.types),
+                                rhs.name(&self.types)
+                            ),
+                            stmt.span,
+                        );
                     }
                 }
             }
             StmtKind::Expression { expr } => match &expr.kind {
-                ExprKind::Call { .. } => {
-                    self.type_expr(expr);
+                ExprKind::Call { .. } | ExprKind::VariantCall { .. } => {
+                    self.type_expr(expr, None);
                 }
                 ExprKind::Invalid { .. } => {}
-                // Owner ruling: only call expressions may be statements.
+                // Owner ruling: only call-shaped expression statements.
                 _ => self.report("expression statements must be function calls", stmt.span),
             },
             StmtKind::If {
@@ -396,10 +782,13 @@ impl Checker {
                 then_branch,
                 else_branch,
             } => {
-                let cond_ty = self.type_expr(cond);
-                if cond_ty != ValueTy::Poison && cond_ty != ValueTy::Bool {
+                let cond_ty = self.type_expr(cond, None);
+                if !cond_ty.is_poison() && cond_ty != Ty::Bool {
                     self.report(
-                        format!("if condition must be `bool`, found `{cond_ty}`"),
+                        format!(
+                            "if condition must be `bool`, found `{}`",
+                            cond_ty.name(&self.types)
+                        ),
                         cond.span,
                     );
                 }
@@ -409,17 +798,231 @@ impl Checker {
                 }
             }
             StmtKind::While { cond, body } => {
-                let cond_ty = self.type_expr(cond);
-                if cond_ty != ValueTy::Poison && cond_ty != ValueTy::Bool {
+                let cond_ty = self.type_expr(cond, None);
+                if !cond_ty.is_poison() && cond_ty != Ty::Bool {
                     self.report(
-                        format!("while condition must be `bool`, found `{cond_ty}`"),
+                        format!(
+                            "while condition must be `bool`, found `{}`",
+                            cond_ty.name(&self.types)
+                        ),
                         cond.span,
                     );
                 }
                 self.check_block(body);
             }
+            StmtKind::For {
+                elem_ty,
+                elem_name,
+                iterable,
+                body,
+            } => self.check_for(elem_ty, elem_name, iterable, body, stmt.span),
+            StmtKind::Match { scrutinee, arms } => {
+                self.check_match_statement(scrutinee, arms, stmt.span)
+            }
             StmtKind::Return { value } => self.check_return(stmt, value.as_ref()),
             StmtKind::Block(block) => self.check_block(block),
+        }
+    }
+
+    fn check_for(
+        &mut self,
+        elem_ty: &Type,
+        elem_name: &str,
+        iterable: &Expr,
+        body: &Block,
+        span: Span,
+    ) {
+        let declared = self.resolve_type(elem_ty, span);
+        let iter_ty = self.type_expr(iterable, None);
+        let element = match iter_ty {
+            Ty::Array(elem) => {
+                if !declared.is_poison() && declared != *elem {
+                    self.report(
+                        format!(
+                            "wrong element type in for loop: expected `{}`, found `{}`",
+                            declared.name(&self.types),
+                            elem.name(&self.types)
+                        ),
+                        span,
+                    );
+                }
+                *elem
+            }
+            Ty::Poison | Ty::Ambiguous => Ty::Poison,
+            other => {
+                self.report(
+                    format!("cannot iterate `{}`", other.name(&self.types)),
+                    iterable.span,
+                );
+                Ty::Poison
+            }
+        };
+
+        // The loop variable binds per-iteration in the body's scope.
+        let mut scope = HashMap::new();
+        scope.insert(
+            elem_name.to_string(),
+            if element.is_poison() {
+                declared
+            } else {
+                element
+            },
+        );
+        self.scopes.push(scope);
+        for statement in &body.stmts {
+            self.check_stmt(statement);
+        }
+        self.scopes.pop();
+    }
+
+    fn check_match_statement(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[cme_core::ast::MatchArmStmt],
+        span: Span,
+    ) {
+        let scr_ty = self.type_expr(scrutinee, None);
+        let (idx, enum_args) = match self.matchable_enum(&scr_ty, scrutinee.span) {
+            Some(pair) => pair,
+            None => return,
+        };
+        let def = self.enum_def(idx);
+        let mut covered: HashSet<String> = HashSet::new();
+        let mut wildcard = false;
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Wildcard => wildcard = true,
+                Pattern::Variant { variant, bindings } => {
+                    if covered.contains(variant) {
+                        self.report(
+                            format!("duplicate arm for variant `{variant}` in `{}`", def.name),
+                            span,
+                        );
+                        continue;
+                    }
+                    covered.insert(variant.clone());
+                    let pattern_scope =
+                        self.check_pattern(variant, bindings, idx, &enum_args, &def, span);
+                    self.scopes.push(pattern_scope);
+                    for statement in &arm.body.stmts {
+                        self.check_stmt(statement);
+                    }
+                    self.scopes.pop();
+                }
+            }
+        }
+        self.check_exhaustiveness(&def, &covered, wildcard, span);
+    }
+
+    /// True (with the registry index and type arguments) when the
+    /// scrutinee type is an enum; reports and returns `None` otherwise.
+    fn matchable_enum(&mut self, ty: &Ty, span: Span) -> Option<(usize, Vec<Ty>)> {
+        match ty {
+            Ty::Enum(idx, args) => Some((*idx, args.clone())),
+            Ty::Poison | Ty::Ambiguous => None,
+            other => {
+                self.report(
+                    format!(
+                        "match scrutinee must be an enum type, found `{}`",
+                        other.name(&self.types)
+                    ),
+                    span,
+                );
+                None
+            }
+        }
+    }
+
+    /// Validates one pattern against the scrutinee's enum and returns the
+    /// bindings scope (§2.15): payload types are the variant's declared
+    /// types with the scrutinee's type arguments substituted.
+    fn check_pattern(
+        &mut self,
+        variant: &str,
+        bindings: &[FieldDef],
+        _idx: usize,
+        enum_args: &[Ty],
+        def: &EnumDef,
+        span: Span,
+    ) -> HashMap<String, Ty> {
+        let Some(variant_def) = def.variants.iter().find(|v| v.name == variant) else {
+            self.report(
+                format!("unknown variant `{variant}` in `{}`", def.name),
+                span,
+            );
+            return HashMap::new();
+        };
+        if bindings.len() != variant_def.fields.len() {
+            self.report(
+                format!(
+                    "wrong number of bindings in pattern `{variant}`: expected {}, found {}",
+                    variant_def.fields.len(),
+                    bindings.len()
+                ),
+                span,
+            );
+            return HashMap::new();
+        }
+        let mut scope = HashMap::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for (binding, field) in bindings.iter().zip(&variant_def.fields) {
+            let subst = self.subst_type(&field.ty, &def.params, enum_args, span);
+            let declared = self.resolve_type(&binding.ty, span);
+            if !declared.is_poison() && !subst.is_poison() && declared != subst {
+                self.report(
+                    format!(
+                        "wrong type for payload `{}` in pattern `{variant}`: expected `{}`, found `{}`",
+                        binding.name,
+                        subst.name(&self.types),
+                        declared.name(&self.types)
+                    ),
+                    span,
+                );
+            }
+            if seen.contains(&binding.name.as_str()) {
+                self.report(
+                    format!(
+                        "duplicate binding `{}` in pattern `{variant}`",
+                        binding.name
+                    ),
+                    span,
+                );
+            } else {
+                seen.push(&binding.name);
+            }
+            scope.insert(
+                binding.name.clone(),
+                if subst.is_poison() { declared } else { subst },
+            );
+        }
+        scope
+    }
+
+    fn check_exhaustiveness(
+        &mut self,
+        def: &EnumDef,
+        covered: &HashSet<String>,
+        wildcard: bool,
+        span: Span,
+    ) {
+        if wildcard {
+            return;
+        }
+        let missing: Vec<&str> = def
+            .variants
+            .iter()
+            .map(|v| v.name.as_str())
+            .filter(|name| !covered.contains(*name))
+            .collect();
+        if !missing.is_empty() {
+            self.report(
+                format!(
+                    "match on `{}` is not exhaustive: missing arms for {}",
+                    def.name,
+                    missing.join(", ")
+                ),
+                span,
+            );
         }
     }
 
@@ -428,10 +1031,10 @@ impl Checker {
             return;
         };
         match return_ty {
-            Type::Void => {
+            Ty::Void => {
                 if let Some(expr) = value {
                     // Still resolve names inside the value.
-                    self.type_expr(expr);
+                    self.type_expr(expr, None);
                     self.report(
                         format!("void function `{name}` cannot return a value"),
                         stmt.span,
@@ -440,200 +1043,1110 @@ impl Checker {
             }
             // An `infer` return type only reaches a hand-built tree (parse
             // rejects it); there is no expected type to compare against.
-            Type::Infer => {
+            Ty::Poison | Ty::Ambiguous => {
                 if let Some(expr) = value {
-                    self.type_expr(expr);
+                    self.type_expr(expr, None);
                 }
             }
-            Type::Prim(_) => match value {
+            expected => match value {
                 None => self.report(
                     format!("non-void function `{name}` must return a value"),
                     stmt.span,
                 ),
                 Some(expr) => {
-                    let actual = self.type_expr(expr);
-                    let expected = value_ty_of(&return_ty);
-                    if actual != ValueTy::Poison && actual != expected {
+                    let actual = self.type_expr(expr, Some(&expected));
+                    if !actual.is_poison() && actual != expected {
                         self.report(
                             format!(
-                                "wrong return type in `{name}`: expected `{expected}`, found `{actual}`"
+                                "wrong return type in `{name}`: expected `{}`, found `{}`",
+                                expected.name(&self.types),
+                                actual.name(&self.types)
                             ),
                             stmt.span,
                         );
                     }
                 }
             },
-            // Named, array, and map return types arrive with the full-surface
-            // checker; resolve the value without a scalar comparison.
-            Type::Named { .. } | Type::Array(_) | Type::Map { .. } => {
-                if let Some(expr) = value {
-                    self.type_expr(expr);
-                }
-            }
         }
     }
 
-    fn type_expr(&mut self, expr: &Expr) -> ValueTy {
-        match &expr.kind {
-            ExprKind::IntLit(_) => ValueTy::Int,
-            ExprKind::FloatLit(_) => ValueTy::Float,
-            ExprKind::StrLit(_) => ValueTy::Str,
-            ExprKind::BoolLit(_) => ValueTy::Bool,
-            // Recovery placeholder: already reported at parse level.
-            ExprKind::Invalid { .. } => ValueTy::Poison,
-            ExprKind::Ident(name) => self.lookup(name).unwrap_or_else(|| {
-                self.report(format!("unknown name `{name}`"), expr.span);
-                ValueTy::Poison
-            }),
-            ExprKind::Paren { expr } => self.type_expr(expr),
-            ExprKind::Call { name, args } => self.type_call(name, args, expr.span),
-            // Field, index, variant construction, match, and interpolation
-            // arrive with the full-surface parser; a hand-built tree that
-            // reaches them today is untypable without cascading.
-            ExprKind::Field { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::VariantCall { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::ArrayLit { .. }
-            | ExprKind::MapLit { .. }
-            | ExprKind::Interpolated { .. }
-            | ExprKind::Try { .. } => ValueTy::Poison,
-            ExprKind::Unary { op, expr: inner } => {
-                let operand = self.type_expr(inner);
-                if operand == ValueTy::Poison {
-                    return ValueTy::Poison;
+    /// Types an assignment target's variable/field/index chain and returns
+    /// the type it denotes (§2.10, §2.13, §A.7).
+    fn resolve_lvalue(&mut self, target: &LValue, span: Span) -> Ty {
+        match target {
+            LValue::Var { name } => match self.lookup(name) {
+                Some(ty) => ty,
+                None => {
+                    self.report(format!("unknown name `{name}`"), span);
+                    Ty::Poison
                 }
-                let ok = match op {
-                    UnaryOp::Neg => matches!(operand, ValueTy::Int | ValueTy::Float),
-                    UnaryOp::Not => operand == ValueTy::Bool,
-                };
-                if !ok {
-                    self.report(
-                        format!("cannot apply `{}` to `{operand}`", unary_op_symbol(*op)),
-                        expr.span,
-                    );
-                    return ValueTy::Poison;
-                }
-                operand
-            }
-            ExprKind::Binary { op, lhs, rhs } => {
-                let left = self.type_expr(lhs);
-                let right = self.type_expr(rhs);
-                if left == ValueTy::Poison || right == ValueTy::Poison {
-                    return ValueTy::Poison;
-                }
-                match binary_result(*op, left, right) {
-                    Some(result) => result,
-                    None => {
+            },
+            LValue::Field { base, name } => {
+                let base_ty = self.resolve_lvalue(base, span);
+                match &base_ty {
+                    Ty::Array(_) if name == "length" => {
+                        self.report("cannot assign to `.length`", span);
+                        Ty::Poison
+                    }
+                    Ty::Struct(idx, args) => {
+                        let def = self.struct_def(*idx);
+                        match def.fields.iter().find(|f| f.name == *name) {
+                            Some(field) => self.subst_type(&field.ty, &def.params, args, span),
+                            None => {
+                                self.report(
+                                    format!(
+                                        "unknown field `{name}` on `{}`",
+                                        base_ty.name(&self.types)
+                                    ),
+                                    span,
+                                );
+                                Ty::Poison
+                            }
+                        }
+                    }
+                    ty if ty.is_poison() => Ty::Poison,
+                    _ => {
                         self.report(
-                            format!(
-                                "cannot apply `{}` to `{left}` and `{right}`",
-                                binary_op_symbol(*op)
-                            ),
-                            expr.span,
+                            format!("unknown field `{name}` on `{}`", base_ty.name(&self.types)),
+                            span,
                         );
-                        ValueTy::Poison
+                        Ty::Poison
+                    }
+                }
+            }
+            LValue::Index { base, index } => {
+                let base_ty = self.resolve_lvalue(base, span);
+                let index_ty = self.type_expr(index, None);
+                match &base_ty {
+                    Ty::Array(elem) => {
+                        if !index_ty.is_poison() && index_ty != Ty::Int {
+                            self.report(
+                                format!(
+                                    "array index must be `int`, found `{}`",
+                                    index_ty.name(&self.types)
+                                ),
+                                index.span,
+                            );
+                        }
+                        (**elem).clone()
+                    }
+                    Ty::Map(key, value) => {
+                        if !index_ty.is_poison() && index_ty != **key {
+                            self.report(
+                                format!(
+                                    "map key must be `{}`, found `{}`",
+                                    key.name(&self.types),
+                                    index_ty.name(&self.types)
+                                ),
+                                index.span,
+                            );
+                        }
+                        (**value).clone()
+                    }
+                    ty if ty.is_poison() => Ty::Poison,
+                    _ => {
+                        self.report(
+                            format!("cannot index `{}`", base_ty.name(&self.types)),
+                            span,
+                        );
+                        Ty::Poison
                     }
                 }
             }
         }
     }
 
-    fn type_call(&mut self, name: &str, args: &[CallArg], span: Span) -> ValueTy {
-        let arg_exprs: Vec<&Expr> = args
-            .iter()
-            .map(|arg| match arg {
-                CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
-            })
-            .collect();
-        let Some(sig) = self.functions.get(name) else {
-            // Arguments are still typed so unknown names inside them are
-            // reported rather than swallowed.
-            for arg in arg_exprs {
-                self.type_expr(arg);
+    /// The snapshot of a struct declaration from the registry.
+    fn struct_def(&self, idx: usize) -> StructDef {
+        match &self.types[idx] {
+            TypeDef::Struct(def) => def.clone(),
+            TypeDef::Enum(_) => unreachable!("index points at a struct"),
+        }
+    }
+
+    /// The snapshot of an enum declaration from the registry.
+    fn enum_def(&self, idx: usize) -> EnumDef {
+        match &self.types[idx] {
+            TypeDef::Enum(def) => def.clone(),
+            TypeDef::Struct(_) => unreachable!("index points at an enum"),
+        }
+    }
+
+    /// Types an expression, threading the expected type where bare
+    /// constructors need it (§2.8, §2.16).
+    fn type_expr(&mut self, expr: &Expr, expected: Option<&Ty>) -> Ty {
+        match &expr.kind {
+            ExprKind::IntLit(_) => Ty::Int,
+            ExprKind::FloatLit(_) => Ty::Float,
+            ExprKind::StrLit(_) => Ty::Str,
+            ExprKind::BoolLit(_) => Ty::Bool,
+            // Recovery placeholder: already reported at parse level.
+            ExprKind::Invalid { .. } => Ty::Poison,
+            ExprKind::Ident(name) => self.lookup(name).unwrap_or_else(|| {
+                self.report(format!("unknown name `{name}`"), expr.span);
+                Ty::Poison
+            }),
+            ExprKind::Paren { expr: inner } => self.type_expr(inner, expected),
+            ExprKind::Call { name, args } => self.type_call(name, args, expected, expr.span),
+            ExprKind::VariantCall {
+                enum_name,
+                variant,
+                args,
+            } => self.type_variant_call(enum_name, variant, args, expected, expr.span),
+            ExprKind::Field { obj, name } => self.type_field(obj, name, expr.span),
+            ExprKind::Index { obj, index } => self.type_index(obj, index, expr.span),
+            ExprKind::Try { expr: inner } => self.type_try(inner, expr.span),
+            ExprKind::Match { scrutinee, arms } => {
+                self.type_match_expr(scrutinee, arms, expected, expr.span)
             }
-            self.report(format!("unknown function `{name}`"), span);
-            return ValueTy::Poison;
-        };
-
-        // Copy the signature out so typing the arguments (which mutates
-        // `self`) does not hold a borrow on the function table.
-        let expected: Vec<ValueTy> = sig.params.iter().map(|p| value_ty_of(&p.ty)).collect();
-        let result_ty = value_ty_of(&sig.return_ty);
-        let poisoned = sig.poisoned;
-
-        if args.len() != expected.len() {
-            self.report(
-                format!(
-                    "wrong number of arguments to `{name}`: expected {}, found {}",
-                    expected.len(),
-                    args.len()
-                ),
-                span,
-            );
-        }
-
-        let mut arg_types = Vec::with_capacity(args.len());
-        for arg in arg_exprs {
-            arg_types.push(self.type_expr(arg));
-        }
-
-        if !poisoned {
-            let arg_spans: Vec<Span> = args
-                .iter()
-                .map(|arg| match arg {
-                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr.span,
-                })
-                .collect();
-            for ((arg_span, arg_ty), param_ty) in arg_spans.iter().zip(&arg_types).zip(&expected) {
-                if *arg_ty != ValueTy::Poison && arg_ty != param_ty {
+            ExprKind::ArrayLit { elements } => self.type_array_lit(elements, expected, expr.span),
+            ExprKind::MapLit { entries } => self.type_map_lit(entries, expected, expr.span),
+            ExprKind::Interpolated { parts } => {
+                for part in parts {
+                    if let cme_core::ast::InterpPart::Expr(island) = part {
+                        // §A.6: only scalars stringify.
+                        let ty = self.type_expr(island, None);
+                        match ty {
+                            Ty::Int | Ty::Float | Ty::Bool | Ty::Str => {}
+                            Ty::Poison | Ty::Ambiguous => {}
+                            other => self.report(
+                                format!("cannot interpolate `{}`", other.name(&self.types)),
+                                island.span,
+                            ),
+                        }
+                    }
+                }
+                Ty::Str
+            }
+            ExprKind::Unary { op, expr: inner } => {
+                let operand = self.type_expr(inner, None);
+                if operand.is_poison() {
+                    return Ty::Poison;
+                }
+                let ok = match op {
+                    UnaryOp::Neg => matches!(operand, Ty::Int | Ty::Float),
+                    UnaryOp::Not => operand == Ty::Bool,
+                };
+                if !ok {
                     self.report(
                         format!(
-                            "wrong argument type in call to `{name}`: expected `{param_ty}`, found `{arg_ty}`"
+                            "cannot apply `{}` to `{}`",
+                            unary_op_symbol(*op),
+                            operand.name(&self.types)
                         ),
-                        *arg_span,
+                        expr.span,
+                    );
+                    return Ty::Poison;
+                }
+                operand
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let left = self.type_expr(lhs, None);
+                let right = self.type_expr(rhs, None);
+                if left.is_poison() || right.is_poison() {
+                    return Ty::Poison;
+                }
+                match binary_result(*op, &left, &right) {
+                    Some(result) => result,
+                    None => {
+                        self.report(
+                            format!(
+                                "cannot apply `{}` to `{}` and `{}`",
+                                binary_op_symbol(*op),
+                                left.name(&self.types),
+                                right.name(&self.types)
+                            ),
+                            expr.span,
+                        );
+                        Ty::Poison
+                    }
+                }
+            }
+        }
+    }
+
+    /// A call by name: a user function, a struct construction, or a
+    /// built-in constructor — disambiguated by the registry (§2.6, §2.8,
+    /// §2.11, §2.12).
+    fn type_call(&mut self, name: &str, args: &[CallArg], expected: Option<&Ty>, span: Span) -> Ty {
+        if let Some(sig) = self.functions.get(name).cloned() {
+            return self.type_function_call(name, &sig, args, span);
+        }
+        if BUILTIN_CONSTRUCTORS.contains(&name) {
+            return self.type_builtin_ctor(name, args, expected, span);
+        }
+        if let Some(&idx) = self.type_index.get(name) {
+            if self.types[idx].is_struct() {
+                let def = self.struct_def(idx);
+                return self.type_struct_literal(&def, idx, args, expected, span);
+            }
+            // A bare enum name cannot construct: the call must name a
+            // variant (§2.7).
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            self.report(
+                format!("enum `{name}` cannot be constructed directly; use `{name}.Variant(...)`"),
+                span,
+            );
+            return Ty::Poison;
+        }
+        // Arguments are still typed so unknown names inside them are
+        // reported rather than swallowed.
+        for arg in args {
+            let expr = match arg {
+                CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+            };
+            self.type_expr(expr, None);
+        }
+        self.report(format!("unknown function `{name}`"), span);
+        Ty::Poison
+    }
+
+    fn type_function_call(&mut self, name: &str, sig: &FnSig, args: &[CallArg], span: Span) -> Ty {
+        let has_positional = args.iter().any(|arg| matches!(arg, CallArg::Positional(_)));
+        let has_named = args.iter().any(|arg| matches!(arg, CallArg::Named { .. }));
+        if has_positional && has_named {
+            // Parse already rejects mixing (§2.12); a hand-built tree
+            // reaching here is poisoned without a cascade.
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            return Ty::Poison;
+        }
+
+        if has_named {
+            // Named arguments bind by parameter name (§2.12).
+            let named: Vec<(&str, &Expr)> = args
+                .iter()
+                .filter_map(|arg| match arg {
+                    CallArg::Named { name, expr } => Some((name.as_str(), expr)),
+                    CallArg::Positional(_) => None,
+                })
+                .collect();
+            let mut provided: Vec<&str> = Vec::new();
+            for (arg_name, value) in &named {
+                if provided.contains(arg_name) {
+                    self.report(
+                        format!("duplicate argument `{arg_name}` in call to `{name}`"),
+                        value.span,
+                    );
+                } else {
+                    provided.push(arg_name);
+                }
+            }
+            for (param_name, param_ty) in &sig.params {
+                match named.iter().find(|(arg_name, _)| arg_name == param_name) {
+                    None => self.report(
+                        format!("missing argument `{param_name}` in call to `{name}`"),
+                        span,
+                    ),
+                    Some((_, value)) => {
+                        let expected = if param_ty.is_poison() || sig.poisoned {
+                            None
+                        } else {
+                            Some(param_ty.clone())
+                        };
+                        let actual = self.type_expr(value, expected.as_ref());
+                        if !sig.poisoned && !actual.is_poison() && actual != *param_ty {
+                            self.report(
+                                format!(
+                                    "wrong argument type in call to `{name}`: expected `{}`, found `{}`",
+                                    param_ty.name(&self.types),
+                                    actual.name(&self.types)
+                                ),
+                                value.span,
+                            );
+                        }
+                    }
+                }
+            }
+            for (arg_name, value) in &named {
+                if !sig.params.iter().any(|(param, _)| param == arg_name) {
+                    self.report(
+                        format!("unknown argument `{arg_name}` in call to `{name}`"),
+                        value.span,
+                    );
+                }
+            }
+        } else {
+            // Positional arguments bind in order (§2.12).
+            let positional: Vec<&Expr> = args
+                .iter()
+                .filter_map(|arg| match arg {
+                    CallArg::Positional(expr) => Some(expr),
+                    CallArg::Named { .. } => None,
+                })
+                .collect();
+            if positional.len() != sig.params.len() {
+                self.report(
+                    format!(
+                        "wrong number of arguments to `{name}`: expected {}, found {}",
+                        sig.params.len(),
+                        positional.len()
+                    ),
+                    span,
+                );
+            }
+            for (value, (_, param_ty)) in positional.iter().zip(&sig.params) {
+                let expected = if param_ty.is_poison() || sig.poisoned {
+                    None
+                } else {
+                    Some(param_ty.clone())
+                };
+                let actual = self.type_expr(value, expected.as_ref());
+                if !sig.poisoned && !actual.is_poison() && actual != *param_ty {
+                    self.report(
+                        format!(
+                            "wrong argument type in call to `{name}`: expected `{}`, found `{}`",
+                            param_ty.name(&self.types),
+                            actual.name(&self.types)
+                        ),
+                        value.span,
                     );
                 }
             }
         }
 
-        if poisoned { ValueTy::Poison } else { result_ty }
+        if sig.poisoned {
+            Ty::Poison
+        } else {
+            sig.return_ty.clone()
+        }
+    }
+
+    /// A struct construction: named arguments must cover the declared
+    /// fields exactly, and generic arguments crystallize from the field
+    /// values and the expected type (§2.6, §2.9, §2.16).
+    fn type_struct_literal(
+        &mut self,
+        def: &StructDef,
+        idx: usize,
+        args: &[CallArg],
+        expected: Option<&Ty>,
+        span: Span,
+    ) -> Ty {
+        if args.iter().any(|arg| matches!(arg, CallArg::Positional(_))) {
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            self.report(
+                format!(
+                    "construction of struct `{}` requires named arguments",
+                    def.name
+                ),
+                span,
+            );
+            return Ty::Poison;
+        }
+        let named: Vec<(&str, &Expr)> = args
+            .iter()
+            .filter_map(|arg| match arg {
+                CallArg::Named { name, expr } => Some((name.as_str(), expr)),
+                CallArg::Positional(_) => None,
+            })
+            .collect();
+
+        // Generic argument bindings: pre-filled from the expected type,
+        // then crystallized from the field value types.
+        let mut bindings: Vec<Option<Ty>> = vec![None; def.params.len()];
+        if let Some(Ty::Struct(eidx, eargs)) = expected
+            && *eidx == idx
+        {
+            for (slot, arg) in bindings.iter_mut().zip(eargs) {
+                *slot = Some(arg.clone());
+            }
+        }
+
+        // Phase A: type each provided value once, inferring bindings.
+        let mut typed: Vec<(&str, Ty, Span)> = Vec::new();
+        for (field_name, value) in &named {
+            let field = def.fields.iter().find(|f| f.name == *field_name);
+            let expected_for_value = field.and_then(|f| {
+                let partial: Vec<Ty> = bindings
+                    .iter()
+                    .map(|b| b.clone().unwrap_or(Ty::Poison))
+                    .collect();
+                let partial_ty = self.peek_subst_type(&f.ty, &def.params, &partial);
+                if partial_ty.has_poison() {
+                    None
+                } else {
+                    Some(partial_ty)
+                }
+            });
+            let actual = self.type_expr(value, expected_for_value.as_ref());
+            if let Some(field) = field {
+                self.bind_type_params(&field.ty, &actual, &def.params, &mut bindings);
+            }
+            typed.push((field_name, actual, value.span));
+        }
+
+        // Phase B: resolve the bindings; unbound arguments are an error.
+        let mut resolved: Vec<Ty> = Vec::with_capacity(bindings.len());
+        let mut unbound = false;
+        for (slot, param) in bindings.iter().zip(&def.params) {
+            match slot {
+                Some(ty) => resolved.push(ty.clone()),
+                None => {
+                    self.report(
+                        format!(
+                            "cannot infer type argument `{param}` for struct `{}`",
+                            def.name
+                        ),
+                        span,
+                    );
+                    unbound = true;
+                    resolved.push(Ty::Poison);
+                }
+            }
+        }
+        if unbound {
+            return Ty::Poison;
+        }
+
+        // Phase C: coverage and field types against the substituted types.
+        for (field_name, actual, value_span) in &typed {
+            let Some(field) = def.fields.iter().find(|f| f.name == *field_name) else {
+                self.report(
+                    format!(
+                        "unknown field `{field_name}` in construction of `{}`",
+                        def.name
+                    ),
+                    span,
+                );
+                continue;
+            };
+            let field_ty = self.subst_type(&field.ty, &def.params, &resolved, span);
+            if !actual.is_poison() && *actual != field_ty {
+                self.report(
+                    format!(
+                        "wrong type for field `{field_name}` in construction of `{}`: expected `{}`, found `{}`",
+                        def.name,
+                        field_ty.name(&self.types),
+                        actual.name(&self.types)
+                    ),
+                    *value_span,
+                );
+            }
+        }
+        for field in &def.fields {
+            if !named.iter().any(|(name, _)| *name == field.name) {
+                self.report(
+                    format!(
+                        "missing field `{}` in construction of `{}`",
+                        field.name, def.name
+                    ),
+                    span,
+                );
+            }
+        }
+
+        Ty::Struct(idx, resolved)
+    }
+
+    /// A substitution that never reports (for expected-type previews).
+    fn peek_subst_type(&self, ty: &Type, params: &[String], args: &[Ty]) -> Ty {
+        match ty {
+            Type::Infer => Ty::Poison,
+            Type::Void => Ty::Void,
+            Type::Prim(PrimitiveType::Int) => Ty::Int,
+            Type::Prim(PrimitiveType::Float) => Ty::Float,
+            Type::Prim(PrimitiveType::Bool) => Ty::Bool,
+            Type::Prim(PrimitiveType::Str) => Ty::Str,
+            Type::Array(elem) => Ty::Array(Box::new(self.peek_subst_type(elem, params, args))),
+            Type::Map { key, value } => Ty::Map(
+                Box::new(self.peek_subst_type(key, params, args)),
+                Box::new(self.peek_subst_type(value, params, args)),
+            ),
+            Type::Named {
+                name,
+                args: type_args,
+            } => {
+                if let Some(pos) = params.iter().position(|p| p == name) {
+                    return args.get(pos).cloned().unwrap_or(Ty::Poison);
+                }
+                let resolved: Vec<Ty> = type_args
+                    .iter()
+                    .map(|arg| self.peek_subst_type(arg, params, args))
+                    .collect();
+                match self.type_index.get(name) {
+                    Some(&idx) if self.types[idx].is_struct() => Ty::Struct(idx, resolved),
+                    Some(&idx) => Ty::Enum(idx, resolved),
+                    None => Ty::Poison,
+                }
+            }
+        }
+    }
+
+    /// Crystallizes generic bindings by walking a declared field type
+    /// against the actual value type (§2.9, §2.16).
+    fn bind_type_params(
+        &mut self,
+        declared: &Type,
+        actual: &Ty,
+        params: &[String],
+        bindings: &mut [Option<Ty>],
+    ) {
+        match declared {
+            Type::Named { name, args } if params.iter().any(|p| p == name) => {
+                if let Some(pos) = params.iter().position(|p| p == name) {
+                    match (&bindings[pos], actual) {
+                        (None, ty) if !ty.is_poison() => bindings[pos] = Some(ty.clone()),
+                        _ => {}
+                    }
+                }
+                let _ = args;
+            }
+            Type::Array(elem) => {
+                if let Ty::Array(actual_elem) = actual {
+                    self.bind_type_params(elem, actual_elem, params, bindings);
+                }
+            }
+            Type::Map { key, value } => {
+                if let Ty::Map(actual_key, actual_value) = actual {
+                    self.bind_type_params(key, actual_key, params, bindings);
+                    self.bind_type_params(value, actual_value, params, bindings);
+                }
+            }
+            Type::Named { args, .. } => {
+                // A generic field type like `A[]` nested in another generic:
+                // zip the declared arguments with the actual ones.
+                if let Some(actual_args) = actual.args_of() {
+                    for (declared_arg, actual_arg) in args.iter().zip(actual_args) {
+                        self.bind_type_params(declared_arg, &actual_arg.clone(), params, bindings);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A qualified enum construction `Enum.Variant(args)` (§2.7), including
+    /// the qualified builtins `option.Some(...)` / `result.Ok(...)`.
+    fn type_variant_call(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[CallArg],
+        expected: Option<&Ty>,
+        span: Span,
+    ) -> Ty {
+        let Some(&idx) = self.type_index.get(enum_name) else {
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            self.report(format!("unknown enum `{enum_name}`"), span);
+            return Ty::Poison;
+        };
+        if self.types[idx].is_struct() {
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            self.report(format!("`{enum_name}` is not an enum"), span);
+            return Ty::Poison;
+        }
+        let def = self.enum_def(idx);
+        self.type_variant_construction(&def, idx, variant, args, expected, span)
+    }
+
+    /// A bare built-in constructor: `Ok`, `Err`, `Some`, `None` (§2.8).
+    fn type_builtin_ctor(
+        &mut self,
+        name: &str,
+        args: &[CallArg],
+        expected: Option<&Ty>,
+        span: Span,
+    ) -> Ty {
+        let (enum_name, variant) = match name {
+            "Ok" => ("result", "Ok"),
+            "Err" => ("result", "Err"),
+            "Some" => ("option", "Some"),
+            _ => ("option", "None"),
+        };
+        let idx = self.type_index[enum_name];
+        let def = self.enum_def(idx);
+        self.type_variant_construction(&def, idx, variant, args, expected, span)
+    }
+
+    /// The shared typing of an enum variant construction: positional
+    /// payload values, generic bindings crystallized from payloads and the
+    /// expected type, and payload types checked against the substituted
+    /// declarations (§2.7, §2.8, §2.9).
+    fn type_variant_construction(
+        &mut self,
+        def: &EnumDef,
+        idx: usize,
+        variant: &str,
+        args: &[CallArg],
+        expected: Option<&Ty>,
+        span: Span,
+    ) -> Ty {
+        if args.iter().any(|arg| matches!(arg, CallArg::Named { .. })) {
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            self.report(
+                format!(
+                    "construction of `{}.{variant}` takes positional arguments",
+                    def.name
+                ),
+                span,
+            );
+            return Ty::Poison;
+        }
+        let Some(variant_def) = def.variants.iter().find(|v| v.name == variant) else {
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            self.report(
+                format!("unknown variant `{variant}` in `{}`", def.name),
+                span,
+            );
+            return Ty::Poison;
+        };
+        let positional: Vec<&Expr> = args
+            .iter()
+            .filter_map(|arg| match arg {
+                CallArg::Positional(expr) => Some(expr),
+                CallArg::Named { .. } => None,
+            })
+            .collect();
+        if positional.len() != variant_def.fields.len() {
+            self.report(
+                format!(
+                    "wrong number of payload values for `{}.{variant}`: expected {}, found {}",
+                    def.name,
+                    variant_def.fields.len(),
+                    positional.len()
+                ),
+                span,
+            );
+            return Ty::Poison;
+        }
+
+        // Generic argument bindings: pre-filled from the expected type,
+        // then crystallized from the payload value types.
+        let mut bindings: Vec<Option<Ty>> = vec![None; def.params.len()];
+        if let Some(Ty::Enum(eidx, eargs)) = expected
+            && *eidx == idx
+        {
+            for (slot, arg) in bindings.iter_mut().zip(eargs) {
+                *slot = Some(arg.clone());
+            }
+        }
+        let mut typed: Vec<Ty> = Vec::with_capacity(positional.len());
+        for (value, field) in positional.iter().zip(&variant_def.fields) {
+            let expected_for_value = {
+                let partial: Vec<Ty> = bindings
+                    .iter()
+                    .map(|b| b.clone().unwrap_or(Ty::Poison))
+                    .collect();
+                let partial_ty = self.peek_subst_type(&field.ty, &def.params, &partial);
+                if partial_ty.has_poison() {
+                    None
+                } else {
+                    Some(partial_ty)
+                }
+            };
+            let actual = self.type_expr(value, expected_for_value.as_ref());
+            self.bind_type_params(&field.ty, &actual, &def.params, &mut bindings);
+            typed.push(actual);
+        }
+        let mut resolved: Vec<Ty> = Vec::with_capacity(bindings.len());
+        let mut unbound = false;
+        for slot in &bindings {
+            match slot {
+                Some(ty) => resolved.push(ty.clone()),
+                None => {
+                    unbound = true;
+                    resolved.push(Ty::Poison);
+                }
+            }
+        }
+        if unbound {
+            // The construction's type arguments cannot be determined here;
+            // the context (a declaration, a parameter, a field) supplies
+            // them. Without one, the type stays ambiguous (§2.16).
+            return Ty::Ambiguous;
+        }
+        for (actual, field) in typed.iter().zip(&variant_def.fields) {
+            let field_ty = self.subst_type(&field.ty, &def.params, &resolved, span);
+            if !actual.is_poison() && *actual != field_ty {
+                self.report(
+                    format!(
+                        "wrong type for payload `{}` of `{}.{variant}`: expected `{}`, found `{}`",
+                        field.name,
+                        def.name,
+                        field_ty.name(&self.types),
+                        actual.name(&self.types)
+                    ),
+                    span,
+                );
+            }
+        }
+        Ty::Enum(idx, resolved)
+    }
+
+    /// Field access (§2.6) and `.length` on arrays (§11).
+    fn type_field(&mut self, obj: &Expr, name: &str, span: Span) -> Ty {
+        let obj_ty = self.type_expr(obj, None);
+        match &obj_ty {
+            Ty::Array(_) if name == "length" => Ty::Int,
+            Ty::Struct(idx, args) => {
+                let def = self.struct_def(*idx);
+                match def.fields.iter().find(|f| f.name == name) {
+                    Some(field) => self.subst_type(&field.ty, &def.params, args, span),
+                    None => {
+                        self.report(
+                            format!("unknown field `{name}` on `{}`", obj_ty.name(&self.types)),
+                            span,
+                        );
+                        Ty::Poison
+                    }
+                }
+            }
+            ty if ty.is_poison() => Ty::Poison,
+            _ => {
+                self.report(
+                    format!("unknown field `{name}` on `{}`", obj_ty.name(&self.types)),
+                    span,
+                );
+                Ty::Poison
+            }
+        }
+    }
+
+    /// Indexing: arrays take `int` indices; maps take their key type (§11).
+    fn type_index(&mut self, obj: &Expr, index: &Expr, span: Span) -> Ty {
+        let obj_ty = self.type_expr(obj, None);
+        let index_ty = self.type_expr(index, None);
+        match &obj_ty {
+            Ty::Array(elem) => {
+                if !index_ty.is_poison() && index_ty != Ty::Int {
+                    self.report(
+                        format!(
+                            "array index must be `int`, found `{}`",
+                            index_ty.name(&self.types)
+                        ),
+                        index.span,
+                    );
+                }
+                (**elem).clone()
+            }
+            Ty::Map(key, value) => {
+                if !index_ty.is_poison() && index_ty != **key {
+                    self.report(
+                        format!(
+                            "map key must be `{}`, found `{}`",
+                            key.name(&self.types),
+                            index_ty.name(&self.types)
+                        ),
+                        index.span,
+                    );
+                }
+                (**value).clone()
+            }
+            ty if ty.is_poison() => Ty::Poison,
+            _ => {
+                self.report(format!("cannot index `{}`", obj_ty.name(&self.types)), span);
+                Ty::Poison
+            }
+        }
+    }
+
+    /// The `?` operator (§2.8): the operand must be `result<T, E>` and the
+    /// enclosing function must return `result<_, E>` with the exact same
+    /// error type; the expression's type is the success type.
+    fn type_try(&mut self, inner: &Expr, span: Span) -> Ty {
+        let operand = self.type_expr(inner, None);
+        let result_idx = self.type_index["result"];
+        let match_result = match &operand {
+            Ty::Enum(idx, ty_args) if *idx == result_idx && ty_args.len() == 2 => {
+                Some((ty_args[0].clone(), ty_args[1].clone()))
+            }
+            Ty::Poison | Ty::Ambiguous => None,
+            _ => {
+                self.report(
+                    format!(
+                        "the `?` operator requires `result<T, E>`, found `{}`",
+                        operand.name(&self.types)
+                    ),
+                    span,
+                );
+                None
+            }
+        };
+        let Some((ok_ty, err_ty)) = match_result else {
+            return Ty::Poison;
+        };
+        let Some((name, ret)) = self.current_fn.clone() else {
+            return Ty::Poison;
+        };
+        match &ret {
+            Ty::Enum(fidx, fargs) if *fidx == result_idx && fargs.len() == 2 => {
+                let fn_err = fargs[1].clone();
+                if err_ty.is_poison() || fn_err.is_poison() || err_ty == fn_err {
+                    ok_ty
+                } else {
+                    self.report(
+                        format!(
+                            "`?` propagates error `{}` but function `{name}` returns errors of type `{}`",
+                            err_ty.name(&self.types),
+                            fn_err.name(&self.types)
+                        ),
+                        span,
+                    );
+                    Ty::Poison
+                }
+            }
+            _ => {
+                self.report(
+                    format!(
+                        "`?` requires the enclosing function `{name}` to return `result<_, E>`, found `{}`",
+                        ret.name(&self.types)
+                    ),
+                    span,
+                );
+                Ty::Poison
+            }
+        }
+    }
+
+    /// A match in expression position (§2.15): every arm yields the same
+    /// type, patterns bind their payloads, and the match is exhaustive.
+    fn type_match_expr(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[cme_core::ast::MatchArmExpr],
+        expected: Option<&Ty>,
+        span: Span,
+    ) -> Ty {
+        let scr_ty = self.type_expr(scrutinee, None);
+        let Some((idx, enum_args)) = self.matchable_enum(&scr_ty, scrutinee.span) else {
+            return Ty::Poison;
+        };
+        let def = self.enum_def(idx);
+        let mut covered: HashSet<String> = HashSet::new();
+        let mut wildcard = false;
+        let mut result = Ty::Poison;
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Wildcard => wildcard = true,
+                Pattern::Variant { variant, bindings } => {
+                    if covered.contains(variant) {
+                        self.report(
+                            format!("duplicate arm for variant `{variant}` in `{}`", def.name),
+                            span,
+                        );
+                        continue;
+                    }
+                    covered.insert(variant.clone());
+                    let pattern_scope =
+                        self.check_pattern(variant, bindings, idx, &enum_args, &def, span);
+                    self.scopes.push(pattern_scope);
+                    let body_ty = self.type_expr(&arm.body, expected);
+                    self.scopes.pop();
+                    if result.is_poison() && !body_ty.is_poison() {
+                        result = body_ty;
+                    } else if !result.is_poison() && !body_ty.is_poison() && result != body_ty {
+                        self.report(
+                            format!(
+                                "match arms yield different types: `{}` and `{}`",
+                                result.name(&self.types),
+                                body_ty.name(&self.types)
+                            ),
+                            arm.body.span,
+                        );
+                    }
+                }
+            }
+        }
+        self.check_exhaustiveness(&def, &covered, wildcard, span);
+        result
+    }
+
+    /// An array literal (§11): elements unify to one type; an empty
+    /// literal without an expected element type is ambiguous (§2.16).
+    fn type_array_lit(&mut self, elements: &[Expr], expected: Option<&Ty>, span: Span) -> Ty {
+        let elem_expected = match expected {
+            Some(Ty::Array(elem)) => Some((**elem).clone()),
+            _ => None,
+        };
+        if elements.is_empty() {
+            return match elem_expected {
+                Some(elem) => Ty::Array(Box::new(elem)),
+                None => {
+                    let _ = span;
+                    Ty::Ambiguous
+                }
+            };
+        }
+        let mut elem_ty = Ty::Poison;
+        for element in elements {
+            let actual = self.type_expr(element, elem_expected.as_ref());
+            if elem_ty.is_poison() {
+                if !actual.is_poison() {
+                    elem_ty = actual;
+                }
+            } else if !actual.is_poison() && actual != elem_ty {
+                self.report(
+                    format!(
+                        "array elements must all have type `{}`, found `{}`",
+                        elem_ty.name(&self.types),
+                        actual.name(&self.types)
+                    ),
+                    element.span,
+                );
+            }
+        }
+        Ty::Array(Box::new(elem_ty))
+    }
+
+    /// A map literal (§11): keys and values each unify to one type; an
+    /// empty literal without an expected type is ambiguous (§2.16).
+    fn type_map_lit(&mut self, entries: &[(Expr, Expr)], expected: Option<&Ty>, span: Span) -> Ty {
+        let (key_expected, value_expected) = match expected {
+            Some(Ty::Map(key, value)) => ((**key).clone(), Some((**value).clone())),
+            _ => (Ty::Poison, None),
+        };
+        let value_expected = value_expected.or(None);
+        if entries.is_empty() {
+            return match expected {
+                Some(Ty::Map(key, value)) => {
+                    Ty::Map(Box::new((**key).clone()), Box::new((**value).clone()))
+                }
+                _ => {
+                    let _ = span;
+                    Ty::Ambiguous
+                }
+            };
+        }
+        let mut key_ty = Ty::Poison;
+        let mut value_ty = Ty::Poison;
+        for (key, value) in entries {
+            let key_expected_ref = if key_expected.is_poison() {
+                None
+            } else {
+                Some(key_expected.clone())
+            };
+            let actual_key = self.type_expr(key, key_expected_ref.as_ref());
+            if key_ty.is_poison() {
+                if !actual_key.is_poison() {
+                    key_ty = actual_key;
+                }
+            } else if !actual_key.is_poison() && actual_key != key_ty {
+                self.report(
+                    format!(
+                        "map keys must all have type `{}`, found `{}`",
+                        key_ty.name(&self.types),
+                        actual_key.name(&self.types)
+                    ),
+                    key.span,
+                );
+            }
+            let actual_value = self.type_expr(value, value_expected.as_ref());
+            if value_ty.is_poison() {
+                if !actual_value.is_poison() {
+                    value_ty = actual_value;
+                }
+            } else if !actual_value.is_poison() && actual_value != value_ty {
+                self.report(
+                    format!(
+                        "map values must all have type `{}`, found `{}`",
+                        value_ty.name(&self.types),
+                        actual_value.name(&self.types)
+                    ),
+                    value.span,
+                );
+            }
+        }
+        Ty::Map(Box::new(key_ty), Box::new(value_ty))
+    }
+}
+
+impl Ty {
+    /// The generic arguments of a registry type, for binding inference.
+    fn args_of(&self) -> Option<&[Ty]> {
+        match self {
+            Ty::Struct(_, args) | Ty::Enum(_, args) => Some(args),
+            _ => None,
+        }
+    }
+}
+
+impl TypeDef {
+    fn is_struct(&self) -> bool {
+        matches!(self, TypeDef::Struct(_))
+    }
+}
+
+/// The base name of an lvalue, for assignment diagnostics.
+fn lvalue_name(target: &LValue) -> String {
+    match target {
+        LValue::Var { name } => name.clone(),
+        LValue::Field { base, name } => format!("{}.{name}", lvalue_name(base)),
+        LValue::Index { base, .. } => format!("{}[...]", lvalue_name(base)),
     }
 }
 
 /// §A.4 operand typing. `None` means the operator does not accept the
-/// operand types. `void` is not a value, so no operator accepts it.
-fn binary_result(op: BinaryOp, left: ValueTy, right: ValueTy) -> Option<ValueTy> {
-    if left == ValueTy::Void || right == ValueTy::Void {
+/// operand types. `void` and poison are not values. `==`/`!=` accept any
+/// same-type pair — struct and enum equality is structural (§A.4).
+fn binary_result(op: BinaryOp, left: &Ty, right: &Ty) -> Option<Ty> {
+    if left == &Ty::Void || right == &Ty::Void {
+        return None;
+    }
+    if left.is_poison() || right.is_poison() {
         return None;
     }
     match op {
         BinaryOp::Add => match (left, right) {
-            (ValueTy::Int, ValueTy::Int) => Some(ValueTy::Int),
-            (ValueTy::Float, ValueTy::Float) => Some(ValueTy::Float),
-            // §A.6: either side str, the other stringifies. (str, str) is
-            // covered by the first alternative.
-            (ValueTy::Str, ValueTy::Str | ValueTy::Int | ValueTy::Float | ValueTy::Bool)
-            | (ValueTy::Int | ValueTy::Float | ValueTy::Bool, ValueTy::Str) => Some(ValueTy::Str),
+            (Ty::Int, Ty::Int) => Some(Ty::Int),
+            (Ty::Float, Ty::Float) => Some(Ty::Float),
+            // §A.6: either side str (scalars only), the other stringifies.
+            (Ty::Str, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+            | (Ty::Int | Ty::Float | Ty::Bool, Ty::Str) => Some(Ty::Str),
             _ => None,
         },
         BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => match (left, right) {
-            (ValueTy::Int, ValueTy::Int) => Some(ValueTy::Int),
-            (ValueTy::Float, ValueTy::Float) => Some(ValueTy::Float),
+            (Ty::Int, Ty::Int) => Some(Ty::Int),
+            (Ty::Float, Ty::Float) => Some(Ty::Float),
             _ => None,
         },
         BinaryOp::Rem => match (left, right) {
-            (ValueTy::Int, ValueTy::Int) => Some(ValueTy::Int),
+            (Ty::Int, Ty::Int) => Some(Ty::Int),
             _ => None,
         },
-        // §A.4: strict same-type value equality.
-        BinaryOp::Eq | BinaryOp::Ne => (left == right).then_some(ValueTy::Bool),
+        // §A.4: strict same-type value equality, structural for structs
+        // and enums (Ty equality compares registry index and arguments).
+        BinaryOp::Eq | BinaryOp::Ne => (left == right).then_some(Ty::Bool),
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => match (left, right) {
-            (ValueTy::Int, ValueTy::Int) | (ValueTy::Float, ValueTy::Float) => Some(ValueTy::Bool),
+            (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => Some(Ty::Bool),
             _ => None,
         },
         BinaryOp::And | BinaryOp::Or => match (left, right) {
-            (ValueTy::Bool, ValueTy::Bool) => Some(ValueTy::Bool),
+            (Ty::Bool, Ty::Bool) => Some(Ty::Bool),
             _ => None,
         },
     }
@@ -687,9 +2200,10 @@ fn unary_op_symbol(op: UnaryOp) -> &'static str {
 }
 
 /// True when executing `block` cannot fall off its end: some statement in
-/// it transfers control (§2.14 plus the owner ruling). `while` never
-/// counts; `if` without `else` does not count; `if`/`else` counts only
-/// when both branches transfer.
+/// it transfers control (§2.14 plus the owner ruling). `while` and `for`
+/// never count; `if` without `else` does not count; `if`/`else` counts
+/// only when both branches transfer; a `match` counts only when every arm
+/// transfers.
 fn block_returns(block: &Block) -> bool {
     block.stmts.iter().any(stmt_transfers)
 }
@@ -705,6 +2219,9 @@ fn stmt_transfers(stmt: &Stmt) -> bool {
         } => else_branch
             .as_ref()
             .is_some_and(|else_stmt| block_returns(then_branch) && stmt_transfers(else_stmt)),
+        StmtKind::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|arm| block_returns(&arm.body))
+        }
         _ => false,
     }
 }
@@ -1122,7 +2639,7 @@ mod tests {
         let source = "int x = 1\n";
         assert_error(
             source,
-            "only function declarations are allowed at top level",
+            "only function and type declarations are allowed at top level",
             span_of(source, "int x = 1"),
         );
     }
@@ -1241,5 +2758,340 @@ mod tests {
         )));
         // Runs to completion on any input; output volume is not pinned.
         let _ = check(&outcome.statements);
+    }
+
+    // ------------------------------------------------------------------
+    // Full-surface checks: structs, enums, generics, match, for,
+    // collections, interpolation, and the ? operator.
+    // ------------------------------------------------------------------
+
+    fn check_full(source: &str) -> Vec<Diagnostic> {
+        check(&parse_source(source).statements)
+    }
+
+    #[test]
+    fn syntax_cm_type_checks_clean() {
+        const SYNTAX_CM: &str =
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../syntax.cm"));
+        let diagnostics = check_full(SYNTAX_CM);
+        assert!(
+            diagnostics.is_empty(),
+            "check(parse_source(syntax.cm)) must be empty: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn struct_literals_type_check_with_named_fields() {
+        let source = "struct vec2 {\n    float x\n    float y\n}\nint main() {\nvec2 p = vec2(x: 1.0, y: 2.0)\nfloat fx = p.x\nreturn 0\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn struct_construction_rejects_missing_and_unknown_fields() {
+        let head = "struct vec2 {\n    float x\n    float y\n}\nint main() {\n";
+        // Missing field.
+        let source = format!("{head}vec2 p = vec2(x: 1.0)\nreturn 0\n}}\n");
+        assert_eq!(check_full(&source).len(), 1);
+        assert!(
+            check_full(&source)[0]
+                .to_string()
+                .contains("missing field `y`")
+        );
+        // Unknown field.
+        let source = format!("{head}vec2 p = vec2(x: 1.0, y: 2.0, z: 3.0)\nreturn 0\n}}\n");
+        assert!(
+            check_full(&source)
+                .iter()
+                .any(|d| d.to_string().contains("unknown field `z`"))
+        );
+        // Wrong field type.
+        let source = format!("{head}vec2 p = vec2(x: 1, y: 2.0)\nreturn 0\n}}\n");
+        assert!(
+            check_full(&source)
+                .iter()
+                .any(|d| d.to_string().contains("wrong type for field `x`"))
+        );
+        // Positional construction is not a struct literal.
+        let source = format!("{head}vec2 p = vec2(1.0, 2.0)\nreturn 0\n}}\n");
+        assert!(
+            check_full(&source)
+                .iter()
+                .any(|d| d.to_string().contains("requires named arguments"))
+        );
+    }
+
+    #[test]
+    fn generic_struct_infers_type_arguments_from_fields() {
+        let source = "struct pair<A, B> {\n    A first\n    B second\n}\nstr main() {\npair<int, str> p = pair(first: 1, second: \"x\")\nreturn p.second\n}\n";
+        assert!(check_full(source).is_empty());
+        // A conflicting field type reports the mismatch.
+        let source = "struct pair<A, B> {\n    A first\n    B second\n}\nint main() {\npair<int, int> p = pair(first: 1, second: \"x\")\nreturn 0\n}\n";
+        assert!(
+            check_full(source)
+                .iter()
+                .any(|d| d.to_string().contains("wrong type for field `second`"))
+        );
+    }
+
+    #[test]
+    fn unknown_field_access_is_rejected() {
+        let source = "struct vec2 {\n    float x\n    float y\n}\nint main() {\nvec2 p = vec2(x: 1.0, y: 2.0)\nfloat f = p.z\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("unknown field `z`"));
+    }
+
+    #[test]
+    fn enum_construction_and_match_type_check() {
+        let source = "enum gameEvent {\n    Damage(int amount)\n    PlayerDied()\n}\nint main() {\ngameEvent evt = gameEvent.Damage(25)\nmatch (evt) {\n    Damage(int amount) => { return amount }\n    PlayerDied() => { return 0 }\n}\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn non_exhaustive_match_is_rejected() {
+        let source = "enum gameEvent {\n    Damage(int amount)\n    Heal(int amount)\n}\nint main() {\ngameEvent evt = gameEvent.Damage(25)\nmatch (evt) {\n    Damage(int amount) => { return amount }\n}\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("not exhaustive"));
+        assert!(diagnostics[0].to_string().contains("Heal"));
+        // A wildcard makes it exhaustive.
+        let source = "enum gameEvent {\n    Damage(int amount)\n    Heal(int amount)\n}\nint main() {\ngameEvent evt = gameEvent.Damage(25)\nmatch (evt) {\n    Damage(int amount) => { return amount }\n    _ => { return 0 }\n}\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn match_pattern_payload_types_are_checked() {
+        let source = "enum gameEvent {\n    Damage(int amount)\n    Heal(int amount)\n}\nint main() {\ngameEvent evt = gameEvent.Damage(25)\nmatch (evt) {\n    Damage(str amount) => { return 0 }\n    _ => { return 1 }\n}\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("wrong type for payload `amount`")
+        );
+    }
+
+    #[test]
+    fn match_scrutinee_must_be_an_enum() {
+        let source = "int main() {\nint x = 1\nmatch (x) {\n    _ => { return 0 }\n}\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("match scrutinee must be an enum")
+        );
+    }
+
+    #[test]
+    fn option_and_result_check_clean() {
+        let source = "option<int> findEven(int[] xs) {\nreturn Some(1)\n}\nresult<int, str> safeDiv(int a, int b) {\nif (b == 0) {\nreturn Err(\"zero\")\n}\nreturn Ok(a / b)\n}\nint main() {\noption<int> found = None()\nresult<int, str> r = Ok(1)\nreturn 0\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn try_operator_checks_the_enclosing_error_type() {
+        // Clean: the propagated error type matches exactly (§2.8).
+        let source = "result<int, str> safeDiv(int a, int b) {\nreturn Ok(a / b)\n}\nresult<int, str> chain(int a) {\nint v = safeDiv(a, 2)?\nreturn Ok(v)\n}\n";
+        assert!(check_full(source).is_empty());
+
+        // Mismatched error types are rejected.
+        let source = "result<int, str> safeDiv(int a, int b) {\nreturn Ok(a / b)\n}\nresult<int, bool> chain(int a) {\nint v = safeDiv(a, 2)?\nreturn Ok(v)\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("`?` propagates error"));
+
+        // ? in a non-result function is rejected.
+        let source = "result<int, str> safeDiv(int a, int b) {\nreturn Ok(a / b)\n}\nint chain(int a) {\nint v = safeDiv(a, 2)?\nreturn v\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("`?` requires"));
+
+        // ? on a non-result operand is rejected.
+        let source = "int main() {\nint v = 1?\nreturn v\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("requires `result<T, E>`")
+        );
+    }
+
+    #[test]
+    fn arrays_and_maps_check_clean() {
+        let source = "int main() {\nint[] xs = [1, 2, 3]\nint first = xs[0]\nint len = xs.length\nmap<str, int> m = {\"a\": 1\n\"b\": 2\n}\nint a = m[\"a\"]\nfor (int v in xs) {\na += v\n}\nreturn a\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn array_element_mismatch_and_bad_index_are_rejected() {
+        let source = "int main() {\nint[] xs = [1, 2, \"3\"]\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("array elements must all have type `int`")
+        );
+
+        let source = "int main() {\nint[] xs = [1, 2]\nint i = xs[\"0\"]\nreturn i\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("array index must be `int`")
+        );
+
+        let source = "int main() {\nint x = 1\nint i = x[0]\nreturn i\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("cannot index `int`"));
+    }
+
+    #[test]
+    fn infer_rejects_ambiguous_empty_collections() {
+        // §2.16: the exact whitepaper message.
+        let source = "int main() {\ninfer items = []\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "cannot infer type for 'items'; ambiguous initializer"
+        );
+
+        let source = "int main() {\ninfer m = {}\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].to_string(),
+            "cannot infer type for 'm'; ambiguous initializer"
+        );
+
+        // With a declared type, empty collections are fine.
+        let source = "int main() {\nint[] items = []\nreturn items.length\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn interpolated_islands_must_be_scalars() {
+        let source = "struct vec2 {\n    float x\n    float y\n}\nstr main() {\nvec2 p = vec2(x: 1.0, y: 2.0)\nstr s = $\"{p}\"\nreturn s\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("cannot interpolate `vec2`")
+        );
+
+        let source = "str main() {\nint hp = 100\nstr s = $\"hp={hp}\"\nreturn s\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn for_loop_element_type_is_checked() {
+        let source = "int main() {\nint[] xs = [1, 2]\nfor (str v in xs) {\n}\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("wrong element type in for loop")
+        );
+
+        let source = "int main() {\nint x = 1\nfor (int v in x) {\n}\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("cannot iterate `int`"));
+    }
+
+    #[test]
+    fn struct_and_enum_equality_is_structural_and_same_type() {
+        let source = "struct vec2 {\n    float x\n    float y\n}\nint main() {\nvec2 a = vec2(x: 1.0, y: 2.0)\nvec2 b = vec2(x: 1.0, y: 2.0)\nbool same = a == b\nreturn 0\n}\n";
+        assert!(check_full(source).is_empty());
+
+        let source = "struct vec2 {\n    float x\n    float y\n}\nstruct other {\n    float x\n}\nint main() {\nvec2 a = vec2(x: 1.0, y: 2.0)\nother b = other(x: 1.0)\nbool same = a == b\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("cannot apply `==` to `vec2` and `other`")
+        );
+    }
+
+    #[test]
+    fn duplicate_and_reserved_type_names_are_rejected() {
+        let source = "struct vec2 {\n    float x\n}\nstruct vec2 {\n    float y\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("duplicate type `vec2`"));
+
+        let source = "struct option {\n    float x\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("reserved builtin name"));
+
+        let source = "int Ok(int x) {\nreturn x\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].to_string().contains("reserved builtin name"));
+    }
+
+    #[test]
+    fn unknown_types_are_rejected_at_declarations() {
+        let source = "int main() {\nmissing x = 1\nreturn 0\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("unknown type `missing`")
+        );
+
+        // Struct members referencing unknown types.
+        let source = "struct s {\n    missing f\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("unknown type `missing`")
+        );
+    }
+
+    #[test]
+    fn forward_type_references_resolve() {
+        // A struct field may reference a type declared later.
+        let source = "struct player {\n    vec2 position\n}\nstruct vec2 {\n    float x\n    float y\n}\nint main() {\nplayer p = player(position: vec2(x: 1.0, y: 2.0))\nreturn 0\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn value_semantics_of_field_assignment_type_check() {
+        let source = "struct player {\n    int health\n}\nplayer damage(player p, int amount) {\np.health = p.health - amount\nreturn p\n}\nint main() {\nplayer hero = player(health: 100)\nplayer hurt = damage(hero, 30)\nhero.health += 5\nreturn hurt.health\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn match_expressions_yield_one_type() {
+        let source = "enum gameEvent {\n    Damage(int amount)\n    Heal(int amount)\n}\nint main() {\ngameEvent evt = gameEvent.Damage(25)\nint v = match (evt) {\n    Damage(int amount) => amount\n    Heal(int amount) => amount\n}\nreturn v\n}\n";
+        assert!(check_full(source).is_empty());
+
+        let source = "enum gameEvent {\n    Damage(int amount)\n    Heal(int amount)\n}\nint main() {\ngameEvent evt = gameEvent.Damage(25)\nint v = match (evt) {\n    Damage(int amount) => amount\n    Heal(int amount) => \"healed\"\n}\nreturn v\n}\n";
+        let diagnostics = check_full(source);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0]
+                .to_string()
+                .contains("match arms yield different types")
+        );
+    }
+
+    #[test]
+    fn match_with_all_arms_returning_needs_no_tail_return() {
+        let source = "enum gameEvent {\n    Damage(int amount)\n    Heal(int amount)\n}\nint classify(gameEvent evt) {\nmatch (evt) {\n    Damage(int amount) => { return 1 }\n    Heal(int amount) => { return 2 }\n}\n}\n";
+        assert!(check_full(source).is_empty());
     }
 }

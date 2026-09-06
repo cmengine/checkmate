@@ -49,6 +49,13 @@ fn validate_statement(statement: &Stmt, diagnostics: &mut Vec<Diagnostic>) {
             validate_block(body, diagnostics);
         }
         StmtKind::FuncDecl { body, .. } => validate_block(body, diagnostics),
+        StmtKind::ImplDecl { members, .. } => {
+            // Every member is a function declaration (§10.4): its body's
+            // expression-level rules (§A.3) apply like any function's.
+            for member in members {
+                validate_statement(member, diagnostics);
+            }
+        }
         StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => {}
         StmtKind::For { iterable, body, .. } => {
             validate_expression(iterable, diagnostics);
@@ -85,6 +92,15 @@ fn validate_expression(expr: &Expr, diagnostics: &mut Vec<Diagnostic>) {
             }
         }
         ExprKind::VariantCall { args, .. } => {
+            for arg in args {
+                match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => {
+                        validate_expression(expr, diagnostics);
+                    }
+                }
+            }
+        }
+        ExprKind::PathCall { args, .. } => {
             for arg in args {
                 match arg {
                     CallArg::Positional(expr) | CallArg::Named { expr, .. } => {

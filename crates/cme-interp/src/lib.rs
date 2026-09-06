@@ -579,6 +579,13 @@ impl<'env, 'a> Runner<'env, 'a> {
                 "type declarations are not executable statements",
                 stmt.span,
             )),
+            // Only reachable through a hand-built tree: the parser produces
+            // impl blocks at top level only, where registration consumes
+            // them before execution (§10.4).
+            StmtKind::ImplDecl { .. } => Err(InterpError::new(
+                "impl blocks are only allowed at top level",
+                stmt.span,
+            )),
             StmtKind::Invalid { .. } => Err(InterpError::new(
                 "cannot execute an invalid statement",
                 stmt.span,
@@ -602,6 +609,16 @@ impl<'env, 'a> Runner<'env, 'a> {
                 variant,
                 args,
             } => self.eval_variant_call(enum_name, variant, args, expr.span),
+            // Placeholder until the runtime lands in this series: nothing
+            // can parse a path call yet, so only a hand-built tree reaches
+            // this arm.
+            ExprKind::PathCall { path, .. } => Err(InterpError::new(
+                format!(
+                    "qualified path calls are not implemented yet: `{}`",
+                    path.join(".")
+                ),
+                expr.span,
+            )),
             ExprKind::Field { obj, name } => {
                 let value = self.eval(obj)?;
                 read_field(&value, name, expr.span)

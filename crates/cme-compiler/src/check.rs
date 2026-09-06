@@ -217,6 +217,12 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
             }
             // Already reported at parse level; never cascaded here.
             StmtKind::Invalid { .. } => {}
+            // Placeholder until checker support lands in this series; the
+            // parser cannot produce this node yet, so only a hand-built
+            // tree reaches the arm.
+            StmtKind::ImplDecl { .. } => {
+                checker.report("impl blocks are not supported yet", statement.span);
+            }
             _ => checker.report(
                 "only function and type declarations are allowed at top level",
                 statement.span,
@@ -667,6 +673,12 @@ impl Checker {
             }
             StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => {
                 self.report("type declarations are only allowed at top level", stmt.span);
+            }
+            // Top-level impl blocks are consumed by the registration pass
+            // (§10.4); one nested in a body is illegal for the same reason
+            // as a nested function.
+            StmtKind::ImplDecl { .. } => {
+                self.report("impl blocks are only allowed at top level", stmt.span);
             }
             StmtKind::VarDecl { ty, name, expr } => {
                 // §2.16: the initializer is typed before the name exists,
@@ -1193,6 +1205,25 @@ impl Checker {
                 variant,
                 args,
             } => self.type_variant_call(enum_name, variant, args, expected, expr.span),
+            // Placeholder until checker support lands in this series: only a
+            // hand-built tree can reach it (the parser does not produce
+            // path calls yet).
+            ExprKind::PathCall { path, args } => {
+                for arg in args {
+                    let expr = match arg {
+                        CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                    };
+                    self.type_expr(expr, None);
+                }
+                self.report(
+                    format!(
+                        "qualified path calls are not implemented yet: `{}`",
+                        path.join(".")
+                    ),
+                    expr.span,
+                );
+                Ty::Poison
+            }
             ExprKind::Field { obj, name } => self.type_field(obj, name, expr.span),
             ExprKind::Index { obj, index } => self.type_index(obj, index, expr.span),
             ExprKind::Try { expr: inner } => self.type_try(inner, expr.span),

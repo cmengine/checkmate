@@ -140,9 +140,9 @@ pub mod ast {
                 }
                 ExprKind::Unary { expr, .. } | ExprKind::Paren { expr } => expr.contains_invalid(),
                 ExprKind::Try { expr } => expr.contains_invalid(),
-                ExprKind::Call { args, .. } | ExprKind::VariantCall { args, .. } => {
-                    args.iter().any(call_arg_contains_invalid)
-                }
+                ExprKind::Call { args, .. }
+                | ExprKind::VariantCall { args, .. }
+                | ExprKind::PathCall { args, .. } => args.iter().any(call_arg_contains_invalid),
                 ExprKind::Field { obj, .. } => obj.contains_invalid(),
                 ExprKind::Index { obj, index } => {
                     obj.contains_invalid() || index.contains_invalid()
@@ -269,10 +269,20 @@ pub mod ast {
             name: String,
             args: Vec<CallArg>,
         },
-        /// A qualified enum construction `Enum.Variant(args)` (§2.7).
+        /// A qualified enum construction `Enum.Variant(args)` (§2.7), or an
+        /// impl member call `Target.Member(args)` (§10.4) when `Target` is a
+        /// struct/enum carrying an impl block. The checker and interpreter
+        /// disambiguate: variant first, impl member second.
         VariantCall {
             enum_name: String,
             variant: String,
+            args: Vec<CallArg>,
+        },
+        /// A call through a dotted path of three or more segments:
+        /// `engine.gamemode.InitGame(args)` (§2.3, §10.4). The last segment
+        /// names the member; the leading segments name the impl target.
+        PathCall {
+            path: Vec<String>,
             args: Vec<CallArg>,
         },
         /// `obj.name`: struct field access (§2.6) or `.length` on an array
@@ -382,6 +392,9 @@ pub mod ast {
                         .iter()
                         .any(|field| field.ty.contains_invalid_type())
                 }),
+                StmtKind::ImplDecl { members, .. } => {
+                    members.iter().any(|member| member.contains_invalid())
+                }
                 _ => false,
             }
         }
@@ -450,6 +463,17 @@ pub mod ast {
             type_params: Vec<String>,
             variants: Vec<VariantDecl>,
         },
+        /// An impl block (§10.4): `impl target.path { members }`. The target
+        /// is a dotted path — a locally declared struct/enum name (single
+        /// segment) or a host-style namespace path (`engine.gamemode`).
+        /// Members are plain function declarations scoped under the target;
+        /// the parser guarantees every member is a `FuncDecl` statement, and
+        /// blocks for the same target are unioned (a member implemented
+        /// twice is a compile error).
+        ImplDecl {
+            target: Vec<String>,
+            members: Vec<Stmt>,
+        },
         If {
             cond: Expr,
             then_branch: Block,
@@ -494,7 +518,9 @@ pub use ast::Span;
 
 #[cfg(test)]
 mod tests {
-    use super::ast::{ErrorId, Expr, ExprKind, LValue, PrimitiveType, Span, Stmt, StmtKind, Type};
+    use super::ast::{
+        Block, CallArg, ErrorId, Expr, ExprKind, LValue, PrimitiveType, Span, Stmt, StmtKind, Type,
+    };
 
     #[test]
     fn invalid_nodes_report_containment() {
@@ -550,5 +576,63 @@ mod tests {
             index: broken,
         };
         assert!(target.contains_invalid());
+    }
+
+    #[test]
+    fn impl_members_and_path_calls_report_containment() {
+        let broken = Expr {
+            span: Span::new(0, 1),
+            kind: ExprKind::Invalid { error: ErrorId(0) },
+        };
+
+        // A path call whose arguments contain an Invalid node.
+        let call = Expr::new(
+            ExprKind::PathCall {
+                path: vec!["engine".into(), "gamemode".into(), "InitGame".into()],
+                args: vec![CallArg::Positional(broken)],
+            },
+            Span::new(0, 1),
+        );
+        assert!(call.contains_invalid());
+
+        // An impl block reports an Invalid member statement.
+        let broken_impl = Stmt::new(
+            StmtKind::ImplDecl {
+                target: vec!["engine".into(), "gamemode".into()],
+                members: vec![Stmt::new(
+                    StmtKind::Invalid { error: ErrorId(0) },
+                    Span::new(0, 1),
+                )],
+            },
+            Span::new(0, 1),
+        );
+        assert!(broken_impl.contains_invalid());
+
+        // A member function declaration is opaque to containment, exactly
+        // like a top-level function: the diagnostics list gates execution.
+        let healthy = Expr::new(ExprKind::IntLit(1), Span::new(0, 1));
+        let member = Stmt::new(
+            StmtKind::FuncDecl {
+                name: "InitGame".into(),
+                params: Vec::new(),
+                return_ty: Type::Void,
+                body: Block {
+                    span: Span::new(0, 1),
+                    stmts: vec![Stmt::new(
+                        StmtKind::Expression { expr: healthy },
+                        Span::new(0, 1),
+                    )],
+                },
+            },
+            Span::new(0, 1),
+        );
+        let clean_impl = Stmt::new(
+            StmtKind::ImplDecl {
+                target: vec!["counter".into()],
+                members: vec![member],
+            },
+            Span::new(0, 1),
+        );
+        assert!(!clean_impl.contains_invalid());
     }
 }

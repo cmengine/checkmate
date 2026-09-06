@@ -2225,6 +2225,11 @@ mod tests {
                     audit_block(&arm.body, source_len);
                 }
             }
+            StmtKind::ImplDecl { members, .. } => {
+                for member in members {
+                    audit_stmt(member, source_len);
+                }
+            }
             StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => {}
             StmtKind::Invalid { .. } => panic!("clean basic.cm must not contain Invalid"),
         }

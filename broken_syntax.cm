@@ -15,9 +15,17 @@
 //
 // Pinning protocol (boom.cm's): run, observe, pin the exact count, and fix
 // any comment that describes a different actual behavior — same commit.
-// Lines marked EDGE / PIN / RECOVERY REQUIREMENT carry their own
-// instructions. A check that turns out NOT to exist (error silently
-// accepted) is a GAP: report it, never pin silent acceptance.
+// A check that turns out NOT to exist (error silently accepted) is a GAP:
+// report it, never pin silent acceptance.
+//
+// Pinned diagnostic count: `cme check broken_syntax.cm` reports exactly 68
+// diagnostics. Comment-count reconciliation: 60 err markers (one per broken
+// line), plus four informative follow-ons (a second diagnostic on lines 151,
+// 152, 249, and 251), two parse follow-ons inside lexerEdges (lines 341 and
+// 343 each produce a lex error plus an `expected an expression` parse
+// diagnostic), plus one unbalanced-brace report for the §12 unclosed
+// struct (line 356) and one unterminated-comment report for the trailing
+// comment (line 368). 60 + 4 + 2 + 1 + 1 = 68.
 // ============================================================================
 
 // ----------------------------------------------------------------------------
@@ -148,11 +156,11 @@ int matchNonEnum() {
 int genericMisuse() {
     pair<int, str> p1 = pair(first: 1, second: "x")      // healthy
     pair<int, pair<str, bool>> nested = pair(first: 1, second: pair(first: "x", second: true))  // healthy (tricky): double `>` close
-    pair<int> p2 = pair(first: 1)                        // err: generic arity (2 type args expected)
-    pair<int, str, bool> p3 = pair(first: 1)             // err: generic arity
+    pair<int> p2 = pair(first: 1)                        // err: generic arity (2 type args expected; plus informative cannot-infer `B` follow-on)
+    pair<int, str, bool> p3 = pair(first: 1)             // err: generic arity (plus informative cannot-infer `B` follow-on)
     pair<int, str> p4 = pair(first: "one", second: "x")  // err: field type mismatch (first wants int)
     maybe<vec2> m1 = maybe.Just(vec2(x: 1.0, y: 2.0))    // healthy
-    maybe m2 = maybe.Just(1)                             // PIN: missing type arguments — error or accepted; document actual
+    maybe m2 = maybe.Just(1)                             // err: generic arity (0 type args; 1 expected)
     return p1.first
 }
 
@@ -163,7 +171,7 @@ int genericMisuse() {
 result<int, str> qMisuse(int a) {
     int x = a?                    // err: `?` applied to a non-result
     int y = divide(a, 2)?         // healthy
-    return Ok(x + y)              // possible follow-on from the poisoned x — PIN actual, flag if it cascades
+    return Ok(x + y)              // healthy: no follow-on from the poisoned x
 }
 
 result<int, float> wrongErrorType(int a) {
@@ -233,7 +241,7 @@ str interpMisuse() {
     int hp = 100
     str s1 = $"hp={hp}"              // healthy
     str s2 = "plain {hp} text"       // healthy (tricky): no `$` sigil — braces are literal text
-    str s3 = $"cost={hp * 2 + }"     // err (parse): missing expression in island
+    str s3 = $"cost={hp * 2 + }"     // err (parse): missing expression in island (found `}` at the island close)
     str s4 = $"name={ghost}"         // err: unknown name `ghost`
     return s1
 }
@@ -246,9 +254,9 @@ int namedArgMisuse() {
     int a = clamp(15, 0, 10)                       // healthy positional
     int b = clamp(value: 15, low: 0, high: 10)     // healthy named
     int c = clamp(15, low: 0, high: 10)            // err: positional and named mixed
-    int d = clamp(15, 0, top: 10)                  // err: unknown parameter `top`
+    int d = clamp(value: 15, low: 0, top: 10)      // err: unknown parameter `top` (plus informative missing `high` follow-on)
     int e = clamp(15, 0)                           // err: wrong number of arguments
-    int f = clamp(value: 15, value: 0, high: 10)   // err: duplicate named argument
+    int f = clamp(value: 15, value: 0, high: 10)   // err: duplicate named argument (plus informative missing `low` follow-on)
     return a
 }
 
@@ -281,7 +289,7 @@ impl nonexistent {                  // err: impl target must be a declared type
 
 int implMisuse() {
     counter c = counter(value: 41)
-    int a = counter.peek(c)          // PIN: resolution after duplicate — first-wins or ambiguity; document actual
+    int a = counter.peek(c)          // healthy: first-wins; resolves to the first registration
     counter d = counter.bump(c)      // healthy
     int b = counter.peekTwice(c)     // err: unknown member `peekTwice`
     int e = peek(c)                  // err: impl members must be called by qualified path
@@ -334,10 +342,11 @@ int trickyHealthy() {
 // ----------------------------------------------------------------------------
 
 int lexerEdges() {
-    // EDGE (documented): `>=` maximal-munch fuses the generic close and the
-    // assignment — `maybe < int >= m`. Pin the actual diagnostic.
-    maybe<int>= m
-    // err (lex): unterminated interpolated string (rest of line is the error region)
+    // Lexer edge (pinned): `>=` maximal-munch fuses the generic close and
+    // the assignment — `maybe < int >= m` reports `expected an expression,
+    // but found `int`` at the type argument.
+    maybe<int>= m                               // err: expected an expression, but found `int`
+    // err (lex): unterminated interpolated string literal (rest of line is the error region)
     str u = $"unterminated
     // err (lex): invalid escape
     str bad = "\q"
@@ -348,10 +357,12 @@ int lexerEdges() {
 // §12 — structural recovery: unclosed brace
 // ----------------------------------------------------------------------------
 //
-// RECOVERY REQUIREMENT: everything above must already be pinned; this
-// unclosed struct may not corrupt earlier statements. Pin where recovery
-// lands. If the sibling below does not survive, the recovery is buggy —
-// fix the code, do not pin the bug.
+// RECOVERY (pinned): a declaration-starting token (`struct`/`enum`/`impl` or
+// a function return-type keyword heading a `Type name(` signature) closes
+// the broken struct at that point: the partial `unclosed` struct is declared
+// (one `unbalanced opening brace` diagnostic at its opening `{`), and
+// parsing re-dispatches from the token. `survivor` and `survivorCheck`
+// survive with zero unknown-type errors.
 
 struct unclosed {
     int x

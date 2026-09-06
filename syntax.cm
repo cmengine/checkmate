@@ -23,7 +23,11 @@
 //   §2.8/§4.1  $"..." string interpolation with {expr} islands
 //
 // Every section function returns the number of failed checks within it
-// (0 == all checks passed). main() returns the grand total: 0 == success.
+// (0 == all checks passed). main() still runs every section and counts the
+// failures, but returns a human-readable report of the actual outputs the
+// exercised functions produced, so `cme run syntax.cm` prints real results
+// instead of just a bare failure count. The last report line is always
+// `failures=N`, where 0 == success.
 //
 // Deliberately out of scope here (per owner direction): host schema imports
 // and capability namespaces (§2.3, §9), impl blocks (§10.4), megaprogramming
@@ -737,7 +741,7 @@ int checkControl() {
 // Entry point (CLI convention — the host picks the target, §2.1)
 // ----------------------------------------------------------------------------
 
-int main() {
+str main() {
     int failures = 0
     failures += checkStructs()
     failures += checkGenerics()
@@ -751,5 +755,33 @@ int main() {
     failures += checkOperators()
     failures += checkControl()
     ping()
-    return failures
+
+    player hero = player(name: "Hero", position: vec2(x: 10.0, y: 5.0), health: 100, alive: true)
+    player hurt = damage(hero, 60)
+    result<int, str> chained = chain(64, 4, 2)
+    str chainedText = match (chained) {
+        Ok(int total) => "chain(64,4,2)=" + total
+        Err(str reason) => "chain(64,4,2)=Err:" + reason
+    }
+    map<str, int> loot = {"gold": 120, "gems": 3}
+    str goblinKind = "goblin"
+    vec2 goblinPos = vec2(x: 2.0, y: 3.0)
+    gameEvent goblin = gameEvent.Spawn(goblinKind, goblinPos)
+    int gold = loot["gold"]
+    int gems = loot["gems"]
+
+    str report = $"fib(10)={fib(10)}\n"
+    report += $"grade(95)={grade(95)} grade(85)={grade(85)} grade(42)={grade(42)}\n"
+    report += $"sumDown(5)={sumDown(5)} sumAll([1,2,3])={sumAll([1, 2, 3])}\n"
+    report += $"clamp(15,0,10)={clamp(15, 0, 10)} clamp(value: 15, low: 0, high: 10)={clamp(value: 15, low: 0, high: 10)}\n"
+    report += $"describeEvent(Spawn)={describeEvent(goblin)}\n"
+    report += $"classifyEvent(Spawn)={classifyEvent(goblin)} isDamage(Damage(1))={isDamage(gameEvent.Damage(1))}\n"
+    report += $"optionOrDefault([1,3],-1)={optionOrDefault([1, 3], -1)} optionOrDefault([3,9,14],-1)={optionOrDefault([3, 9, 14], -1)}\n"
+    report += chainedText + "\n"
+    report += $"damage(hero,60) health={hurt.health} alive={hurt.alive} callerHealth={hero.health}\n"
+    report += $"distanceSq((1,2),(3,4))={distanceSq(vec2(x: 1.0, y: 2.0), vec2(x: 3.0, y: 4.0))}\n"
+    report += $"loot gold={gold} gems={gems}\n"
+    report += $"probe={probeInterpolation()}\n"
+    report += "failures=" + failures + "\n"
+    return report
 }

@@ -58,10 +58,12 @@ fn basic_cm_runs_end_to_end_and_returns_three() {
 
 #[test]
 fn syntax_cm_runs_end_to_end_and_every_check_passes() {
-    // The full-language fixture: main returns the number of failed
-    // internal checks — zero when the entire surface behaves per the
+    // The full-language fixture: main runs every section check and returns
+    // a report of the actual outputs the exercised functions produced; the
+    // trailing `failures=0` line shows the entire surface behaves per the
     // whitepaper.
-    assert_eq!(run_main(SYNTAX_CM), Ok(Value::Int(0)));
+    let expected = "fib(10)=55\ngrade(95)=A grade(85)=B grade(42)=F\nsumDown(5)=15 sumAll([1,2,3])=6\nclamp(15,0,10)=10 clamp(value: 15, low: 0, high: 10)=10\ndescribeEvent(Spawn)=spawn:goblin@2,3\nclassifyEvent(Spawn)=3 isDamage(Damage(1))=true\noptionOrDefault([1,3],-1)=-1 optionOrDefault([3,9,14],-1)=14\nchain(64,4,2)=24\ndamage(hero,60) health=40 alive=true callerHealth=100\ndistanceSq((1,2),(3,4))=8\nloot gold=120 gems=3\nprobe=hp=100 pos=(3.5,-1.5) score=201 next=13 armed=true\nfailures=0\n";
+    assert_eq!(run_main(SYNTAX_CM), Ok(Value::Str(expected.into())));
 }
 
 #[test]

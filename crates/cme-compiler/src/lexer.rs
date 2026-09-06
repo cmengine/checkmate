@@ -195,6 +195,8 @@ pub enum Token<'a> {
     KwFor,
     #[token("in")]
     KwIn,
+    #[token("impl")]
+    KwImpl,
 
     // Integer Literals
     // This regex matches digits, and the closure parses it into an i64. A
@@ -282,6 +284,7 @@ impl<'a> Token<'a> {
             Token::KwMatch => "`match`".into(),
             Token::KwFor => "`for`".into(),
             Token::KwIn => "`in`".into(),
+            Token::KwImpl => "`impl`".into(),
             Token::Assign => "`=`".into(),
             Token::AddAssign => "`+=`".into(),
             Token::SubAssign => "`-=`".into(),
@@ -333,7 +336,12 @@ impl<'a> Token<'a> {
         self.is_type_keyword()
             || matches!(
                 self,
-                Token::KwVoid | Token::KwStruct | Token::KwEnum | Token::KwMatch | Token::KwFor
+                Token::KwVoid
+                    | Token::KwStruct
+                    | Token::KwEnum
+                    | Token::KwMatch
+                    | Token::KwFor
+                    | Token::KwImpl
             )
     }
 }
@@ -656,7 +664,7 @@ mod tests {
 
     #[test]
     fn lexes_new_keywords() {
-        let source = "struct enum match for in";
+        let source = "struct enum match for in impl";
         assert_eq!(
             lex_ok(source),
             vec![
@@ -665,6 +673,7 @@ mod tests {
                 Token::KwMatch,
                 Token::KwFor,
                 Token::KwIn,
+                Token::KwImpl,
                 Token::Eof,
             ]
         );
@@ -767,6 +776,7 @@ mod tests {
             (Token::KwMatch, "`match`"),
             (Token::KwFor, "`for`"),
             (Token::KwIn, "`in`"),
+            (Token::KwImpl, "`impl`"),
             (Token::Assign, "`=`"),
             (Token::AddAssign, "`+=`"),
             (Token::SubAssign, "`-=`"),

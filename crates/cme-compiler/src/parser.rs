@@ -406,6 +406,9 @@ impl<'a, 'src> Parser<'a, 'src> {
         if first.token == Token::KwEnum {
             return self.parse_enum_declaration(first);
         }
+        if first.token == Token::KwImpl {
+            return self.parse_impl_declaration(first);
+        }
         if first.token == Token::KwVoid {
             if matches!(self.peek().token, Token::Ident(_))
                 && !matches!(
@@ -1123,6 +1126,107 @@ impl<'a, 'src> Parser<'a, 'src> {
         )
     }
 
+    /// An impl block (§10.4): `impl target.path { members }`. The target is
+    /// a dotted identifier path — a locally declared struct/enum name or a
+    /// host-style namespace (`engine.gamemode`). Members are function
+    /// declarations (§2.11 shape); any other statement inside the braces is
+    /// reported and skipped. Recovery mirrors [`Self::parse_block_body`]: a
+    /// damaged member is reported and the parser resynchronizes at the next
+    /// line boundary, so sibling members survive.
+    fn parse_impl_declaration(&mut self, impl_token: SpannedToken<'src>) -> Stmt {
+        let start = impl_token.span.start;
+
+        // The target path: one identifier, then `.segment` extensions.
+        let head = *self.peek();
+        let mut target = match head.token {
+            Token::Ident(name) => {
+                self.advance();
+                vec![name.to_string()]
+            }
+            other => {
+                let end = self.skip_to_statement_end(head.span.end);
+                let error = self.record(
+                    format!("expected an impl target, but found {}", other.describe()),
+                    head.span,
+                );
+                return Stmt {
+                    span: Span::new(start, end),
+                    kind: StmtKind::Invalid { error },
+                };
+            }
+        };
+        while self.at(Token::Dot)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| t.token),
+                Some(Token::Ident(_))
+            )
+        {
+            self.advance(); // dot
+            if let Token::Ident(segment) = self.advance().token {
+                target.push(segment.to_string());
+            }
+        }
+
+        if !self.at(Token::LBrace) {
+            let other = *self.peek();
+            let end = self.recover_to_next_statement(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+        let _open_brace = self.advance().span.start;
+
+        let mut members: Vec<Stmt> = Vec::new();
+        let end;
+        loop {
+            self.skip_newlines();
+            if self.at(Token::RBrace) {
+                let closing = self.advance();
+                end = closing.span.end;
+                break;
+            }
+            if self.at_eof() {
+                let eof_span = self.eof_span();
+                let _ = self.record("expected `}` before end of file", eof_span);
+                end = eof_span.end;
+                break;
+            }
+
+            let member = self.parse_statement();
+            if matches!(&member.kind, StmtKind::FuncDecl { .. }) {
+                members.push(member);
+            } else if !matches!(member.kind, StmtKind::Invalid { .. }) {
+                // A recognizable statement that is not a function
+                // declaration: impl members are functions (§10.4). Invalid
+                // members were already reported by `parse_statement`.
+                let span = member.span;
+                let _ = self.record("impl members must be function declarations", span);
+            }
+
+            match self.peek().token {
+                Token::Newline => self.pos += 1,
+                Token::RBrace | Token::Eof => {}
+                _ => {
+                    let token = self.peek().token;
+                    let span = self.peek().span;
+                    self.errors
+                        .push(Self::expected("end of member", &token, span));
+                    self.skip_to_next_statement();
+                }
+            }
+        }
+
+        Stmt::new(
+            StmtKind::ImplDecl { target, members },
+            Span::new(start, end),
+        )
+    }
+
     /// A declaration made unrecoverable by its parameter list: one Invalid
     /// statement covering the skipped region.
     fn invalid_declaration(&mut self, head: SpannedToken<'src>) -> Stmt {
@@ -1590,7 +1694,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         // construction (§2.11); anything else is a bare fragment.
         let is_callable = matches!(
             &expr.kind,
-            ExprKind::Call { .. } | ExprKind::VariantCall { .. }
+            ExprKind::Call { .. } | ExprKind::VariantCall { .. } | ExprKind::PathCall { .. }
         );
         if is_callable {
             let end = expr.span.end;
@@ -2238,32 +2342,49 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::LBrace => self.parse_map_literal(token),
             Token::KwMatch => self.parse_match_expression(token),
             Token::Ident(name) => {
-                // A qualified construction: `Enum.Variant(args)` (§2.7).
-                if self.at(Token::Dot)
+                // A qualified call: `Enum.Variant(args)` (§2.7) or a deeper
+                // impl-member path `engine.gamemode.InitGame(args)` (§2.3,
+                // §10.4). The dotted chain is scanned ahead without
+                // consuming; only a chain terminated by `(` becomes a call,
+                // anything else falls through to postfix field access.
+                let mut segments = 1usize;
+                let mut scan = self.pos;
+                while matches!(self.tokens.get(scan).map(|t| t.token), Some(Token::Dot))
                     && matches!(
-                        self.tokens.get(self.pos + 1).map(|t| t.token),
+                        self.tokens.get(scan + 1).map(|t| t.token),
                         Some(Token::Ident(_))
                     )
-                    && matches!(
-                        self.tokens.get(self.pos + 2).map(|t| t.token),
-                        Some(Token::LParen)
-                    )
                 {
-                    self.advance(); // dot
-                    let variant_tok = self.advance();
-                    let variant = match variant_tok.token {
-                        Token::Ident(variant) => variant.to_string(),
-                        _ => unreachable!("checked by the lookahead"),
-                    };
+                    segments += 1;
+                    scan += 2;
+                }
+                if segments >= 2
+                    && matches!(self.tokens.get(scan).map(|t| t.token), Some(Token::LParen))
+                {
+                    let mut path = vec![name.to_string()];
+                    while path.len() < segments {
+                        self.advance(); // dot
+                        if let Token::Ident(segment) = self.advance().token {
+                            path.push(segment.to_string());
+                        }
+                    }
                     let (args, span) = self.parse_call_args(token.span)?;
-                    return Ok(Expr::new(
-                        ExprKind::VariantCall {
-                            enum_name: name.to_string(),
-                            variant,
-                            args,
-                        },
-                        span,
-                    ));
+                    if path.len() == 2 {
+                        // Two segments keep the `Enum.Variant` node; the
+                        // checker disambiguates construction vs impl
+                        // member (§2.7, §10.4).
+                        let variant = path.pop().unwrap_or_default();
+                        let enum_name = path.pop().unwrap_or_default();
+                        return Ok(Expr::new(
+                            ExprKind::VariantCall {
+                                enum_name,
+                                variant,
+                                args,
+                            },
+                            span,
+                        ));
+                    }
+                    return Ok(Expr::new(ExprKind::PathCall { path, args }, span));
                 }
                 // A call by name (§2.11, §2.12).
                 if self.at(Token::LParen) {

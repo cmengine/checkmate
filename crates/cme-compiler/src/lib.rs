@@ -1377,6 +1377,178 @@ mod tests {
     }
 
     #[test]
+    fn parses_impl_blocks_with_function_members() {
+        let source = "impl counter {\n    int peek(counter c) {\n        return c.value\n    }\n\n    counter reset() {\n        return counter(value: 0)\n    }\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::ImplDecl { target, members } => {
+                assert_eq!(target, &["counter".to_string()]);
+                assert_eq!(members.len(), 2);
+                match &members[0].kind {
+                    StmtKind::FuncDecl {
+                        name,
+                        params,
+                        return_ty,
+                        ..
+                    } => {
+                        assert_eq!(name, "peek");
+                        assert_eq!(params.len(), 1);
+                        assert_eq!(params[0].name, "c");
+                        assert_eq!(*return_ty, Type::Prim(PrimitiveType::Int));
+                    }
+                    other => panic!("expected a member function, got {other:?}"),
+                }
+                assert!(matches!(
+                    &members[1].kind,
+                    StmtKind::FuncDecl { name, .. } if name == "reset"
+                ));
+            }
+            other => panic!("expected an impl declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dotted_impl_targets() {
+        // Host-style namespace targets (§10.4): the whole dotted path is
+        // the target.
+        let source =
+            "impl engine.gamemode {\n    void OnTick(int dt) {\n        return\n    }\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::ImplDecl { target, members } => {
+                assert_eq!(target, &["engine".to_string(), "gamemode".to_string()]);
+                assert_eq!(members.len(), 1);
+            }
+            other => panic!("expected an impl declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_members_must_be_function_declarations() {
+        let source =
+            "impl counter {\n    int x = 5\n    int peek() {\n        return 1\n    }\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(
+            errors.iter().any(|error| error
+                .message()
+                .contains("impl members must be function declarations")),
+            "{errors:#?}"
+        );
+        // The valid member survives the rejected one.
+        match &stmts[0].kind {
+            StmtKind::ImplDecl { members, .. } => assert_eq!(members.len(), 1),
+            other => panic!("expected an impl declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_target_must_start_with_an_identifier() {
+        let (stmts, errors) = parse_program_parts("impl 42 {\n}\n");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message().contains("expected an impl target")),
+            "{errors:#?}"
+        );
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn unclosed_impl_block_reports_and_absorbs_the_tail_like_a_block() {
+        // An unclosed `{` swallows the remaining statements as members,
+        // exactly like an unclosed function body (the parser cannot know
+        // where the block was meant to end).
+        let source = "impl counter {\n    int peek() {\n        return 1\n    }\nint main() {\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message().contains("expected `}` before end of file")),
+            "{errors:#?}"
+        );
+        match stmts.first().map(|stmt| &stmt.kind) {
+            Some(StmtKind::ImplDecl { members, .. }) => {
+                assert_eq!(members.len(), 2);
+                assert!(matches!(
+                    &members[1].kind,
+                    StmtKind::FuncDecl { name, .. } if name == "main"
+                ));
+            }
+            other => panic!("expected an impl declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn three_segment_paths_parse_as_path_calls() {
+        let source = "int main() {\n    return engine.gamemode.InitGame(4)\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let StmtKind::FuncDecl { body, .. } = &stmts[0].kind else {
+            panic!("expected a function declaration");
+        };
+        let StmtKind::Return { value: Some(value) } = &body.stmts[0].kind else {
+            panic!("expected a return with a value");
+        };
+        match &value.kind {
+            ExprKind::PathCall { path, args } => {
+                assert_eq!(path, &["engine", "gamemode", "InitGame"]);
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected a path call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_segment_qualified_calls_stay_variant_calls() {
+        // `Color.Red(25)` keeps the two-segment `Enum.Variant` node; the
+        // checker (not the parser) disambiguates construction vs impl
+        // member (§2.7, §10.4).
+        let source = "int main() {\n    return Color.Red(25)\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let StmtKind::FuncDecl { body, .. } = &stmts[0].kind else {
+            panic!("expected a function declaration");
+        };
+        let StmtKind::Return { value: Some(value) } = &body.stmts[0].kind else {
+            panic!("expected a return with a value");
+        };
+        match &value.kind {
+            ExprKind::VariantCall {
+                enum_name,
+                variant,
+                args,
+            } => {
+                assert_eq!(enum_name, "Color");
+                assert_eq!(variant, "Red");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected a variant call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_call_statements_are_valid_expression_statements() {
+        // A bare path call in statement position (§2.11-style): its value
+        // is discarded.
+        let source = "int main() {\n    engine.gamemode.OnTick(1, 0.5)\n    return 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let StmtKind::FuncDecl { body, .. } = &stmts[0].kind else {
+            panic!("expected a function declaration");
+        };
+        assert!(matches!(
+            &body.stmts[0].kind,
+            StmtKind::Expression { expr }
+                if matches!(expr.kind, ExprKind::PathCall { .. })
+        ));
+    }
+
+    #[test]
     fn array_typed_variable_and_function_declarations_parse() {
         // `int[]` in both variable and return-type positions (§11).
         let (stmts, errors) = parse_program_parts("int[] xs\n");

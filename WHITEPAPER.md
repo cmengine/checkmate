@@ -556,7 +556,7 @@ In native LLVM artifacts, the compiler injects lightweight cooperative safepoint
 
 ### 5.6. Cooperative Cancellation
 
-A running or suspended invocation can be cancelled by the host at any time. When cancelled:
+A running or suspended invocation can be canceled by the host at any time. When canceled:
 
 1. The pending `SuspendState` handle is dropped.
 2. The continuation structure is dropped, deterministically decrementing reference counts on all live captured values.
@@ -608,7 +608,7 @@ pub trait CmTrap {
 
 The bytecode interpreter (`cme-interp`) is strictly `std`-only.
 
-- Interpreting code on bare metal is an anti-pattern: microcontrollers lack the storage and dynamic loading infrastructure for untrusted third-party scripts.
+- Interpreting code on bare metal is an antipattern: microcontrollers lack the storage and dynamic loading infrastructure for untrusted third-party scripts.
 - Embedded devices iterate by flashing compiled binaries directly.
 - Consequently, the AOT runtime supports freestanding `no_std`, while the interpreter remains focused on hosted development and sandboxed client platforms.
 
@@ -916,6 +916,8 @@ impl engine.gamemode {
 impl engine.gamemode {
     void OnTick(GameState state, float deltaTime) {
         state.score = state.score + 1
+        // Changes lost here because nothing is returned
+        // TODO: `cme` has to error here
     }
 }
 ```

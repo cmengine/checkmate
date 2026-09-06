@@ -1,0 +1,370 @@
+// ============================================================================
+// broken_syntax.cm — error-recovery stress fixture for the full language surface
+// ============================================================================
+//
+// The dark twin of syntax.cm: every broken construct documents its expected
+// diagnostic in a trailing comment; every healthy line (especially the
+// tricky ones) must produce none. `cme check broken_syntax.cm` must exit 1
+// with the pinned diagnostic count, never panic, and every healthy sibling
+// must survive. Prefixes of this file must never crash the pipeline (covered
+// by the truncation property test).
+//
+// Written against the POST-RENAME constructor casing (Ok/Err/Some/None per
+// WHITEPAPER §2.7/§2.8). If lowercase builtins are kept, flip those four
+// names here before pinning.
+//
+// Pinning protocol (boom.cm's): run, observe, pin the exact count, and fix
+// any comment that describes a different actual behavior — same commit.
+// Lines marked EDGE / PIN / RECOVERY REQUIREMENT carry their own
+// instructions. A check that turns out NOT to exist (error silently
+// accepted) is a GAP: report it, never pin silent acceptance.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// §0 — healthy preamble (types and helpers used below; zero diagnostics)
+// ----------------------------------------------------------------------------
+
+struct vec2 {
+    float x
+    float y
+}
+
+struct pair<A, B> {
+    A first
+    B second
+}
+
+struct counter {
+    int value
+}
+
+enum shape {
+    Circle(float radius)
+    Rect(float w, float h)
+    Point()
+}
+
+enum maybe<T> {
+    Just(T value)
+    Nothing()
+}
+
+int clamp(int value, int low, int high) {
+    if (value < low) {
+        return low
+    }
+    if (value > high) {
+        return high
+    }
+    return value
+}
+
+result<int, str> divide(int a, int b) {
+    if (b == 0) {
+        return Err("division by zero")
+    }
+    return Ok(a / b)
+}
+
+void voidCall() {
+    return
+}
+
+// ----------------------------------------------------------------------------
+// §1 — struct declarations, construction, fields
+// ----------------------------------------------------------------------------
+
+struct dupFields {                       // declaration parses fine
+    int a
+    int a                                // err: duplicate field `a`
+}
+
+int structMisuse() {
+    counter c1 = counter(value: 1)               // healthy
+    counter c2 = counter(value: 1, extra: 2)     // err: unknown field `extra`
+    counter c3 = counter()                       // err: missing field `value`
+    counter c4 = counter(value: "one")           // err: field type mismatch
+    counter c5 = counter(value: 1, value: 2)     // err: duplicate field `value`
+    vec2 v = impossible(x: 1.0, y: 2.0)          // err: unknown struct `impossible`
+    c1.nope = 2                                  // err: unknown field `nope`
+    c1.value = "two"                             // err: field assignment type mismatch
+    int notStruct = 5
+    int nope = notStruct.field                   // err: field access on a non-struct
+    return c1.value                              // healthy: c1 survived everything above
+}
+
+// ----------------------------------------------------------------------------
+// §2 — enums, constructors, match
+// ----------------------------------------------------------------------------
+
+int enumMisuse() {
+    shape s1 = shape.Circle(1.0)            // healthy
+    shape s2 = shape.Square(1.0)            // err: unknown variant `Square`
+    shape s3 = shape.Circle(1.0, 2.0)       // err: wrong payload arity
+    shape s4 = shape.Circle("one")          // err: payload type mismatch
+    shape s5 = vec2.Circle(1.0)             // err: `vec2` is not an enum
+    return 0
+}
+
+int matchNonExhaustive(shape s) {
+    int label = match (s) {
+        Circle(float radius) => 1
+        Rect(float w, float h) => 2
+    }                                      // err: non-exhaustive (Point missing)
+    return label
+}
+
+int matchBadPatterns(shape s) {
+    match (s) {
+        Circle(int radius) => { return 1 }     // err: pattern payload type mismatch
+        Rect(float w, float h) => { return 2 }
+        Point() => { return 3 }
+    }
+    match (s) {
+        Square(float r) => { return 4 }        // err: unknown variant in pattern
+        _ => { return 0 }
+    }
+    match (s) {
+        Rect(float w, float w) => { return 5 } // err: duplicate pattern binding `w`
+        Circle(float radius) => { return 6 }
+        Point() => { return 7 }
+    }
+    return 0
+}
+
+int matchNonEnum() {
+    int x = 5
+    match (x) {                            // err: match subject must be an enum
+        Circle(float radius) => { return 1 }
+        _ => { return 0 }
+    }
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// §3 — generics
+// ----------------------------------------------------------------------------
+
+int genericMisuse() {
+    pair<int, str> p1 = pair(first: 1, second: "x")      // healthy
+    pair<int, pair<str, bool>> nested = pair(first: 1, second: pair(first: "x", second: true))  // healthy (tricky): double `>` close
+    pair<int> p2 = pair(first: 1)                        // err: generic arity (2 type args expected)
+    pair<int, str, bool> p3 = pair(first: 1)             // err: generic arity
+    pair<int, str> p4 = pair(first: "one", second: "x")  // err: field type mismatch (first wants int)
+    maybe<vec2> m1 = maybe.Just(vec2(x: 1.0, y: 2.0))    // healthy
+    maybe m2 = maybe.Just(1)                             // PIN: missing type arguments — error or accepted; document actual
+    return p1.first
+}
+
+// ----------------------------------------------------------------------------
+// §4 — option, result, `?`
+// ----------------------------------------------------------------------------
+
+result<int, str> qMisuse(int a) {
+    int x = a?                    // err: `?` applied to a non-result
+    int y = divide(a, 2)?         // healthy
+    return Ok(x + y)              // possible follow-on from the poisoned x — PIN actual, flag if it cascades
+}
+
+result<int, float> wrongErrorType(int a) {
+    int y = divide(a, 2)?         // err: `?` error type `str` does not match enclosing `float`
+    return Ok(y)
+}
+
+int payloadMisuse() {
+    option<int> o = Some("no")    // err: payload wants `int`
+    result<int, str> r1 = Ok(1.5) // err: payload wants `int`
+    result<int, str> r2 = Err(7)  // err: payload wants `str`
+    option<int> n = None(1)       // err: `None` takes no payload
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// §5 — arrays and for-in
+// ----------------------------------------------------------------------------
+
+int arrayMisuse() {
+    int[] ok = [1, 2, 3]             // healthy
+    int[] mixed = [1, "two", 3]      // err: heterogeneous array literal
+    int[] floats = [1.0, 2.0]        // err: element type mismatch
+    int badIdx = ok["zero"]          // err: array index must be `int`
+    int notArray = 5
+    int idx = notArray[0]            // err: indexing a non-array
+    return ok[0]                     // healthy: ok survived
+}
+
+int forMisuse() {
+    int total = 0
+    for (int v in 5) {               // err: for-in source must be an array
+        total += v
+    }
+    int[] values = [1, 2]
+    for (str s in values) {          // err: loop variable type mismatch
+        total += 1
+    }
+    for (int v in values) {          // healthy
+        total += v
+    }
+    map<str, int> m = {"a": 1}
+    for (str k in m) {               // err: for-in over a map (arrays only, per ruling)
+        total += m[k]
+    }
+    return total
+}
+
+// ----------------------------------------------------------------------------
+// §6 — maps
+// ----------------------------------------------------------------------------
+
+int mapMisuse() {
+    map<str, int> ok = {"a": 1, "b": 2}             // healthy
+    map<str, int> badValues = {"a": 1, "b": "two"}  // err: value type mismatch
+    map<int, str> badKeys = {"one": "x"}            // err: key type mismatch
+    map<str, int> fromArray = [1, 2]                // err: array literal is not a map
+    int v = ok[1]                                   // err: map key must be `str`
+    return ok["a"]                                  // healthy
+}
+
+// ----------------------------------------------------------------------------
+// §7 — string interpolation
+// ----------------------------------------------------------------------------
+
+str interpMisuse() {
+    int hp = 100
+    str s1 = $"hp={hp}"              // healthy
+    str s2 = "plain {hp} text"       // healthy (tricky): no `$` sigil — braces are literal text
+    str s3 = $"cost={hp * 2 + }"     // err (parse): missing expression in island
+    str s4 = $"name={ghost}"         // err: unknown name `ghost`
+    return s1
+}
+
+// ----------------------------------------------------------------------------
+// §8 — positional vs named arguments
+// ----------------------------------------------------------------------------
+
+int namedArgMisuse() {
+    int a = clamp(15, 0, 10)                       // healthy positional
+    int b = clamp(value: 15, low: 0, high: 10)     // healthy named
+    int c = clamp(15, low: 0, high: 10)            // err: positional and named mixed
+    int d = clamp(15, 0, top: 10)                  // err: unknown parameter `top`
+    int e = clamp(15, 0)                           // err: wrong number of arguments
+    int f = clamp(value: 15, value: 0, high: 10)   // err: duplicate named argument
+    return a
+}
+
+// ----------------------------------------------------------------------------
+// §9 — impl blocks
+// ----------------------------------------------------------------------------
+
+impl counter {
+    int peek(counter c) {
+        return c.value
+    }
+
+    counter bump(counter c) {
+        c.value += 1
+        return c
+    }
+}
+
+impl counter {
+    int peek(counter c) {            // err: duplicate impl member `peek` (§10.4)
+        return c.value * 2
+    }
+}
+
+impl nonexistent {                  // err: impl target must be a declared type
+    int nothing() {                 // (if silently accepted: GAP — report, do not pin)
+        return 0
+    }
+}
+
+int implMisuse() {
+    counter c = counter(value: 41)
+    int a = counter.peek(c)          // PIN: resolution after duplicate — first-wins or ambiguity; document actual
+    counter d = counter.bump(c)      // healthy
+    int b = counter.peekTwice(c)     // err: unknown member `peekTwice`
+    int e = peek(c)                  // err: impl members must be called by qualified path
+    return a
+}
+
+// ----------------------------------------------------------------------------
+// §10 — infer, conditions, statements, and one old friend
+// ----------------------------------------------------------------------------
+
+int inferMisuse() {
+    infer a = 1                    // healthy
+    infer empty = []               // err: cannot infer; ambiguous initializer (§2.16)
+    infer emptyMap = {}            // err: cannot infer; ambiguous initializer
+    infer v = voidCall()           // err: cannot infer; void initializer
+    return a
+}
+
+int conditionMisuse() {
+    if (5) {                       // err: condition must be `bool`
+        return 1
+    }
+    while ("yes") {                // err: condition must be `bool`
+        return 2
+    }
+    return 0
+}
+
+int statementMisuse() {
+    int x = 1
+    x + 1                          // err (parse): only a call may be a statement
+    ghost = 5                      // err: assignment to undeclared name
+    voidCall()                     // healthy: call statement
+    return x
+}
+
+bool oldFriendRegression(bool a, bool b) {
+    return a || b && a             // err: mixed && and || require parentheses (the once-lost rule)
+}
+
+int trickyHealthy() {
+    int n = 5
+    int m = --n                    // healthy (tricky): unary nesting, -(-n)
+    infer made = pair(first: 1, second: "x")   // healthy: infer crystallizes pair<int, str>
+    return m + made.first
+}
+
+// ----------------------------------------------------------------------------
+// §11 — lexer edges (pin actual; do not silently "fix")
+// ----------------------------------------------------------------------------
+
+int lexerEdges() {
+    // EDGE (documented): `>=` maximal-munch fuses the generic close and the
+    // assignment — `maybe < int >= m`. Pin the actual diagnostic.
+    maybe<int>= m
+    // err (lex): unterminated interpolated string (rest of line is the error region)
+    str u = $"unterminated
+    // err (lex): invalid escape
+    str bad = "\q"
+    return 0
+}
+
+// ----------------------------------------------------------------------------
+// §12 — structural recovery: unclosed brace
+// ----------------------------------------------------------------------------
+//
+// RECOVERY REQUIREMENT: everything above must already be pinned; this
+// unclosed struct may not corrupt earlier statements. Pin where recovery
+// lands. If the sibling below does not survive, the recovery is buggy —
+// fix the code, do not pin the bug.
+
+struct unclosed {
+    int x
+
+struct survivor {
+    int fine
+}
+
+int survivorCheck() {
+    survivor s = survivor(fine: 7)
+    return s.fine
+}
+
+/* Final entry, on purpose the last thing in the file: an unterminated block
+   comment. Pin: an unterminated-comment error is reported — a silent swallow
+   to EOF is a GAP, not a behavior. This text is inside that comment. */

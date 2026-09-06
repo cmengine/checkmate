@@ -1243,6 +1243,311 @@ mod tests {
     }
 
     #[test]
+    fn parses_struct_declarations() {
+        let source = "struct vec2 {\n    float x\n    float y\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0].kind {
+            StmtKind::StructDecl {
+                name,
+                type_params,
+                fields,
+            } => {
+                assert_eq!(name, "vec2");
+                assert!(type_params.is_empty());
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "x");
+                assert_eq!(fields[0].ty, Type::Prim(PrimitiveType::Float));
+                assert_eq!(fields[1].name, "y");
+                // The declaration spans `struct` through the closing brace.
+                assert_eq!(stmts[0].span, Span::new(0, source.len() - 1));
+            }
+            other => panic!("expected a struct declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_generic_struct_declarations() {
+        let source = "struct pair<A, B> {\n    A first\n    B second\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::StructDecl {
+                name,
+                type_params,
+                fields,
+            } => {
+                assert_eq!(name, "pair");
+                assert_eq!(type_params, &["A".to_string(), "B".to_string()]);
+                // Type parameters surface as named types in field position.
+                assert_eq!(
+                    fields[0].ty,
+                    Type::Named {
+                        name: "A".into(),
+                        args: vec![]
+                    }
+                );
+            }
+            other => panic!("expected a struct declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_struct_field_collection_types() {
+        // `int[]` array fields and `map<K, V>` fields (§2.6, §11).
+        let source = "struct s {\n    int[] scores\n    map<str, int> tally\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::StructDecl { fields, .. } => {
+                assert_eq!(
+                    fields[0].ty,
+                    Type::Array(Box::new(Type::Prim(PrimitiveType::Int)))
+                );
+                assert_eq!(
+                    fields[1].ty,
+                    Type::Map {
+                        key: Box::new(Type::Prim(PrimitiveType::Str)),
+                        value: Box::new(Type::Prim(PrimitiveType::Int))
+                    }
+                );
+            }
+            other => panic!("expected a struct declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_enum_declarations() {
+        let source = "enum gameEvent {\n    Damage(int amount)\n    Spawn(str kind, vec2 position)\n    PlayerDied()\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::EnumDecl {
+                name,
+                type_params,
+                variants,
+            } => {
+                assert_eq!(name, "gameEvent");
+                assert!(type_params.is_empty());
+                assert_eq!(variants.len(), 3);
+                assert_eq!(variants[0].name, "Damage");
+                assert_eq!(variants[0].fields.len(), 1);
+                assert_eq!(variants[0].fields[0].name, "amount");
+                // Two payloads, comma-separated.
+                assert_eq!(variants[1].fields.len(), 2);
+                assert_eq!(variants[1].fields[0].ty, Type::Prim(PrimitiveType::Str));
+                assert_eq!(
+                    variants[1].fields[1].ty,
+                    Type::Named {
+                        name: "vec2".into(),
+                        args: vec![]
+                    }
+                );
+                // No payloads still needs the parentheses.
+                assert_eq!(variants[2].name, "PlayerDied");
+                assert!(variants[2].fields.is_empty());
+            }
+            other => panic!("expected an enum declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_generic_enum_declarations() {
+        let source = "enum maybe<T> {\n    Just(T value)\n    Nothing()\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::EnumDecl {
+                type_params,
+                variants,
+                ..
+            } => {
+                assert_eq!(type_params, &["T".to_string()]);
+                assert_eq!(
+                    variants[0].fields[0].ty,
+                    Type::Named {
+                        name: "T".into(),
+                        args: vec![]
+                    }
+                );
+            }
+            other => panic!("expected an enum declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_typed_variable_and_function_declarations_parse() {
+        // `int[]` in both variable and return-type positions (§11).
+        let (stmts, errors) = parse_program_parts("int[] xs\n");
+        assert_eq!(errors.len(), 1); // missing `=` — the declaration survives
+        match &stmts[0].kind {
+            StmtKind::VarDecl { ty, name, .. } => {
+                assert_eq!(name, "xs");
+                assert_eq!(*ty, Type::Array(Box::new(Type::Prim(PrimitiveType::Int))));
+            }
+            other => panic!("expected a variable declaration, got {other:?}"),
+        }
+
+        let source = "int[] range(int n) {\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl {
+                return_ty, params, ..
+            } => {
+                assert_eq!(
+                    *return_ty,
+                    Type::Array(Box::new(Type::Prim(PrimitiveType::Int)))
+                );
+                assert_eq!(params[0].ty, Type::Prim(PrimitiveType::Int));
+            }
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_generic_and_map_types_parse() {
+        // `pair<int, pair<str, bool>>` and `map<str, int[]>` (§2.9, §11).
+        let source =
+            "struct box {\n    pair<int, pair<str, bool>> pr\n    map<str, int[]> tally\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::StructDecl { fields, .. } => {
+                assert_eq!(
+                    fields[0].ty,
+                    Type::Named {
+                        name: "pair".into(),
+                        args: vec![
+                            Type::Prim(PrimitiveType::Int),
+                            Type::Named {
+                                name: "pair".into(),
+                                args: vec![
+                                    Type::Prim(PrimitiveType::Str),
+                                    Type::Prim(PrimitiveType::Bool)
+                                ]
+                            }
+                        ]
+                    }
+                );
+                assert_eq!(
+                    fields[1].ty,
+                    Type::Map {
+                        key: Box::new(Type::Prim(PrimitiveType::Str)),
+                        value: Box::new(Type::Array(Box::new(Type::Prim(PrimitiveType::Int))))
+                    }
+                );
+            }
+            other => panic!("expected a struct declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn struct_declarations_recover_from_broken_fields() {
+        let source = "struct s {\n    int good\n    ???\n    float alsoGood\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::StructDecl { fields, .. } => {
+                // The broken field is skipped; its healthy siblings survive.
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "good");
+                assert_eq!(fields[1].name, "alsoGood");
+            }
+            other => panic!("expected a struct declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn struct_declarations_reject_comma_separated_fields() {
+        // §2.6: fields are newline-delimited — no commas.
+        let source = "struct s {\n    int a,\n    int b\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(errors[0].to_string().contains("newline-delimited"));
+        match &stmts[0].kind {
+            StmtKind::StructDecl { fields, .. } => assert_eq!(fields.len(), 2),
+            other => panic!("expected a struct declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enum_declarations_recover_from_broken_payloads() {
+        let source = "enum e {\n    Good(int n)\n    Bad(int 5)\n    Also()\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(errors[0].to_string().contains("expected a payload name"));
+        match &stmts[0].kind {
+            StmtKind::EnumDecl { variants, .. } => {
+                // The broken payload is skipped; its healthy siblings survive.
+                assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0].name, "Good");
+                assert_eq!(variants[1].name, "Also");
+            }
+            other => panic!("expected an enum declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn infer_and_void_member_types_are_rejected() {
+        let source = "struct s {\n    infer x\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "`infer` is only valid for local declarations"
+        );
+
+        let source = "struct s {\n    void x\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "`void` is only valid as a function return type"
+        );
+    }
+
+    #[test]
+    fn parses_function_parameters_with_full_types() {
+        // Named, array, generic, and map parameter types (§2.11, §2.9, §11).
+        let source = "int f(vec2 p, int[] xs, option<int> o, map<str, int> m) {\nreturn 0\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:#?}");
+        match &stmts[0].kind {
+            StmtKind::FuncDecl { params, .. } => {
+                assert_eq!(params.len(), 4);
+                assert_eq!(
+                    params[0].ty,
+                    Type::Named {
+                        name: "vec2".into(),
+                        args: vec![]
+                    }
+                );
+                assert_eq!(
+                    params[1].ty,
+                    Type::Array(Box::new(Type::Prim(PrimitiveType::Int)))
+                );
+                assert_eq!(
+                    params[2].ty,
+                    Type::Named {
+                        name: "option".into(),
+                        args: vec![Type::Prim(PrimitiveType::Int)]
+                    }
+                );
+                assert_eq!(
+                    params[3].ty,
+                    Type::Map {
+                        key: Box::new(Type::Prim(PrimitiveType::Str)),
+                        value: Box::new(Type::Prim(PrimitiveType::Int))
+                    }
+                );
+            }
+            other => panic!("expected a function declaration, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn infer_function_return_type_is_rejected() {
         let (stmts, errors) = parse_program_parts("infer f() {\nreturn 1\n}\n");
         assert_eq!(errors.len(), 1);

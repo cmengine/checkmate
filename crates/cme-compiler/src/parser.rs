@@ -4,8 +4,8 @@ use crate::validate;
 
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, Block, CallArg, CompoundOp, ErrorId, Expr, ExprKind, LValue, Param, PrimitiveType,
-    Stmt, StmtKind, Type, UnaryOp,
+    BinaryOp, Block, CallArg, CompoundOp, ErrorId, Expr, ExprKind, FieldDef, LValue, Param,
+    PrimitiveType, Stmt, StmtKind, Type, UnaryOp, VariantDecl,
 };
 
 pub struct Parser<'a, 'src> {
@@ -222,6 +222,16 @@ impl<'a, 'src> Parser<'a, 'src> {
                         prev_can_end = true;
                         prev_was_type_kw = false;
                         out.push(SpannedToken { token: tok, span });
+                    } else if let Some(depth) = stack.iter().rposition(|kind| *kind == expected) {
+                        // An inner bracket was left open by broken source
+                        // (an unclosed payload list, call, or index). Close at
+                        // this match instead of failing: the parser's own
+                        // recovery reports the real damage with a precise
+                        // diagnostic, and the enclosing declaration survives.
+                        stack.truncate(depth);
+                        prev_can_end = true;
+                        prev_was_type_kw = false;
+                        out.push(SpannedToken { token: tok, span });
                     } else if stack.is_empty() && matches!(tok, Token::RBracket | Token::RBrace) {
                         // A stray `]` or `}` at the top of the stream is kept
                         // as a plain token: the parser reports it as an
@@ -383,6 +393,12 @@ impl<'a, 'src> Parser<'a, 'src> {
         if first.token == Token::KwReturn {
             return self.parse_return_statement(first);
         }
+        if first.token == Token::KwStruct {
+            return self.parse_struct_declaration(first);
+        }
+        if first.token == Token::KwEnum {
+            return self.parse_enum_declaration(first);
+        }
         if first.token == Token::KwVoid {
             if matches!(self.peek().token, Token::Ident(_))
                 && !matches!(
@@ -392,19 +408,11 @@ impl<'a, 'src> Parser<'a, 'src> {
             {
                 return self.parse_void_misuse(first);
             }
-            return self.parse_function_declaration(first);
+            return self.parse_type_declaration(first, "a function name");
         }
 
         if first.token.is_type_keyword() {
-            if matches!(self.peek().token, Token::Ident(_))
-                && matches!(
-                    self.tokens.get(self.pos + 1).map(|t| t.token),
-                    Some(Token::LParen)
-                )
-            {
-                return self.parse_function_declaration(first);
-            }
-            return self.parse_variable_declaration(first);
+            return self.parse_type_declaration(first, "a variable name");
         }
 
         if let Token::Ident(name) = &first.token {
@@ -435,34 +443,110 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
-    fn parse_function_declaration(&mut self, type_token: SpannedToken<'src>) -> Stmt {
-        let return_ty = Self::parse_type_from_token(&type_token.token).unwrap_or(Type::Infer);
+    /// Parses a type starting at the current token: a scalar keyword, a
+    /// named struct/enum type (with optional generic arguments, §2.9), a
+    /// `map<K, V>` (§11), each optionally followed by `[]` array suffixes
+    /// (§11). Consumes only on success; `None` leaves the caller to report
+    /// and recover. Never records diagnostics, so it is also safe for
+    /// speculative parses (callers save/restore `pos` themselves).
+    fn parse_type(&mut self) -> Option<Type> {
+        let token = *self.peek();
+        let base = match token.token {
+            Token::KwInt
+            | Token::KwFloat
+            | Token::KwStr
+            | Token::KwBool
+            | Token::KwInfer
+            | Token::KwVoid => {
+                let ty = Self::parse_type_from_token(&token.token)?;
+                self.advance();
+                ty
+            }
+            Token::Ident(name) => {
+                self.advance();
+                if self.at(Token::Lt) {
+                    self.advance();
+                    return self.parse_type_generic_tail(name.to_string());
+                }
+                Type::Named {
+                    name: name.to_string(),
+                    args: Vec::new(),
+                }
+            }
+            _ => return None,
+        };
+        Some(self.parse_type_array_suffixes(base))
+    }
 
-        // §2.16: `infer` marks local declarations only; a return type must
-        // be explicit. The error is recorded while the declaration keeps
-        // parsing so tooling still sees the function.
-        if type_token.token == Token::KwInfer {
-            self.record(
-                "`infer` is only valid for local declarations",
-                type_token.span,
-            );
+    /// After `Name <` (consumed): generic arguments for a named type or the
+    /// `map<K, V>` builtin (§2.9, §11).
+    fn parse_type_generic_tail(&mut self, name: String) -> Option<Type> {
+        let first = self.parse_type()?;
+        if name == "map" {
+            if !self.at(Token::Comma) {
+                return None;
+            }
+            self.advance();
+            let value = self.parse_type()?;
+            if !self.at(Token::Gt) {
+                return None;
+            }
+            self.advance();
+            return Some(self.parse_type_array_suffixes(Type::Map {
+                key: Box::new(first),
+                value: Box::new(value),
+            }));
         }
+        let mut args = vec![first];
+        while self.at(Token::Comma) {
+            self.advance();
+            args.push(self.parse_type()?);
+        }
+        if !self.at(Token::Gt) {
+            return None;
+        }
+        self.advance();
+        Some(self.parse_type_array_suffixes(Type::Named { name, args }))
+    }
+
+    /// Zero or more `[]` suffixes on an already-parsed base type (§11).
+    fn parse_type_array_suffixes(&mut self, ty: Type) -> Type {
+        let mut ty = ty;
+        while self.at(Token::LBracket)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| t.token),
+                Some(Token::RBracket)
+            )
+        {
+            self.advance();
+            self.advance();
+            ty = Type::Array(Box::new(ty));
+        }
+        ty
+    }
+
+    /// A type declaration led by a scalar keyword (or `void`): the full
+    /// declared type (with `[]` suffixes), the declared name, then either a
+    /// function (followed by `(`) or a variable (followed by `=`, a newline,
+    /// or end of file). `name_kind` selects the diagnostic for a missing
+    /// name, preserving the historical split between the `void`-led
+    /// function path and the variable path.
+    fn parse_type_declaration(&mut self, type_token: SpannedToken<'src>, name_kind: &str) -> Stmt {
+        let mut ty = Self::parse_type_from_token(&type_token.token).unwrap_or(Type::Infer);
+        ty = self.parse_type_array_suffixes(ty);
 
         let name = match *self.peek() {
             SpannedToken {
                 token: Token::Ident(name),
-                ..
+                span,
             } => {
                 self.advance();
-                name.to_string()
+                (name.to_string(), span)
             }
             other => {
                 let end = self.skip_to_statement_end(other.span.end);
                 let error = self.record(
-                    format!(
-                        "expected a function name, but found {}",
-                        other.token.describe()
-                    ),
+                    format!("expected {name_kind}, but found {}", other.token.describe()),
                     other.span,
                 );
                 return Stmt {
@@ -472,12 +556,50 @@ impl<'a, 'src> Parser<'a, 'src> {
             }
         };
 
+        match self.peek().token {
+            Token::LParen => self.parse_function_declaration_rest(type_token.span, ty, name),
+            Token::Assign | Token::Newline | Token::Eof => {
+                self.parse_variable_declaration_rest(type_token.span, ty, name)
+            }
+            other => {
+                let span = self.peek().span;
+                let end = self.skip_to_statement_end(span.end);
+                let error = self.record(
+                    format!("expected `=`, but found {}", other.describe()),
+                    span,
+                );
+                Stmt {
+                    span: Span::new(type_token.span.start, end),
+                    kind: StmtKind::Invalid { error },
+                }
+            }
+        }
+    }
+
+    /// The function declaration after its return type and name are parsed:
+    /// the parameter list, then the braced body. `type_span` covers the
+    /// declared return type's first token (for the `infer` diagnostic).
+    fn parse_function_declaration_rest(
+        &mut self,
+        type_span: Span,
+        return_ty: Type,
+        (name, _name_span): (String, Span),
+    ) -> Stmt {
+        // §2.16: `infer` marks local declarations only; a return type must
+        // be explicit. The error is recorded while the declaration keeps
+        // parsing so tooling still sees the function.
+        if return_ty == Type::Infer {
+            self.record("`infer` is only valid for local declarations", type_span);
+        }
+
+        let start = type_span.start;
+
         let (params, params_ok) = self.parse_parameter_list();
         if !params_ok {
             let end = self.skip_to_statement_end(self.peek().span.end);
             let error = ErrorId(self.errors.len().saturating_sub(1));
             return Stmt {
-                span: Span::new(type_token.span.start, end),
+                span: Span::new(start, end),
                 kind: StmtKind::Invalid { error },
             };
         }
@@ -490,7 +612,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 other.span,
             );
             return Stmt {
-                span: Span::new(type_token.span.start, end),
+                span: Span::new(start, end),
                 kind: StmtKind::Invalid { error },
             };
         }
@@ -504,7 +626,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 return_ty,
                 body,
             },
-            Span::new(type_token.span.start, self.tokens[self.pos - 1].span.end),
+            Span::new(start, self.tokens[self.pos - 1].span.end),
         )
     }
 
@@ -529,8 +651,7 @@ impl<'a, 'src> Parser<'a, 'src> {
 
         loop {
             let type_token = *self.peek();
-            let ty = Self::parse_type_from_token(&type_token.token);
-            if ty.is_none() {
+            let Some(ty) = self.parse_type() else {
                 let _ = self.record(
                     format!(
                         "expected a parameter type, but found {}",
@@ -539,7 +660,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                     type_token.span,
                 );
                 return (params, false);
-            }
+            };
             // §1: parameters are explicitly typed — `infer` (§2.16, local
             // declarations only) and `void` (§2.4, no value) are placement
             // errors. The parameter is kept so the declaration keeps parsing.
@@ -558,7 +679,6 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 _ => {}
             }
-            self.advance();
 
             let name = match *self.peek() {
                 SpannedToken {
@@ -580,10 +700,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
             };
 
-            params.push(Param {
-                ty: ty.unwrap(),
-                name,
-            });
+            params.push(Param { ty, name });
 
             if self.at(Token::Comma) {
                 self.advance();
@@ -823,16 +940,56 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
     }
 
-    fn parse_variable_declaration(&mut self, type_token: SpannedToken<'src>) -> Stmt {
-        let ty = match type_token.token {
-            Token::KwInt => Type::Prim(PrimitiveType::Int),
-            Token::KwFloat => Type::Prim(PrimitiveType::Float),
-            Token::KwStr => Type::Prim(PrimitiveType::Str),
-            Token::KwBool => Type::Prim(PrimitiveType::Bool),
-            Token::KwInfer => Type::Infer,
-            _ => unreachable!("the caller only dispatches type keywords"),
-        };
+    /// The optional `< A, B >` type-parameter list of a struct/enum
+    /// declaration (§2.9): `Err` only when a list is present but broken.
+    fn parse_decl_type_params(&mut self) -> Result<Vec<String>, Diagnostic> {
+        if !self.at(Token::Lt) {
+            return Ok(Vec::new());
+        }
+        self.parse_type_params()
+    }
 
+    /// Parses an optional `< A, B, ... >` type-parameter list for struct and
+    /// enum declarations (§2.9). Starts at `Lt`.
+    fn parse_type_params(&mut self) -> Result<Vec<String>, Diagnostic> {
+        let open = *self.peek();
+        self.advance();
+        let mut params = Vec::new();
+        loop {
+            let token = *self.peek();
+            let Token::Ident(name) = token.token else {
+                return Err(Self::expected(
+                    "a type parameter name",
+                    &token.token,
+                    token.span,
+                ));
+            };
+            self.advance();
+            params.push(name.to_string());
+            if self.at(Token::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        let close = *self.peek();
+        if close.token != Token::Gt {
+            return Err(Self::expected(
+                "`>` after type parameters",
+                &close.token,
+                close.span,
+            ));
+        }
+        self.advance();
+        let _ = open;
+        Ok(params)
+    }
+
+    /// Parses a struct declaration (§2.6, §2.9): `struct Name < params >? {`
+    /// then newline-delimited `Type name` fields. The declaration survives
+    /// broken fields: each damaged field is reported and skipped, and the
+    /// remaining fields keep their positions for tooling.
+    fn parse_struct_declaration(&mut self, struct_token: SpannedToken<'src>) -> Stmt {
         let name = match *self.peek() {
             SpannedToken {
                 token: Token::Ident(name),
@@ -845,17 +1002,395 @@ impl<'a, 'src> Parser<'a, 'src> {
                 let end = self.skip_to_statement_end(other.span.end);
                 let error = self.record(
                     format!(
-                        "expected a variable name, but found {}",
+                        "expected a struct name, but found {}",
                         other.token.describe()
                     ),
                     other.span,
                 );
                 return Stmt {
-                    span: Span::new(type_token.span.start, end),
+                    span: Span::new(struct_token.span.start, end),
                     kind: StmtKind::Invalid { error },
                 };
             }
         };
+
+        let type_params = self.parse_decl_type_params();
+        if let Err(recovered) = &type_params {
+            // A broken parameter list invalidates the whole declaration.
+            let _ = recovered;
+            return self.invalid_declaration(struct_token);
+        }
+        let type_params = type_params.unwrap();
+
+        if !self.at(Token::LBrace) {
+            let other = *self.peek();
+            let end = self.recover_to_next_statement(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(struct_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+        let _open_brace = self.advance().span.start;
+
+        let mut fields = Vec::new();
+        let end = self.parse_decl_member_list(
+            &mut |parser| {
+                // One `Type name` field (§2.6); no commas.
+                parser.parse_decl_member()
+            },
+            &mut fields,
+        );
+
+        Stmt::new(
+            StmtKind::StructDecl {
+                name,
+                type_params,
+                fields,
+            },
+            Span::new(struct_token.span.start, end),
+        )
+    }
+
+    /// Parses an enum declaration (§2.7, §2.9): `enum Name < params >? {`
+    /// then newline-delimited `Variant(Type name, ...)` declarations.
+    fn parse_enum_declaration(&mut self, enum_token: SpannedToken<'src>) -> Stmt {
+        let name = match *self.peek() {
+            SpannedToken {
+                token: Token::Ident(name),
+                ..
+            } => {
+                self.advance();
+                name.to_string()
+            }
+            other => {
+                let end = self.skip_to_statement_end(other.span.end);
+                let error = self.record(
+                    format!(
+                        "expected an enum name, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                return Stmt {
+                    span: Span::new(enum_token.span.start, end),
+                    kind: StmtKind::Invalid { error },
+                };
+            }
+        };
+
+        let type_params = self.parse_decl_type_params();
+        if type_params.is_err() {
+            return self.invalid_declaration(enum_token);
+        }
+        let type_params = type_params.unwrap();
+
+        if !self.at(Token::LBrace) {
+            let other = *self.peek();
+            let end = self.recover_to_next_statement(other.span.end);
+            let error = self.record(
+                format!("expected `{{`, but found {}", other.token.describe()),
+                other.span,
+            );
+            return Stmt {
+                span: Span::new(enum_token.span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+        let _open_brace = self.advance().span.start;
+
+        let mut variants = Vec::new();
+        let end =
+            self.parse_decl_member_list(&mut |parser| parser.parse_enum_variant(), &mut variants);
+
+        Stmt::new(
+            StmtKind::EnumDecl {
+                name,
+                type_params,
+                variants,
+            },
+            Span::new(enum_token.span.start, end),
+        )
+    }
+
+    /// A declaration made unrecoverable by its parameter list: one Invalid
+    /// statement covering the skipped region.
+    fn invalid_declaration(&mut self, head: SpannedToken<'src>) -> Stmt {
+        let end = self.skip_to_statement_end(self.peek().span.end);
+        let error = ErrorId(self.errors.len().saturating_sub(1));
+        Stmt {
+            span: Span::new(head.span.start, end),
+            kind: StmtKind::Invalid { error },
+        }
+    }
+
+    /// The shared newline-delimited body of struct/enum declarations: each
+    /// line is one member parsed by `member`; damaged members are reported
+    /// and skipped, and commas between members are rejected (§2.6: fields
+    /// are newline-delimited, no commas). Returns the body end offset.
+    fn parse_decl_member_list<T>(
+        &mut self,
+        member: &mut dyn FnMut(&mut Self) -> Option<T>,
+        out: &mut Vec<T>,
+    ) -> usize {
+        loop {
+            self.skip_newlines();
+            if self.at(Token::RBrace) {
+                let closing = self.advance();
+                return closing.span.end;
+            }
+            if self.at_eof() {
+                let eof_span = self.eof_span();
+                let _ = self.record("expected `}` before end of file", eof_span);
+                return eof_span.end;
+            }
+
+            if let Some(value) = member(self) {
+                out.push(value);
+                // A successful member ends at a newline, the closing brace,
+                // or end of file; commas are rejected (§2.6).
+                match self.peek().token {
+                    Token::Newline => {
+                        self.pos += 1;
+                    }
+                    Token::RBrace | Token::Eof => {}
+                    Token::Comma => {
+                        let other = *self.peek();
+                        let _ = self.record(
+                            "declaration members are newline-delimited; remove the comma",
+                            other.span,
+                        );
+                        self.advance();
+                    }
+                    other => {
+                        let token = other;
+                        let span = self.peek().span;
+                        self.errors
+                            .push(Self::expected("end of member", &token, span));
+                        self.recover_member_position();
+                    }
+                }
+            }
+            // A failed member already reported and positioned itself at the
+            // next boundary; nothing more to do here.
+        }
+    }
+
+    /// Positions the parser at the next member boundary: the newline (which
+    /// is consumed) or the closing brace / end of file (not consumed).
+    fn recover_member_position(&mut self) {
+        loop {
+            let token = self.peek().token;
+            if matches!(token, Token::Newline | Token::RBrace | Token::Eof) {
+                if token == Token::Newline {
+                    self.pos += 1;
+                }
+                return;
+            }
+            self.advance();
+        }
+    }
+
+    /// One struct field: `Type name` (§2.6).
+    fn parse_decl_member(&mut self) -> Option<FieldDef> {
+        let type_token = *self.peek();
+        let Some(ty) = self.parse_type() else {
+            let _ = self.record(
+                format!(
+                    "expected a field type, but found {}",
+                    type_token.token.describe()
+                ),
+                type_token.span,
+            );
+            self.recover_member_position();
+            return None;
+        };
+        self.record_placement_error(&type_token, "field");
+        let name = match *self.peek() {
+            SpannedToken {
+                token: Token::Ident(name),
+                ..
+            } => {
+                self.advance();
+                name.to_string()
+            }
+            other => {
+                let _ = self.record(
+                    format!(
+                        "expected a field name, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                self.recover_member_position();
+                return None;
+            }
+        };
+        Some(FieldDef { ty, name })
+    }
+
+    /// One enum variant: `Name(Type name, ...)` (§2.7). The payload list is
+    /// comma-separated, matching the declaration grammar.
+    fn parse_enum_variant(&mut self) -> Option<VariantDecl> {
+        let name = match *self.peek() {
+            SpannedToken {
+                token: Token::Ident(name),
+                ..
+            } => {
+                self.advance();
+                name.to_string()
+            }
+            other => {
+                let _ = self.record(
+                    format!(
+                        "expected a variant name, but found {}",
+                        other.token.describe()
+                    ),
+                    other.span,
+                );
+                self.recover_member_position();
+                return None;
+            }
+        };
+
+        if !self.at(Token::LParen) {
+            let other = *self.peek();
+            let _ = self.record(
+                format!(
+                    "expected `(` after variant name, but found {}",
+                    other.token.describe()
+                ),
+                other.span,
+            );
+            self.recover_member_position();
+            return None;
+        }
+        self.advance();
+
+        let mut fields = Vec::new();
+        self.skip_newlines();
+        if !self.at(Token::RParen) {
+            loop {
+                self.skip_newlines();
+                let type_token = *self.peek();
+                let Some(ty) = self.parse_type() else {
+                    let _ = self.record(
+                        format!(
+                            "expected a payload type, but found {}",
+                            type_token.token.describe()
+                        ),
+                        type_token.span,
+                    );
+                    self.recover_to_variant_close();
+                    return None;
+                };
+                self.record_placement_error(&type_token, "payload");
+                let field_name = match *self.peek() {
+                    SpannedToken {
+                        token: Token::Ident(field_name),
+                        ..
+                    } => {
+                        self.advance();
+                        field_name.to_string()
+                    }
+                    other => {
+                        let _ = self.record(
+                            format!(
+                                "expected a payload name, but found {}",
+                                other.token.describe()
+                            ),
+                            other.span,
+                        );
+                        self.recover_to_variant_close();
+                        return None;
+                    }
+                };
+                fields.push(FieldDef {
+                    ty,
+                    name: field_name,
+                });
+                self.skip_newlines();
+                if self.at(Token::Comma) {
+                    self.advance();
+                    continue;
+                }
+                if self.at(Token::RParen) {
+                    break;
+                }
+                let other = *self.peek();
+                let _ = self.record(
+                    format!("expected `,` or `)`, but found {}", other.token.describe()),
+                    other.span,
+                );
+                self.recover_to_variant_close();
+                return None;
+            }
+        }
+        self.skip_newlines();
+        if !self.at(Token::RParen) {
+            let other = *self.peek();
+            let _ = self.record(
+                format!("expected `)`, but found {}", other.token.describe()),
+                other.span,
+            );
+            self.recover_member_position();
+            return None;
+        }
+        self.advance();
+        Some(VariantDecl { name, fields })
+    }
+
+    /// After a broken payload: skip to the closing `)` of the variant (and
+    /// consume it) so the member list can continue at the next line.
+    fn recover_to_variant_close(&mut self) {
+        loop {
+            let token = self.peek().token;
+            if matches!(
+                token,
+                Token::RParen | Token::RBrace | Token::Eof | Token::Newline
+            ) {
+                if token == Token::RParen {
+                    self.advance();
+                }
+                return;
+            }
+            self.advance();
+        }
+    }
+
+    /// Records the placement errors for `infer`/`void` in member types
+    /// (§2.16, §2.4) with the same messages as parameters.
+    fn record_placement_error(&mut self, type_token: &SpannedToken<'src>, what: &str) {
+        match type_token.token {
+            Token::KwInfer => {
+                let _ = self.record(
+                    "`infer` is only valid for local declarations",
+                    type_token.span,
+                );
+            }
+            Token::KwVoid => {
+                let _ = self.record(
+                    "`void` is only valid as a function return type",
+                    type_token.span,
+                );
+            }
+            _ => {
+                let _ = what;
+            }
+        }
+    }
+
+    /// The variable declaration after its type and name are parsed (§2.10).
+    fn parse_variable_declaration_rest(
+        &mut self,
+        type_span: Span,
+        ty: Type,
+        (name, _name_span): (String, Span),
+    ) -> Stmt {
+        let start = type_span.start;
 
         // A declaration whose header simply ends (`int i` at a newline or end
         // of file) keeps the declared variable for tooling, with a zero-width
@@ -869,10 +1404,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                     span.start,
                 );
                 let end = expr.span.end;
-                return Stmt::new(
-                    StmtKind::VarDecl { ty, name, expr },
-                    Span::new(type_token.span.start, end),
-                );
+                return Stmt::new(StmtKind::VarDecl { ty, name, expr }, Span::new(start, end));
             }
             Token::Eof => {
                 let span = self.eof_span();
@@ -882,10 +1414,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                     span.start,
                 );
                 let end = expr.span.end;
-                return Stmt::new(
-                    StmtKind::VarDecl { ty, name, expr },
-                    Span::new(type_token.span.start, end),
-                );
+                return Stmt::new(StmtKind::VarDecl { ty, name, expr }, Span::new(start, end));
             }
             Token::Assign => {
                 self.advance();
@@ -898,7 +1427,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                     other.span,
                 );
                 return Stmt {
-                    span: Span::new(type_token.span.start, end),
+                    span: Span::new(start, end),
                     kind: StmtKind::Invalid { error },
                 };
             }
@@ -906,10 +1435,7 @@ impl<'a, 'src> Parser<'a, 'src> {
 
         let expr = self.parse_recovered_expression();
         let end = expr.span.end;
-        Stmt::new(
-            StmtKind::VarDecl { ty, name, expr },
-            Span::new(type_token.span.start, end),
-        )
+        Stmt::new(StmtKind::VarDecl { ty, name, expr }, Span::new(start, end))
     }
 
     fn parse_assignment_statement(&mut self, target: SpannedToken<'src>, name: String) -> Stmt {

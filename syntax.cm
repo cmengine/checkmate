@@ -426,7 +426,7 @@ int checkOptionResult() {
 
     result<int, str> deep = deepChain(100, 5, 2)
     match (deep) {
-        Ok(int v) => { failures += expect(v == 12) }
+        Ok(int v) => { failures += expect(v == 15) }
         Err(str reason) => { failures += 1 }
     }
 

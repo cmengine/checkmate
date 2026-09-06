@@ -1,9 +1,10 @@
-//! Tree-walking interpreter for the basic Checkmate subset.
+//! Tree-walking interpreter for the full Checkmate language surface.
 //!
-//! Normative sources: WHITEPAPER §2.10–§2.16 (declarations, functions,
-//! control flow), §2.4 (overflow-checked scalar types), and Appendix A
-//! (§A.4 operand typing, §A.5 evaluation semantics, §A.6 string
-//! concatenation, §A.7 compound assignment).
+//! Normative sources: WHITEPAPER §2.6–§2.16 (declarations, structs, enums,
+//! generics, functions, control flow, pattern matching), §2.4 (overflow-
+//! checked scalar types), §2.8 (option / result and `?`), §11 (arrays and
+//! maps), and Appendix A (§A.4 operand typing, §A.5 evaluation semantics,
+//! §A.6 string concatenation, §A.7 compound assignment).
 //!
 //! The interpreter is type-agnostic: the checker ran before it, so
 //! [`StmtKind::VarDecl`] simply evaluates and binds, and declared types are
@@ -13,14 +14,28 @@
 //!
 //! Every abnormal outcome is a clean [`InterpError`] carrying a message and
 //! a source [`Span`]: arithmetic overflow, integer division or remainder
-//! by zero, and exceeding [`MAX_CALL_DEPTH`] terminate the invocation
-//! cleanly (§2.4, §A.5) — never a panic. If the evaluator ever meets a
-//! value of the wrong shape (a checker bug), it raises a runtime error the
-//! same way instead of panicking.
+//! by zero, out-of-bounds indexing, missing map keys, and exceeding
+//! [`MAX_CALL_DEPTH`] terminate the invocation cleanly (§2.4, §A.5) —
+//! never a panic. If the evaluator ever meets a value of the wrong shape
+//! (a checker bug), it raises a runtime error the same way instead of
+//! panicking.
+//!
+//! Runtime identity (§2.13 value semantics): assignment and parameter
+//! passing clone — struct fields, array elements, and map entries included.
+//! Equality is structural for structs, enums, arrays, and maps (§A.4): a
+//! struct equals a struct with the same type name and equal fields, an
+//! enum value equals the same variant with equal payloads, and maps
+//! compare order-insensitively. The static type equality the checker
+//! enforced upstream makes the runtime comparison safe.
+//!
+//! The `?` operator (§2.8) unwraps `Ok` and returns the enclosing
+//! function early with the `Err` payload — the nearest function boundary
+//! converts that control signal into an ordinary return value, so `?`
+//! inside a called function propagates only through that call's result.
 //!
 //! ```
 //! use cme_core::ast::{
-//!     Block, Expr, ExprKind, PrimitiveType, Span, Stmt, StmtKind, Type,
+//!     Block, Expr, ExprKind, LValue, PrimitiveType, Span, Stmt, StmtKind, Type,
 //! };
 //! use cme_interp::{Interpreter, Value};
 //!
@@ -45,19 +60,14 @@
 //! let interpreter = Interpreter::new(&statements);
 //! assert_eq!(interpreter.invoke("main", &[]), Ok(Value::Int(41)));
 //! ```
-//!
-//! The tree walker is the reference oracle the future bytecode VM will be
-//! differential-tested against, so its observable behavior is exact:
-//! plain Rust values, clones instead of sharing, short-circuit `&&`/`||`,
-//! truncating integer division with the remainder taking the sign of the
-//! dividend, and IEEE 754 float equality (NaN != NaN).
 
 use std::collections::HashMap;
 use std::fmt;
 
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, LValue, Stmt, StmtKind, Type, UnaryOp,
+    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, InterpPart, LValue, Pattern, Stmt,
+    StmtKind, Type, UnaryOp,
 };
 
 /// The call-depth limit. A fixed constant per the current spec (§5.5 allows
@@ -67,8 +77,13 @@ use cme_core::ast::{
 pub const MAX_CALL_DEPTH: usize = 1024;
 
 /// A runtime value. Plain Rust types by design: no `Rc`, no copy-on-write —
-/// sharing is deferred to the VM/runtime era and clones are fine.
-#[derive(Debug, Clone, PartialEq)]
+/// sharing is deferred to the VM/runtime era and clones are fine (§2.13:
+/// values behave as independently owned).
+///
+/// Struct fields are stored in declaration order and enum payloads in
+/// variant order, so equality compares positionally. Maps keep insertion
+/// order and compare order-insensitively.
+#[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -77,6 +92,17 @@ pub enum Value {
     /// The absence of a value: what a void function returns (and what a
     /// value-less `return` yields).
     Void,
+    Struct {
+        name: String,
+        fields: Vec<(String, Value)>,
+    },
+    Enum {
+        name: String,
+        variant: String,
+        payload: Vec<Value>,
+    },
+    Array(Vec<Value>),
+    Map(Vec<(Value, Value)>),
 }
 
 impl fmt::Display for Value {
@@ -89,29 +115,106 @@ impl fmt::Display for Value {
             Value::Str(text) => write!(formatter, "{text}"),
             Value::Bool(value) => write!(formatter, "{value}"),
             Value::Void => Ok(()),
+            // CMON-style structural display (§11.1).
+            Value::Struct { name, fields } => {
+                let inner: Vec<String> = fields
+                    .iter()
+                    .map(|(field, value)| format!("{field}: {value}"))
+                    .collect();
+                write!(formatter, "{name}({})", inner.join(", "))
+            }
+            Value::Enum {
+                name,
+                variant,
+                payload,
+            } => {
+                let inner: Vec<String> = payload.iter().map(|v| v.to_string()).collect();
+                write!(formatter, "{name}.{variant}({})", inner.join(", "))
+            }
+            Value::Array(elements) => {
+                let inner: Vec<String> = elements.iter().map(|v| v.to_string()).collect();
+                write!(formatter, "[{}]", inner.join(", "))
+            }
+            Value::Map(entries) => {
+                let inner: Vec<String> = entries
+                    .iter()
+                    .map(|(key, value)| format!("{key}: {value}"))
+                    .collect();
+                write!(formatter, "{{{}}}", inner.join(", "))
+            }
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Void, Value::Void) => true,
+            // §A.4 structural equality: same type name and equal fields
+            // (both normalized to declaration order at construction).
+            (
+                Value::Struct { name, fields },
+                Value::Struct {
+                    name: other_name,
+                    fields: other_fields,
+                },
+            ) => name == other_name && fields == other_fields,
+            (
+                Value::Enum {
+                    name,
+                    variant,
+                    payload,
+                },
+                Value::Enum {
+                    name: other_name,
+                    variant: other_variant,
+                    payload: other_payload,
+                },
+            ) => name == other_name && variant == other_variant && payload == other_payload,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            // Maps compare order-insensitively (set semantics).
+            (Value::Map(a), Value::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|(key, value)| b.iter().any(|(k, v)| key == k && value == v))
+            }
+            _ => false,
         }
     }
 }
 
 impl Value {
     /// The scalar type name, for defensive error messages.
-    fn kind_name(&self) -> &'static str {
+    fn kind_name(&self) -> String {
         match self {
-            Value::Int(_) => "int",
-            Value::Float(_) => "float",
-            Value::Str(_) => "str",
-            Value::Bool(_) => "bool",
-            Value::Void => "void",
+            Value::Int(_) => "int".into(),
+            Value::Float(_) => "float".into(),
+            Value::Str(_) => "str".into(),
+            Value::Bool(_) => "bool".into(),
+            Value::Void => "void".into(),
+            Value::Struct { name, .. } => format!("struct {name}"),
+            Value::Enum { name, .. } => format!("enum {name}"),
+            Value::Array(_) => "array".into(),
+            Value::Map(_) => "map".into(),
         }
     }
 }
 
 /// A runtime error: what went wrong, and where. Terminates the invocation
 /// cleanly; the host renders the span.
+///
+/// `control` marks the one non-error signal: the `?` operator's early
+/// return (§2.8). It is consumed at the nearest function boundary and
+/// never escapes to the host.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterpError {
     pub message: String,
     pub span: Span,
+    control: Option<Box<Value>>,
 }
 
 impl InterpError {
@@ -119,27 +222,57 @@ impl InterpError {
         Self {
             message: message.into(),
             span,
+            control: None,
+        }
+    }
+
+    /// The `?` early-return signal (§2.8): the enclosing function returns
+    /// `value` (an `Err` construction) immediately.
+    fn early_return(value: Value, span: Span) -> Self {
+        Self {
+            message: String::new(),
+            span,
+            control: Some(Box::new(value)),
         }
     }
 }
 
-/// A program ready to invoke: the function declarations of a parsed (and,
-/// in the host's pipeline, checked) statement list, collected into a name
-/// map. The first registration of a name wins, matching the checker.
+/// A program ready to invoke: the function, struct, and enum declarations
+/// of a parsed (and, in the host's pipeline, checked) statement list,
+/// collected into name maps. The first registration of a name wins,
+/// matching the checker.
 pub struct Interpreter<'a> {
     functions: HashMap<&'a str, &'a Stmt>,
+    structs: HashMap<&'a str, &'a Stmt>,
+    enums: HashMap<&'a str, &'a Stmt>,
 }
 
 impl<'a> Interpreter<'a> {
-    /// Collects every top-level `FuncDecl` into the function table.
+    /// Collects every top-level `FuncDecl`, `StructDecl`, and `EnumDecl`
+    /// into the runtime registries.
     pub fn new(statements: &'a [Stmt]) -> Self {
         let mut functions = HashMap::new();
+        let mut structs = HashMap::new();
+        let mut enums = HashMap::new();
         for statement in statements {
-            if let StmtKind::FuncDecl { name, .. } = &statement.kind {
-                functions.entry(name.as_str()).or_insert(statement);
+            match &statement.kind {
+                StmtKind::FuncDecl { name, .. } => {
+                    functions.entry(name.as_str()).or_insert(statement);
+                }
+                StmtKind::StructDecl { name, .. } => {
+                    structs.entry(name.as_str()).or_insert(statement);
+                }
+                StmtKind::EnumDecl { name, .. } => {
+                    enums.entry(name.as_str()).or_insert(statement);
+                }
+                _ => {}
             }
         }
-        Self { functions }
+        Self {
+            functions,
+            structs,
+            enums,
+        }
     }
 
     /// Invokes `name` with `args` (bound by value, cloned). Errors on an
@@ -154,6 +287,8 @@ impl<'a> Interpreter<'a> {
         };
         let mut runner = Runner {
             functions: &self.functions,
+            structs: &self.structs,
+            enums: &self.enums,
             scopes: Vec::new(),
             depth: 0,
         };
@@ -161,18 +296,28 @@ impl<'a> Interpreter<'a> {
     }
 }
 
-/// The control-flow signal that propagates up through blocks, `if`, and
-/// `while` until a function boundary turns `Return` into a result.
+/// The control-flow signal that propagates up through blocks, `if`,
+/// `while`, `for`, and `match` until a function boundary turns `Return`
+/// into a result.
 enum Flow {
     Normal,
     Return(Value),
 }
 
+/// One step of a resolved assignment path (§A.7: the target — including
+/// every index expression — is evaluated exactly once per assignment).
+enum PathOp {
+    Field(String),
+    Index(Value),
+}
+
 /// Mutable execution state for one invocation: the scope stack and the
-/// call-depth counter. The function table is borrowed from the
+/// call-depth counter. The declaration registries are borrowed from the
 /// [`Interpreter`].
 struct Runner<'env, 'a> {
     functions: &'env HashMap<&'a str, &'a Stmt>,
+    structs: &'env HashMap<&'a str, &'a Stmt>,
+    enums: &'env HashMap<&'a str, &'a Stmt>,
     scopes: Vec<HashMap<String, Value>>,
     depth: usize,
 }
@@ -180,6 +325,7 @@ struct Runner<'env, 'a> {
 impl<'env, 'a> Runner<'env, 'a> {
     /// Enters a function: depth guard, arity check, parameter binding by
     /// value in the function frame, body execution, and `Flow` conversion.
+    /// A `?` control signal (§2.8) becomes this function's return value.
     fn call_function(
         &mut self,
         declaration: &'a Stmt,
@@ -229,12 +375,18 @@ impl<'env, 'a> Runner<'env, 'a> {
         self.scopes.pop();
         self.depth -= 1;
 
-        match flow? {
-            Flow::Return(value) => Ok(value),
+        match flow {
+            Ok(Flow::Return(value)) => Ok(value),
+            // The `?` control signal: the enclosing function returns the
+            // carried value (an `Err` construction) at this boundary.
+            Err(error) if error.control.is_some() => {
+                Ok(error.control.map(|boxed| *boxed).unwrap_or(Value::Void))
+            }
+            Err(error) => Err(error),
             // Falling off the end of a void function is normal; falling
             // off a non-void one is a checker bug raised defensively.
-            Flow::Normal if *return_ty == Type::Void => Ok(Value::Void),
-            Flow::Normal => Err(InterpError::new(
+            Ok(Flow::Normal) if *return_ty == Type::Void => Ok(Value::Void),
+            Ok(Flow::Normal) => Err(InterpError::new(
                 format!("non-void function `{name}` fell off the end without returning a value"),
                 declaration.span,
             )),
@@ -278,22 +430,21 @@ impl<'env, 'a> Runner<'env, 'a> {
             }
             StmtKind::Assign { target, expr } => {
                 let value = self.eval(expr)?;
-                let Some(name) = var_target_name(target) else {
-                    return Err(InterpError::new("invalid assignment target", stmt.span));
-                };
-                self.write_variable(name, value, stmt.span)?;
+                self.assign_path(target, value, stmt.span)?;
                 Ok(Flow::Normal)
             }
-            // §A.7: `x op= e` is exactly `x = x op e`.
+            // §A.7: `x op= e` is exactly `x = x op e`, with the target
+            // (base and indices) evaluated exactly once.
             StmtKind::CompoundAssign { target, op, expr } => {
-                let Some(name) = var_target_name(target) else {
-                    return Err(InterpError::new("invalid assignment target", stmt.span));
-                };
-                let current = self.read_variable(name, stmt.span)?;
+                let (base_name, ops) = self.resolve_lvalue_path(target, stmt.span)?;
+                let current = self.read_variable(&base_name, stmt.span)?;
+                let current = read_path(&current, &ops, stmt.span)?;
                 let right = self.eval(expr)?;
                 let result =
                     self.apply_binary(compound_to_binary(*op), current, right, stmt.span)?;
-                self.write_variable(name, result, stmt.span)?;
+                let mut base = self.read_variable(&base_name, stmt.span)?;
+                write_path(&mut base, &ops, result, stmt.span)?;
+                self.write_variable(&base_name, base, stmt.span)?;
                 Ok(Flow::Normal)
             }
             StmtKind::If {
@@ -336,6 +487,80 @@ impl<'env, 'a> Runner<'env, 'a> {
                 }
                 Ok(Flow::Normal)
             }
+            // §2.14: iterate the array in order, binding each element to a
+            // fresh per-iteration declaration.
+            StmtKind::For {
+                elem_name,
+                iterable,
+                body,
+                ..
+            } => {
+                let collection = self.eval(iterable)?;
+                let Value::Array(elements) = collection else {
+                    return Err(InterpError::new(
+                        format!("cannot iterate `{}`", collection.kind_name()),
+                        iterable.span,
+                    ));
+                };
+                for element in elements {
+                    let mut scope = HashMap::new();
+                    scope.insert(elem_name.clone(), element);
+                    self.scopes.push(scope);
+                    let flow = self.exec_stmts(&body.stmts);
+                    self.scopes.pop();
+                    if let Flow::Return(value) = flow? {
+                        return Ok(Flow::Return(value));
+                    }
+                }
+                Ok(Flow::Normal)
+            }
+            // §2.15: dispatch on the variant; the first matching arm (or
+            // the wildcard) runs with the pattern's payload bindings.
+            StmtKind::Match { scrutinee, arms } => {
+                let value = self.eval(scrutinee)?;
+                let Value::Enum {
+                    variant, payload, ..
+                } = value
+                else {
+                    return Err(InterpError::new(
+                        format!(
+                            "match scrutinee must be an enum value, found `{}`",
+                            value.kind_name()
+                        ),
+                        scrutinee.span,
+                    ));
+                };
+                for arm in arms {
+                    let matched = match &arm.pattern {
+                        Pattern::Wildcard => Some(Vec::new()),
+                        Pattern::Variant { variant: v, .. } if *v == variant => {
+                            Some(payload.clone())
+                        }
+                        Pattern::Variant { .. } => None,
+                    };
+                    if let Some(values) = matched {
+                        let mut scope = HashMap::new();
+                        if let Pattern::Variant { bindings, .. } = &arm.pattern {
+                            for (binding, value) in bindings.iter().zip(values) {
+                                scope.insert(binding.name.clone(), value);
+                            }
+                        }
+                        self.scopes.push(scope);
+                        let flow = self.exec_stmts(&arm.body.stmts);
+                        self.scopes.pop();
+                        if let Flow::Return(value) = flow? {
+                            return Ok(Flow::Return(value));
+                        }
+                        return Ok(Flow::Normal);
+                    }
+                }
+                // The checker guarantees exhaustiveness; reaching here is
+                // a defensive error, not a panic.
+                Err(InterpError::new(
+                    "match fell through without a matching arm",
+                    stmt.span,
+                ))
+            }
             StmtKind::Return { value } => {
                 let value = match value {
                     Some(expr) => self.eval(expr)?,
@@ -344,21 +569,14 @@ impl<'env, 'a> Runner<'env, 'a> {
                 Ok(Flow::Return(value))
             }
             StmtKind::Block(block) => self.exec_block(block),
-            // Type declarations and the full-surface statements arrive with
-            // the parser and interpreter extensions; a hand-built tree that
-            // reaches them today is a clean defensive error, never a panic.
-            StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => Err(InterpError::new(
-                "type declarations are not executable statements",
-                stmt.span,
-            )),
-            StmtKind::For { .. } | StmtKind::Match { .. } => Err(InterpError::new(
-                "statement form is not supported by this interpreter build",
-                stmt.span,
-            )),
             // Only reachable through a hand-built (unchecked) tree; the
             // checker rejects both shapes.
             StmtKind::FuncDecl { .. } => Err(InterpError::new(
                 "function declarations are only allowed at top level",
+                stmt.span,
+            )),
+            StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => Err(InterpError::new(
+                "type declarations are not executable statements",
                 stmt.span,
             )),
             StmtKind::Invalid { .. } => Err(InterpError::new(
@@ -379,20 +597,139 @@ impl<'env, 'a> Runner<'env, 'a> {
             ExprKind::Unary { op, expr: inner } => self.eval_unary(*op, inner, expr.span),
             ExprKind::Binary { op, lhs, rhs } => self.eval_binary(*op, lhs, rhs, expr.span),
             ExprKind::Call { name, args } => self.eval_call(name, args, expr.span),
-            // The full-surface expression forms arrive with the interpreter
-            // extension; a hand-built tree that reaches them today is a clean
-            // defensive error, never a panic.
-            ExprKind::Field { .. }
-            | ExprKind::Index { .. }
-            | ExprKind::VariantCall { .. }
-            | ExprKind::Match { .. }
-            | ExprKind::ArrayLit { .. }
-            | ExprKind::MapLit { .. }
-            | ExprKind::Interpolated { .. }
-            | ExprKind::Try { .. } => Err(InterpError::new(
-                "expression form is not supported by this interpreter build",
-                expr.span,
-            )),
+            ExprKind::VariantCall {
+                enum_name,
+                variant,
+                args,
+            } => self.eval_variant_call(enum_name, variant, args, expr.span),
+            ExprKind::Field { obj, name } => {
+                let value = self.eval(obj)?;
+                read_field(&value, name, expr.span)
+            }
+            ExprKind::Index { obj, index } => {
+                let value = self.eval(obj)?;
+                let key = self.eval(index)?;
+                read_index(&value, &key, expr.span)
+            }
+            // §2.8: unwrap `Ok`, or return the enclosing function early
+            // with the `Err` value.
+            ExprKind::Try { expr: inner } => {
+                let operand = self.eval(inner)?;
+                match operand {
+                    Value::Enum {
+                        name,
+                        variant: v,
+                        payload,
+                    } if name == "result" && v == "Ok" && payload.len() == 1 => {
+                        Ok(payload.into_iter().next().unwrap_or(Value::Void))
+                    }
+                    Value::Enum {
+                        name,
+                        variant: v,
+                        payload,
+                    } if name == "result" && v == "Err" && payload.len() == 1 => {
+                        let error_value = Value::Enum {
+                            name,
+                            variant: v,
+                            payload,
+                        };
+                        Err(InterpError::early_return(error_value, expr.span))
+                    }
+                    other => Err(InterpError::new(
+                        format!(
+                            "the `?` operator requires `result<T, E>`, found `{}`",
+                            other.kind_name()
+                        ),
+                        expr.span,
+                    )),
+                }
+            }
+            // §2.15: the arm value of the first matching pattern.
+            ExprKind::Match { scrutinee, arms } => {
+                let value = self.eval(scrutinee)?;
+                let Value::Enum {
+                    variant, payload, ..
+                } = value
+                else {
+                    return Err(InterpError::new(
+                        format!(
+                            "match scrutinee must be an enum value, found `{}`",
+                            value.kind_name()
+                        ),
+                        scrutinee.span,
+                    ));
+                };
+                for arm in arms {
+                    let matched = match &arm.pattern {
+                        Pattern::Wildcard => Some(Vec::new()),
+                        Pattern::Variant { variant: v, .. } if *v == variant => {
+                            Some(payload.clone())
+                        }
+                        Pattern::Variant { .. } => None,
+                    };
+                    if let Some(values) = matched {
+                        let mut scope = HashMap::new();
+                        if let Pattern::Variant { bindings, .. } = &arm.pattern {
+                            for (binding, value) in bindings.iter().zip(values) {
+                                scope.insert(binding.name.clone(), value);
+                            }
+                        }
+                        self.scopes.push(scope);
+                        let result = self.eval(&arm.body);
+                        self.scopes.pop();
+                        return result;
+                    }
+                }
+                Err(InterpError::new(
+                    "match fell through without a matching arm",
+                    expr.span,
+                ))
+            }
+            ExprKind::ArrayLit { elements } => {
+                let mut values = Vec::with_capacity(elements.len());
+                for element in elements {
+                    values.push(self.eval(element)?);
+                }
+                Ok(Value::Array(values))
+            }
+            ExprKind::MapLit { entries } => {
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    let key = self.eval(key)?;
+                    let value = self.eval(value)?;
+                    // Index assignment replaces; a literal with duplicate
+                    // keys keeps the last value (set semantics).
+                    if let Some(existing) = pairs.iter_mut().find(|(k, _)| *k == key) {
+                        existing.1 = value;
+                    } else {
+                        pairs.push((key, value));
+                    }
+                }
+                Ok(Value::Map(pairs))
+            }
+            // §A.6 canonical forms for scalar islands; other values are a
+            // checker-gated defensive error.
+            ExprKind::Interpolated { parts } => {
+                let mut out = String::new();
+                for part in parts {
+                    match part {
+                        InterpPart::Literal(text) => out.push_str(text),
+                        InterpPart::Expr(island) => {
+                            let value = self.eval(island)?;
+                            match stringify(&value) {
+                                Some(text) => out.push_str(&text),
+                                None => {
+                                    return Err(InterpError::new(
+                                        format!("cannot interpolate `{}`", value.kind_name()),
+                                        island.span,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Value::Str(out))
+            }
             // Only reachable through a hand-built (unchecked) tree: the
             // parser gates execution on a clean diagnostics list.
             ExprKind::Invalid { .. } => Err(InterpError::new(
@@ -491,8 +828,41 @@ impl<'env, 'a> Runner<'env, 'a> {
         args: &'a [CallArg],
         span: Span,
     ) -> Result<Value, InterpError> {
-        let Some(&declaration) = self.functions.get(name) else {
-            return Err(InterpError::new(format!("unknown function `{name}`"), span));
+        // Resolution order mirrors the checker: user functions, built-in
+        // constructors, then struct constructions.
+        if let Some(&declaration) = self.functions.get(name) {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                values.push(self.eval(expr)?);
+            }
+            return self.call_function(declaration, name, values, span);
+        }
+        if let Some(value) = self.eval_builtin_ctor(name, args, span)? {
+            return Ok(value);
+        }
+        if let Some(&declaration) = self.structs.get(name) {
+            return self.construct_struct(declaration, args, span);
+        }
+        Err(InterpError::new(format!("unknown function `{name}`"), span))
+    }
+
+    /// The built-in constructors `Ok`, `Err`, `Some`, `None` (§2.8);
+    /// `None` when `name` is not one of them.
+    fn eval_builtin_ctor(
+        &mut self,
+        name: &str,
+        args: &'a [CallArg],
+        span: Span,
+    ) -> Result<Option<Value>, InterpError> {
+        let (enum_name, variant, arity) = match name {
+            "Ok" => ("result", "Ok", 1),
+            "Err" => ("result", "Err", 1),
+            "Some" => ("option", "Some", 1),
+            "None" => ("option", "None", 0),
+            _ => return Ok(None),
         };
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
@@ -501,7 +871,239 @@ impl<'env, 'a> Runner<'env, 'a> {
             };
             values.push(self.eval(expr)?);
         }
-        self.call_function(declaration, name, values, span)
+        if values.len() != arity {
+            return Err(InterpError::new(
+                format!(
+                    "wrong number of payload values for `{enum_name}.{variant}`: expected {arity}, found {}",
+                    values.len()
+                ),
+                span,
+            ));
+        }
+        Ok(Some(Value::Enum {
+            name: enum_name.to_string(),
+            variant: variant.to_string(),
+            payload: values,
+        }))
+    }
+
+    /// A struct construction: named arguments bind to the declared fields,
+    /// values evaluate in declaration order, and the runtime stores fields
+    /// in declaration order (§2.6).
+    fn construct_struct(
+        &mut self,
+        declaration: &'a Stmt,
+        args: &'a [CallArg],
+        span: Span,
+    ) -> Result<Value, InterpError> {
+        let StmtKind::StructDecl { name, fields, .. } = &declaration.kind else {
+            return Err(InterpError::new(
+                "internal error: not a struct declaration",
+                span,
+            ));
+        };
+        // Named arguments, checked for duplicates.
+        let mut provided: Vec<(&str, &'a Expr)> = Vec::with_capacity(args.len());
+        for arg in args {
+            match arg {
+                CallArg::Named { name, expr } => {
+                    if provided
+                        .iter()
+                        .any(|(existing, _)| *existing == name.as_str())
+                    {
+                        return Err(InterpError::new(
+                            format!("duplicate field `{name}` in construction of `{name}`"),
+                            expr.span,
+                        ));
+                    }
+                    provided.push((name.as_str(), expr));
+                }
+                CallArg::Positional(expr) => {
+                    return Err(InterpError::new(
+                        format!("construction of struct `{name}` requires named arguments"),
+                        expr.span,
+                    ));
+                }
+            }
+        }
+        let mut values = Vec::with_capacity(fields.len());
+        for field in fields {
+            match provided
+                .iter()
+                .find(|(arg_name, _)| *arg_name == field.name.as_str())
+            {
+                Some((_, expr)) => values.push((field.name.clone(), self.eval(expr)?)),
+                None => {
+                    return Err(InterpError::new(
+                        format!("missing field `{}` in construction of `{name}`", field.name),
+                        span,
+                    ));
+                }
+            }
+        }
+        for (arg_name, expr) in &provided {
+            if !fields.iter().any(|field| field.name == *arg_name) {
+                return Err(InterpError::new(
+                    format!("unknown field `{arg_name}` in construction of `{name}`"),
+                    expr.span,
+                ));
+            }
+        }
+        Ok(Value::Struct {
+            name: name.clone(),
+            fields: values,
+        })
+    }
+
+    /// A qualified enum construction `Enum.Variant(args)` (§2.7), including
+    /// the qualified builtins `option.Some` / `result.Ok`.
+    fn eval_variant_call(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &'a [CallArg],
+        span: Span,
+    ) -> Result<Value, InterpError> {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            let expr = match arg {
+                CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+            };
+            values.push(self.eval(expr)?);
+        }
+        if enum_name == "option" || enum_name == "result" {
+            return Ok(Value::Enum {
+                name: enum_name.to_string(),
+                variant: variant.to_string(),
+                payload: values,
+            });
+        }
+        let Some(&declaration) = self.enums.get(enum_name) else {
+            return Err(InterpError::new(
+                format!("unknown enum `{enum_name}`"),
+                span,
+            ));
+        };
+        let StmtKind::EnumDecl { name, variants, .. } = &declaration.kind else {
+            return Err(InterpError::new(
+                "internal error: not an enum declaration",
+                span,
+            ));
+        };
+        let Some(variant_def) = variants.iter().find(|v| v.name == variant) else {
+            return Err(InterpError::new(
+                format!("unknown variant `{variant}` in `{name}`"),
+                span,
+            ));
+        };
+        if values.len() != variant_def.fields.len() {
+            return Err(InterpError::new(
+                format!(
+                    "wrong number of payload values for `{name}.{variant}`: expected {}, found {}",
+                    variant_def.fields.len(),
+                    values.len()
+                ),
+                span,
+            ));
+        }
+        Ok(Value::Enum {
+            name: name.clone(),
+            variant: variant.to_string(),
+            payload: values,
+        })
+    }
+
+    /// Resolves an lvalue to its base variable and the operations along
+    /// the chain, evaluating every index exactly once (§A.7).
+    fn resolve_lvalue_path(
+        &mut self,
+        target: &'a LValue,
+        _span: Span,
+    ) -> Result<(String, Vec<PathOp>), InterpError> {
+        let mut ops = Vec::new();
+        let mut cursor = target;
+        loop {
+            match cursor {
+                LValue::Var { name } => {
+                    ops.reverse();
+                    return Ok((name.clone(), ops));
+                }
+                LValue::Field { base, name } => {
+                    ops.push(PathOp::Field(name.clone()));
+                    cursor = base;
+                }
+                LValue::Index { base, index } => {
+                    let key = self.eval(index)?;
+                    ops.push(PathOp::Index(key));
+                    cursor = base;
+                }
+            }
+        }
+    }
+
+    /// Assigns through an lvalue: resolve the path, clone the base, mutate
+    /// the clone, write it back (§2.13 value semantics keep the clone
+    /// isolated).
+    fn assign_path(
+        &mut self,
+        target: &'a LValue,
+        value: Value,
+        span: Span,
+    ) -> Result<(), InterpError> {
+        let (base_name, ops) = self.resolve_lvalue_path(target, span)?;
+        if !self
+            .scopes
+            .iter()
+            .any(|frame| frame.contains_key(&base_name))
+        {
+            return Err(InterpError::new(
+                format!("assignment to undeclared name `{base_name}`"),
+                span,
+            ));
+        }
+        let mut base = self.read_variable(&base_name, span)?;
+        write_path(&mut base, &ops, value, span)?;
+        self.write_variable(&base_name, base, span)
+    }
+
+    /// Reads the nearest binding with `name`.
+    fn read_variable(&self, name: &str, span: Span) -> Result<Value, InterpError> {
+        for frame in self.scopes.iter().rev() {
+            if let Some(value) = frame.get(name) {
+                return Ok(value.clone());
+            }
+        }
+        Err(InterpError::new(format!("unknown name `{name}`"), span))
+    }
+
+    /// Mutates the nearest binding with `name`.
+    fn write_variable(&mut self, name: &str, value: Value, span: Span) -> Result<(), InterpError> {
+        for frame in self.scopes.iter_mut().rev() {
+            if frame.contains_key(name) {
+                frame.insert(name.to_string(), value);
+                return Ok(());
+            }
+        }
+        Err(InterpError::new(
+            format!("assignment to undeclared name `{name}`"),
+            span,
+        ))
+    }
+
+    /// Binds `name` in the innermost frame.
+    fn declare_variable(
+        &mut self,
+        name: &str,
+        value: Value,
+        span: Span,
+    ) -> Result<(), InterpError> {
+        match self.scopes.last_mut() {
+            Some(frame) => {
+                frame.insert(name.to_string(), value);
+                Ok(())
+            }
+            None => Err(InterpError::new("internal error: no active scope", span)),
+        }
     }
 
     /// Strict binary arithmetic/comparison/equality on already-evaluated
@@ -590,21 +1192,10 @@ impl<'env, 'a> Runner<'env, 'a> {
                 _ => Err(mismatch()),
             },
             // §A.4: strict same-type value equality; float follows IEEE 754
-            // (NaN == NaN is false). Cross types are a checker bug.
-            BinaryOp::Eq => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a == b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
-                (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a == b)),
-                (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a == b)),
-                _ => Err(mismatch()),
-            },
-            BinaryOp::Ne => match (&left, &right) {
-                (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a != b)),
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a != b)),
-                (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a != b)),
-                (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a != b)),
-                _ => Err(mismatch()),
-            },
+            // (NaN == NaN is false); structs, enums, arrays, and maps are
+            // structural.
+            BinaryOp::Eq => Ok(Value::Bool(left == right)),
+            BinaryOp::Ne => Ok(Value::Bool(left != right)),
             BinaryOp::Lt => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
@@ -633,62 +1224,143 @@ impl<'env, 'a> Runner<'env, 'a> {
             )),
         }
     }
+}
 
-    /// Reads the nearest binding with `name`.
-    fn read_variable(&self, name: &str, span: Span) -> Result<Value, InterpError> {
-        for frame in self.scopes.iter().rev() {
-            if let Some(value) = frame.get(name) {
-                return Ok(value.clone());
-            }
-        }
-        Err(InterpError::new(format!("unknown name `{name}`"), span))
-    }
-
-    /// Mutates the nearest binding with `name`.
-    fn write_variable(&mut self, name: &str, value: Value, span: Span) -> Result<(), InterpError> {
-        for frame in self.scopes.iter_mut().rev() {
-            if frame.contains_key(name) {
-                frame.insert(name.to_string(), value);
-                return Ok(());
-            }
-        }
-        Err(InterpError::new(
-            format!("assignment to undeclared name `{name}`"),
+/// Reads one field of a struct value, or `.length` of an array (§2.6, §11).
+fn read_field(value: &Value, name: &str, span: Span) -> Result<Value, InterpError> {
+    match value {
+        Value::Array(elements) if name == "length" => Ok(Value::Int(elements.len() as i64)),
+        Value::Struct { fields, .. } => match fields.iter().find(|(f, _)| f == name) {
+            Some((_, value)) => Ok(value.clone()),
+            None => Err(InterpError::new(
+                format!("unknown field `{name}` on `{}`", value.kind_name()),
+                span,
+            )),
+        },
+        _ => Err(InterpError::new(
+            format!("unknown field `{name}` on `{}`", value.kind_name()),
             span,
-        ))
+        )),
     }
+}
 
-    /// Binds `name` in the innermost frame.
-    fn declare_variable(
-        &mut self,
-        name: &str,
-        value: Value,
-        span: Span,
-    ) -> Result<(), InterpError> {
-        match self.scopes.last_mut() {
-            Some(frame) => {
-                frame.insert(name.to_string(), value);
-                Ok(())
+/// Reads one element of an array (bounds-checked) or one entry of a map
+/// (§11).
+fn read_index(value: &Value, key: &Value, span: Span) -> Result<Value, InterpError> {
+    match value {
+        Value::Array(elements) => match key {
+            Value::Int(index) => match elements.get(*index as usize) {
+                Some(element) => Ok(element.clone()),
+                None => Err(InterpError::new(
+                    format!(
+                        "array index {index} out of bounds (length {})",
+                        elements.len()
+                    ),
+                    span,
+                )),
+            },
+            other => Err(InterpError::new(
+                format!("array index must be `int`, found `{}`", other.kind_name()),
+                span,
+            )),
+        },
+        Value::Map(entries) => match entries.iter().find(|(k, _)| k == key) {
+            Some((_, value)) => Ok(value.clone()),
+            None => Err(InterpError::new(format!("map key {key} not found"), span)),
+        },
+        _ => Err(InterpError::new(
+            format!("cannot index `{}`", value.kind_name()),
+            span,
+        )),
+    }
+}
+
+/// Reads through a resolved path (§A.7: indices were evaluated once).
+fn read_path(value: &Value, ops: &[PathOp], span: Span) -> Result<Value, InterpError> {
+    let mut current = value.clone();
+    for op in ops {
+        current = match op {
+            PathOp::Field(name) => read_field(&current, name, span)?,
+            PathOp::Index(key) => read_index(&current, key, span)?,
+        };
+    }
+    Ok(current)
+}
+
+/// Writes through a resolved path, mutating `value` in place. A map index
+/// write inserts a new entry at the leaf; writing through a missing key
+/// is an error (§11).
+fn write_path(
+    value: &mut Value,
+    ops: &[PathOp],
+    new: Value,
+    span: Span,
+) -> Result<(), InterpError> {
+    let Some((op, rest)) = ops.split_first() else {
+        *value = new;
+        return Ok(());
+    };
+    match (op, value) {
+        (PathOp::Field(name), Value::Struct { fields, .. }) => {
+            match fields.iter_mut().find(|(f, _)| f == name) {
+                Some((_, field)) => write_path(field, rest, new, span),
+                None => Err(InterpError::new(
+                    format!("unknown field `{name}` on struct"),
+                    span,
+                )),
             }
-            None => Err(InterpError::new("internal error: no active scope", span)),
+        }
+        (PathOp::Index(Value::Int(index)), Value::Array(elements)) => {
+            let index = *index;
+            match elements.get_mut(index as usize) {
+                Some(element) => write_path(element, rest, new, span),
+                None => Err(InterpError::new(
+                    format!(
+                        "array index {index} out of bounds (length {})",
+                        elements.len()
+                    ),
+                    span,
+                )),
+            }
+        }
+        (PathOp::Index(key), Value::Map(entries)) => {
+            match entries.iter_mut().find(|(k, _)| k == key) {
+                Some((_, entry)) => write_path(entry, rest, new, span),
+                None if rest.is_empty() => {
+                    // Insertion through index assignment (§11).
+                    entries.push((key.clone(), new));
+                    Ok(())
+                }
+                None => Err(InterpError::new(format!("map key {key} not found"), span)),
+            }
+        }
+        (op, value) => Err(InterpError::new(
+            format!(
+                "cannot assign through `{}` on `{}`",
+                op.describe(),
+                value.kind_name()
+            ),
+            span,
+        )),
+    }
+}
+
+impl PathOp {
+    fn describe(&self) -> &'static str {
+        match self {
+            PathOp::Field(_) => "field",
+            PathOp::Index(_) => "index",
         }
     }
 }
 
-/// §A.6 canonical string form, used only inside concatenation. `Void` is
-/// not a value and cannot be stringified.
+/// §A.6 canonical string form, used only inside concatenation and
+/// interpolation. `Void` and structured values are not stringifiable.
 fn stringify(value: &Value) -> Option<String> {
     match value {
         Value::Void => None,
+        Value::Struct { .. } | Value::Enum { .. } | Value::Array(_) | Value::Map(_) => None,
         other => Some(other.to_string()),
-    }
-}
-
-/// The variable name of a plain `Var` lvalue target, if any.
-fn var_target_name(target: &LValue) -> Option<&str> {
-    match target {
-        LValue::Var { name } => Some(name),
-        LValue::Field { .. } | LValue::Index { .. } => None,
     }
 }
 
@@ -1015,5 +1687,120 @@ mod tests {
         let source = "int main() {\nreturn helper()\n}\nint helper() {\nreturn missing()\n}\n";
         let error = run_ungated(source).unwrap_err();
         assert_eq!(error.message, "unknown function `missing`");
+    }
+
+    // ------------------------------------------------------------------
+    // Full-surface runtime: structs, enums, match, for, collections,
+    // interpolation, and ?.
+    // ------------------------------------------------------------------
+
+    fn ok_full(source: &str) -> Value {
+        run_main(source).expect("test program should run to completion")
+    }
+
+    #[test]
+    fn struct_construction_and_field_semantics() {
+        // §2.6 / §2.13: named-field construction, field mutation, and the
+        // caller-isolated copy behavior of damage.
+        let source = "struct vec2 {\n    float x\n    float y\n}\nstruct player {\n    str name\n    int health\n    bool alive\n}\nplayer damage(player p, int amount) {\np.health = p.health - amount\nif (p.health <= 0) {\np.alive = false\n}\nreturn p\n}\nint main() {\nplayer hero = player(name: \"Hero\", health: 100, alive: true)\nplayer hurt = damage(hero, 30)\nif (hero.health == 100) {\nif (hurt.health == 70) {\nif (hurt.alive == hero.alive) {\nreturn 1\n}\n}\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn deep_field_and_index_assignment() {
+        // §2.13 / §A.7: nested chains assign through the resolved path.
+        let source = "struct vec2 {\n    float x\n    float y\n}\nstruct party {\n    int[] scores\n    vec2 base\n}\nint main() {\nparty squad = party(\n    scores: [10, 20, 30]\n    base: vec2(x: 1.0, y: 2.0)\n)\nsquad.scores[1] += 5\nsquad.base.x = 40.0\nif (squad.scores[1] == 25) {\nif (squad.base.x == 40.0) {\nreturn 1\n}\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn struct_equality_is_structural() {
+        let source = "struct vec2 {\n    float x\n    float y\n}\nint main() {\nvec2 a = vec2(x: 1.0, y: 2.0)\nvec2 b = vec2(x: 1.0, y: 2.0)\nvec2 c = vec2(x: 9.0, y: 2.0)\nif (a == b) {\nif (a != c) {\nreturn 1\n}\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn enum_match_dispatches_and_destructures() {
+        let source = "struct vec2 {\n    float x\n    float y\n}\nenum gameEvent {\n    Damage(int amount)\n    Spawn(str kind, vec2 position)\n    PlayerDied()\n}\nstr describe(gameEvent evt) {\nreturn match (evt) {\n    Damage(int amount) => \"d:\" + amount\n    Spawn(str kind, vec2 position) => \"s:\" + kind + \":\" + position.x\n    PlayerDied() => \"dead\"\n}\n}\nint main() {\nstr a = describe(gameEvent.Damage(25))\nstr b = describe(gameEvent.Spawn(\"orc\", vec2(x: 3.0, y: 1.0)))\nstr c = describe(gameEvent.PlayerDied())\nif (a == \"d:25\") {\nif (b == \"s:orc:3\") {\nif (c == \"dead\") {\nreturn 1\n}\n}\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn try_operator_propagates_through_call_boundaries() {
+        // §2.8: ? inside chain returns Err from chain; the caller observes
+        // it as an ordinary value.
+        let source = "result<int, str> safeDiv(int a, int b) {\nif (b == 0) {\nreturn Err(\"div0\")\n}\nreturn Ok(a / b)\n}\nresult<int, str> chain(int a, int b) {\nint v = safeDiv(a, b)?\nreturn Ok(v * 10)\n}\nint main() {\nresult<int, str> good = chain(8, 2)\nresult<int, str> bad = chain(8, 0)\nmatch (good) {\n    Ok(int v) => {\n        match (bad) {\n            Ok(int w) => { return 0 }\n            Err(str reason) => { if (reason == \"div0\") { return 1 } }\n        }\n    }\n    Err(str reason) => { return 0 }\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn arrays_iterate_index_and_clone() {
+        // §11 / §2.13 / §2.14.
+        let source = "int sum(int[] xs) {\nint total = 0\nfor (int v in xs) {\ntotal += v\n}\nreturn total\n}\nint main() {\nint[] a = [1, 2, 3, 4]\nint[] copy = a\ncopy[0] = 99\nif (a[0] == 1) {\nif (a.length == 4) {\nif (sum(a) == 10) {\nreturn 1\n}\n}\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn map_entries_read_write_and_insert() {
+        let source = "int main() {\nmap<str, int> m = {\n\"gold\": 120\n\"gems\": 3\n}\nm[\"gold\"] += 30\nm[\"arrows\"] = 60\nif (m[\"gold\"] == 150) {\nif (m[\"arrows\"] == 60) {\nreturn 1\n}\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn map_equality_is_order_insensitive() {
+        let source = "int main() {\nmap<str, int> a = {\"x\": 1\n\"y\": 2\n}\nmap<str, int> b = {\"y\": 2\n\"x\": 1\n}\nif (a == b) {\nreturn 1\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
+    }
+
+    #[test]
+    fn interpolated_strings_evaluate_islands() {
+        // §2.8/§4.1 + §A.6 canonical forms.
+        let source = "struct vec2 {\n    float x\n    float y\n}\nint fib(int n) {\nif (n <= 1) {\nreturn n\n}\nreturn fib(n - 1) + fib(n - 2)\n}\nstr main() {\nint hp = 100\nvec2 p = vec2(x: 3.5, y: -1.5)\nbool armed = true\nstr s = $\"hp={hp} pos=({p.x},{p.y}) next={fib(7)} armed={armed}\"\nreturn s\n}\n";
+        assert_eq!(
+            ok_full(source),
+            Value::Str("hp=100 pos=(3.5,-1.5) next=13 armed=true".to_string())
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_and_missing_key_are_clean_errors() {
+        let source = "int main() {\nint[] a = [1, 2]\nreturn a[5]\n}\n";
+        let error = run_main(source).unwrap_err();
+        assert_eq!(error.message, "array index 5 out of bounds (length 2)");
+
+        let source = "int main() {\nmap<str, int> m = {\"a\": 1\n}\nreturn m[\"b\"]\n}\n";
+        let error = run_main(source).unwrap_err();
+        assert_eq!(error.message, "map key b not found");
+    }
+
+    #[test]
+    fn struct_values_display_cmon_style() {
+        // §11.1: the Display of a struct value is CMON-shaped. Structs do
+        // not interpolate (§A.6), so the value comes back directly.
+        let source = "struct vec2 {\n    float x\n    float y\n}\nstruct box {\n    vec2 corner\n    int[] items\n}\nbox main() {\nbox b = box(\n    corner: vec2(x: 1.0, y: 2.0)\n    items: [7, 8]\n)\nreturn b\n}\n";
+        let value = ok_full(source);
+        assert_eq!(
+            value.to_string(),
+            "box(corner: vec2(x: 1, y: 2), items: [7, 8])"
+        );
+    }
+
+    #[test]
+    fn enum_and_array_values_display_cmon_style() {
+        let source = "enum gameEvent {\n    Damage(int amount)\n}\ngameEvent main() {\nreturn gameEvent.Damage(25)\n}\n";
+        assert_eq!(ok_full(source).to_string(), "gameEvent.Damage(25)");
+
+        let source = "int[] main() {\nreturn [1, 2]\n}\n";
+        assert_eq!(ok_full(source).to_string(), "[1, 2]");
+
+        let source = "map<str, int> main() {\nreturn {\"a\": 1\n\"b\": 2\n}\n}\n";
+        assert_eq!(ok_full(source).to_string(), "{a: 1, b: 2}");
+    }
+
+    #[test]
+    fn value_semantics_for_arrays_passed_to_functions() {
+        // resetFirst mutates its own copy; the caller's array is untouched.
+        let source = "void resetFirst(int[] xs) {\nxs[0] = 0\n}\nint main() {\nint[] a = [1, 2, 3]\nresetFirst(a)\nif (a[0] == 1) {\nreturn 1\n}\nreturn 0\n}\n";
+        assert_eq!(ok_full(source), Value::Int(1));
     }
 }

@@ -1,13 +1,13 @@
 //! The static type checker for the full language surface. Normative sources:
 //! WHITEPAPER §2.6–§2.16 for declarations, structs, enums, generics, option /
 //! result, control flow, pattern matching, and `infer` crystallization;
-//! §11 for arrays and maps; Appendix A (§A.4–§A.7) for operand typing,
-//! string concatenation, and compound assignment.
+//! §10.4 for impl blocks; §11 for arrays and maps; Appendix A (§A.4–§A.7)
+//! for operand typing, string concatenation, and compound assignment.
 //!
-//! The checker is two-pass: all top-level declarations — functions AND types
-//! — are collected first (so forward references, recursion, and
-//! mutually-referencing types resolve), then bodies and members are checked
-//! against per-function scopes. It runs on any input: [`Invalid`] nodes and
+//! The checker is two-pass: all top-level declarations — functions, types,
+//! AND impl blocks — are collected first (so forward references, recursion,
+//! and mutually-referencing types resolve), then bodies and members are
+//! checked against per-function scopes. It runs on any input: [`Invalid`] nodes and
 //! untypable regions are skipped without cascading — a declaration with a
 //! broken initializer still declares its name, and nothing inside a broken
 //! subtree is reported twice.
@@ -178,6 +178,7 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
     // registration.
     let mut function_bodies: Vec<usize> = Vec::new();
     let mut type_members: Vec<usize> = Vec::new();
+    let mut impl_members: Vec<usize> = Vec::new();
     for (index, statement) in statements.iter().enumerate() {
         match &statement.kind {
             StmtKind::FuncDecl {
@@ -215,16 +216,14 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
                 checker.register_enum(name, type_params, variants, statement.span);
                 type_members.push(index);
             }
+            StmtKind::ImplDecl { target, members } => {
+                checker.register_impl(target, members, statement.span);
+                impl_members.push(index);
+            }
             // Already reported at parse level; never cascaded here.
             StmtKind::Invalid { .. } => {}
-            // Placeholder until checker support lands in this series; the
-            // parser cannot produce this node yet, so only a hand-built
-            // tree reaches the arm.
-            StmtKind::ImplDecl { .. } => {
-                checker.report("impl blocks are not supported yet", statement.span);
-            }
             _ => checker.report(
-                "only function and type declarations are allowed at top level",
+                "only function, type, and impl declarations are allowed at top level",
                 statement.span,
             ),
         }
@@ -245,6 +244,15 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
     for index in type_members {
         checker.check_type_members(&statements[index]);
     }
+    // Impl member bodies check like function bodies, under the target's
+    // qualified name (§10.4). Members of an unregistered (reported) target
+    // are skipped: nothing can call them, so their errors would only pile
+    // on top of the target report.
+    for index in impl_members {
+        if let StmtKind::ImplDecl { target, members } = &statements[index].kind {
+            checker.check_impl_members(target, members);
+        }
+    }
 
     checker.diagnostics
 }
@@ -256,6 +264,11 @@ struct Checker {
     /// and 1 are the built-in `option` and `result`.
     types: Vec<TypeDef>,
     type_index: HashMap<String, usize>,
+    /// Impl member signatures (§10.4), keyed by the joined target path
+    /// (`counter`, `engine.gamemode`) then by member name. Blocks for the
+    /// same target union here; a member implemented twice is rejected at
+    /// registration.
+    impls: HashMap<String, HashMap<String, FnSig>>,
     /// Scope stack for the function currently being checked. Index 0 holds
     /// the parameters together with the body's top-level statements
     /// (redeclaring a parameter there is a duplicate, not a shadow).
@@ -272,6 +285,7 @@ impl Checker {
             functions: HashMap::new(),
             types: Vec::new(),
             type_index: HashMap::new(),
+            impls: HashMap::new(),
             scopes: Vec::new(),
             current_fn: None,
         };
@@ -455,6 +469,160 @@ impl Checker {
         }
     }
 
+    /// Registers one impl block (§10.4). A single-segment target must be a
+    /// locally declared, non-generic, non-builtin struct or enum; a dotted
+    /// path is a host-style namespace target — the members still check and
+    /// run, while interface completeness against a schema stays host work.
+    /// Members register under the joined target path; a member implemented
+    /// twice (across any blocks for the target) is rejected here, and so is
+    /// a member colliding with a variant of the same enum (variant
+    /// resolution always wins, so the member could never be called).
+    fn register_impl(&mut self, target: &[String], members: &[Stmt], span: Span) {
+        let joined = target.join(".");
+        if target.len() == 1 {
+            let name = &target[0];
+            if RESERVED_TYPE_NAMES.contains(&name.as_str()) {
+                self.report(format!("cannot implement the builtin type `{name}`"), span);
+                return;
+            }
+            match self.type_index.get(name) {
+                Some(&idx) => {
+                    if !self.types[idx].params().is_empty() {
+                        self.report(
+                            format!(
+                                "impl blocks on generic types are not supported yet; \
+                                 `{name}` declares type parameters"
+                            ),
+                            span,
+                        );
+                        return;
+                    }
+                }
+                None => {
+                    if self.functions.contains_key(name) {
+                        self.report(
+                            format!("impl target must be a struct or enum type, but `{name}` is a function"),
+                            span,
+                        );
+                    } else {
+                        self.report(format!("unknown impl target `{name}`"), span);
+                    }
+                    return;
+                }
+            }
+        } else if self.type_index.contains_key(&target[0]) {
+            // Dotted targets are host-style namespaces; piggybacking on a
+            // local type name would tangle the two resolution spaces.
+            self.report(
+                format!(
+                    "impl target `{joined}` must not extend the local type `{}`",
+                    target[0]
+                ),
+                span,
+            );
+            return;
+        }
+
+        // Collect this block's signatures first, then merge: the borrow of
+        // `self.impls` must not outlive the `self.report`/`resolve_type`
+        // calls inside the loop.
+        let mut fresh: Vec<(String, FnSig)> = Vec::new();
+        for member in members {
+            let StmtKind::FuncDecl {
+                name,
+                params,
+                return_ty,
+                ..
+            } = &member.kind
+            else {
+                // The parser already enforces function members; only a
+                // hand-built tree reaches this arm.
+                self.report("impl members must be function declarations", member.span);
+                continue;
+            };
+            let taken =
+                |fresh: &Vec<(String, FnSig)>| fresh.iter().any(|(existing, _)| existing == name);
+            if self
+                .impls
+                .get(&joined)
+                .is_some_and(|registry| registry.contains_key(name))
+                || taken(&fresh)
+            {
+                self.report(
+                    format!("duplicate impl member `{joined}.{name}`"),
+                    member.span,
+                );
+                continue;
+            }
+            if target.len() == 1
+                && let Some(&idx) = self.type_index.get(&target[0])
+                && !self.types[idx].is_struct()
+                && self
+                    .enum_def(idx)
+                    .variants
+                    .iter()
+                    .any(|variant| variant.name == *name)
+            {
+                self.report(
+                    format!(
+                        "impl member `{joined}.{name}` collides with a variant of `{}`",
+                        target[0]
+                    ),
+                    member.span,
+                );
+                continue;
+            }
+            self.check_duplicate_params(params, member.span);
+            let resolved: Vec<(String, Ty)> = params
+                .iter()
+                .map(|param| {
+                    (
+                        param.name.clone(),
+                        self.resolve_type(&param.ty, member.span),
+                    )
+                })
+                .collect();
+            let ret = self.resolve_type(return_ty, member.span);
+            let poisoned = resolved.iter().any(|(_, ty)| ty.is_poison()) || ret.is_poison();
+            fresh.push((
+                name.clone(),
+                FnSig {
+                    params: resolved,
+                    return_ty: ret,
+                    poisoned,
+                },
+            ));
+        }
+        self.impls.entry(joined).or_default().extend(fresh);
+    }
+
+    /// Pass-2 validation of impl member bodies (§10.4): each member checks
+    /// like a function body, scoped under its qualified display name.
+    /// Members rejected at registration are skipped — nothing can call
+    /// them, so their body errors would only pile on the registration
+    /// report.
+    fn check_impl_members(&mut self, target: &[String], members: &[Stmt]) {
+        let joined = target.join(".");
+        if !self.impls.contains_key(&joined) {
+            return;
+        }
+        for member in members {
+            let StmtKind::FuncDecl { name, body, .. } = &member.kind else {
+                continue;
+            };
+            let Some(sig) = self
+                .impls
+                .get(&joined)
+                .and_then(|registry| registry.get(name))
+                .cloned()
+            else {
+                continue;
+            };
+            let display = format!("{joined}.{name}");
+            self.check_function_body(&display, &sig, body);
+        }
+    }
+
     /// Pass-2 validation of a type declaration's member types: every type
     /// reference must resolve, and type parameters must be used bare.
     fn check_type_members(&mut self, statement: &Stmt) {
@@ -592,6 +760,13 @@ impl Checker {
         let Some(sig) = self.functions.get(name).cloned() else {
             return;
         };
+        self.check_function_body(name, &sig, body);
+    }
+
+    /// Checks one function-shaped body against a registered signature —
+    /// shared by top-level functions and impl members (§10.4), which pass
+    /// their qualified display name.
+    fn check_function_body(&mut self, name: &str, sig: &FnSig, body: &Block) {
         self.current_fn = Some((name.to_string(), sig.return_ty.clone()));
 
         let mut scope = HashMap::new();
@@ -782,7 +957,7 @@ impl Checker {
                 }
             }
             StmtKind::Expression { expr } => match &expr.kind {
-                ExprKind::Call { .. } | ExprKind::VariantCall { .. } => {
+                ExprKind::Call { .. } | ExprKind::VariantCall { .. } | ExprKind::PathCall { .. } => {
                     self.type_expr(expr, None);
                 }
                 ExprKind::Invalid { .. } => {}
@@ -1205,24 +1380,8 @@ impl Checker {
                 variant,
                 args,
             } => self.type_variant_call(enum_name, variant, args, expected, expr.span),
-            // Placeholder until checker support lands in this series: only a
-            // hand-built tree can reach it (the parser does not produce
-            // path calls yet).
             ExprKind::PathCall { path, args } => {
-                for arg in args {
-                    let expr = match arg {
-                        CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
-                    };
-                    self.type_expr(expr, None);
-                }
-                self.report(
-                    format!(
-                        "qualified path calls are not implemented yet: `{}`",
-                        path.join(".")
-                    ),
-                    expr.span,
-                );
-                Ty::Poison
+                self.type_path_call(path, args, expected, expr.span)
             }
             ExprKind::Field { obj, name } => self.type_field(obj, name, expr.span),
             ExprKind::Index { obj, index } => self.type_index(obj, index, expr.span),
@@ -1671,28 +1830,115 @@ impl Checker {
         expected: Option<&Ty>,
         span: Span,
     ) -> Ty {
-        let Some(&idx) = self.type_index.get(enum_name) else {
+        // Resolution order (§2.7, §10.4): an enum variant first, then an
+        // impl member on the same target — `Type.name(args)` is a
+        // construction when `Type` is an enum with a variant `name`, and a
+        // member call otherwise.
+        if let Some(&idx) = self.type_index.get(enum_name) {
+            if self.types[idx].is_struct() {
+                // A struct target: structs construct by bare name (§2.6), so
+                // a qualified call can only be an impl member.
+                if let Some(sig) = self
+                    .impls
+                    .get(enum_name)
+                    .and_then(|registry| registry.get(variant))
+                    .cloned()
+                {
+                    let display = format!("{enum_name}.{variant}");
+                    return self.type_function_call(&display, &sig, args, span);
+                }
+                for arg in args {
+                    let expr = match arg {
+                        CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                    };
+                    self.type_expr(expr, None);
+                }
+                self.report(format!("unknown member `{variant}` in `{enum_name}`"), span);
+                return Ty::Poison;
+            }
+            let def = self.enum_def(idx);
+            if def
+                .variants
+                .iter()
+                .any(|candidate| candidate.name == variant)
+            {
+                return self.type_variant_construction(&def, idx, variant, args, expected, span);
+            }
+            if let Some(sig) = self
+                .impls
+                .get(enum_name)
+                .and_then(|registry| registry.get(variant))
+                .cloned()
+            {
+                let display = format!("{enum_name}.{variant}");
+                return self.type_function_call(&display, &sig, args, span);
+            }
             for arg in args {
                 let expr = match arg {
                     CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
                 };
                 self.type_expr(expr, None);
             }
-            self.report(format!("unknown enum `{enum_name}`"), span);
-            return Ty::Poison;
-        };
-        if self.types[idx].is_struct() {
-            for arg in args {
-                let expr = match arg {
-                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
-                };
-                self.type_expr(expr, None);
-            }
-            self.report(format!("`{enum_name}` is not an enum"), span);
+            self.report(
+                format!("unknown variant `{variant}` in `{}`", def.name),
+                span,
+            );
             return Ty::Poison;
         }
-        let def = self.enum_def(idx);
-        self.type_variant_construction(&def, idx, variant, args, expected, span)
+        // Not a declared type: a single-segment host-style impl target, if
+        // one carries this member.
+        if let Some(sig) = self
+            .impls
+            .get(enum_name)
+            .and_then(|registry| registry.get(variant))
+            .cloned()
+        {
+            let display = format!("{enum_name}.{variant}");
+            return self.type_function_call(&display, &sig, args, span);
+        }
+        for arg in args {
+            let expr = match arg {
+                CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+            };
+            self.type_expr(expr, None);
+        }
+        self.report(format!("unknown enum `{enum_name}`"), span);
+        Ty::Poison
+    }
+
+    /// A call through a dotted path of three or more segments (§2.3,
+    /// §10.4): the last segment names an impl member; the leading segments
+    /// name its target. Host capability calls (`engine.graphics.DrawTexture`)
+    /// resolve the same way once a host registers impls for the path.
+    fn type_path_call(
+        &mut self,
+        path: &[String],
+        args: &[CallArg],
+        expected: Option<&Ty>,
+        span: Span,
+    ) -> Ty {
+        let _ = expected; // Member signatures are concrete; nothing crystallizes.
+        if path.len() >= 2 {
+            let member = &path[path.len() - 1];
+            let target = path[..path.len() - 1].join(".");
+            if let Some(sig) = self
+                .impls
+                .get(&target)
+                .and_then(|registry| registry.get(member))
+                .cloned()
+            {
+                let display = format!("{target}.{member}");
+                return self.type_function_call(&display, &sig, args, span);
+            }
+        }
+        for arg in args {
+            let expr = match arg {
+                CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+            };
+            self.type_expr(expr, None);
+        }
+        self.report(format!("unknown function `{}`", path.join(".")), span);
+        Ty::Poison
     }
 
     /// A bare built-in constructor: `Ok`, `Err`, `Some`, `None` (§2.8).
@@ -2670,7 +2916,7 @@ mod tests {
         let source = "int x = 1\n";
         assert_error(
             source,
-            "only function and type declarations are allowed at top level",
+            "only function, type, and impl declarations are allowed at top level",
             span_of(source, "int x = 1"),
         );
     }
@@ -3123,6 +3369,176 @@ mod tests {
     #[test]
     fn match_with_all_arms_returning_needs_no_tail_return() {
         let source = "enum gameEvent {\n    Damage(int amount)\n    Heal(int amount)\n}\nint classify(gameEvent evt) {\nmatch (evt) {\n    Damage(int amount) => { return 1 }\n    Heal(int amount) => { return 2 }\n}\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // §10.4 — impl blocks
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn impl_members_on_a_struct_check_clean() {
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nint main() {\ncounter c = counter(value: 41)\nreturn counter.peek(c)\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn impl_blocks_for_the_same_target_union() {
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nimpl counter {\n    counter bump(counter c) {\n        return counter(value: counter.peek(c) + 1)\n    }\n}\nint main() {\ncounter c = counter(value: 41)\nreturn counter.bump(c).value\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn duplicate_impl_member_across_blocks_is_reported() {
+        // §10.4: a member implemented multiple times fails with an exact
+        // diagnostic; the first implementation wins for calls.
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nimpl counter {\n    int peek(counter c) {\n        return 0\n    }\n}\n";
+        assert_error(
+            source,
+            "duplicate impl member `counter.peek`",
+            span_of(source, "int peek(counter c) {\n        return 0\n    }"),
+        );
+    }
+
+    #[test]
+    fn unknown_impl_target_is_reported() {
+        let source = "impl mystery {\n    int f() {\n        return 1\n    }\n}\n";
+        assert_error(
+            source,
+            "unknown impl target `mystery`",
+            span_of(
+                source,
+                "impl mystery {\n    int f() {\n        return 1\n    }\n}",
+            ),
+        );
+    }
+
+    #[test]
+    fn impl_target_that_is_a_function_is_reported() {
+        let source = "int helper() {\n    return 1\n}\nimpl helper {\n    int f() {\n        return 1\n    }\n}\n";
+        assert_error(
+            source,
+            "impl target must be a struct or enum type",
+            span_of(
+                source,
+                "impl helper {\n    int f() {\n        return 1\n    }\n}",
+            ),
+        );
+    }
+
+    #[test]
+    fn generic_impl_targets_are_rejected_for_now() {
+        let source = "struct box<T> {\n    T item\n}\nimpl box {\n    int f() {\n        return 1\n    }\n}\n";
+        assert_error(
+            source,
+            "impl blocks on generic types are not supported yet",
+            span_of(
+                source,
+                "impl box {\n    int f() {\n        return 1\n    }\n}",
+            ),
+        );
+    }
+
+    #[test]
+    fn builtin_impl_targets_are_rejected() {
+        let source = "impl option {\n    int f() {\n        return 1\n    }\n}\n";
+        assert_error(
+            source,
+            "cannot implement the builtin type `option`",
+            span_of(
+                source,
+                "impl option {\n    int f() {\n        return 1\n    }\n}",
+            ),
+        );
+    }
+
+    #[test]
+    fn impl_member_colliding_with_a_variant_is_reported() {
+        // Variant resolution always wins for `Color.Red(...)`, so a member
+        // of the same name could never be called — reject it up front.
+        let source = "enum color {\n    Red()\n}\nimpl color {\n    int Red() {\n        return 1\n    }\n}\n";
+        assert_error(
+            source,
+            "impl member `color.Red` collides with a variant",
+            span_of(source, "int Red() {\n        return 1\n    }"),
+        );
+    }
+
+    #[test]
+    fn impl_member_bodies_are_checked_like_function_bodies() {
+        // Missing return inside a member, under the qualified name.
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        c.value += 1\n    }\n}\n";
+        assert_error(
+            source,
+            "missing return in non-void function `counter.peek`",
+            span_of(source, "{\n        c.value += 1\n    }"),
+        );
+    }
+
+    #[test]
+    fn impl_member_calls_check_arguments_and_return_type() {
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nint main() {\nreturn counter.peek(41)\n}\n";
+        assert_error(
+            source,
+            "wrong argument type in call to `counter.peek`",
+            span_of(source, "41"),
+        );
+    }
+
+    #[test]
+    fn unknown_impl_member_on_a_struct_is_reported() {
+        let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nint main() {\nreturn counter.poke(1)\n}\n";
+        assert_error(
+            source,
+            "unknown member `poke` in `counter`",
+            span_of(source, "counter.poke(1)"),
+        );
+    }
+
+    #[test]
+    fn dotted_impl_targets_and_path_calls_check_clean() {
+        let source = "struct GameConfig {\n    int startingScore\n}\nstruct GameState {\n    int score\n}\nimpl engine.gamemode {\n    GameState InitGame(GameConfig config) {\n        return GameState(score: config.startingScore)\n    }\n}\nint main() {\nGameConfig config = GameConfig(startingScore: 100)\nGameState state = engine.gamemode.InitGame(config)\nreturn state.score\n}\n";
+        assert!(check_full(source).is_empty());
+    }
+
+    #[test]
+    fn unknown_path_call_targets_are_reported() {
+        let source = "int main() {\nreturn engine.graphics.DrawTexture(1)\n}\n";
+        assert_error(
+            source,
+            "unknown function `engine.graphics.DrawTexture`",
+            span_of(source, "engine.graphics.DrawTexture(1)"),
+        );
+    }
+
+    #[test]
+    fn path_call_argument_types_are_checked() {
+        let source = "struct GameConfig {\n    int startingScore\n}\nstruct GameState {\n    int score\n}\nimpl engine.gamemode {\n    GameState InitGame(GameConfig config) {\n        return GameState(score: config.startingScore)\n    }\n}\nint main() {\nGameState state = engine.gamemode.InitGame(5)\nreturn state.score\n}\n";
+        assert_error(
+            source,
+            "wrong argument type in call to `engine.gamemode.InitGame`",
+            span_of(source, "5"),
+        );
+    }
+
+    #[test]
+    fn dotted_impl_target_extending_a_local_type_is_reported() {
+        let source = "struct counter {\n    int value\n}\nimpl counter.utils {\n    int f() {\n        return 1\n    }\n}\n";
+        assert_error(
+            source,
+            "impl target `counter.utils` must not extend the local type",
+            span_of(
+                source,
+                "impl counter.utils {\n    int f() {\n        return 1\n    }\n}",
+            ),
+        );
+    }
+
+    #[test]
+    fn enum_variants_keep_priority_over_impl_members() {
+        // A different-named member on the same enum resolves fine while the
+        // variant construction keeps working.
+        let source = "enum color {\n    Red()\n    Blue()\n}\nimpl color {\n    bool isRed(color c) {\n        return c == color.Red()\n    }\n}\nint main() {\nbool red = color.isRed(color.Red())\nbool blue = color.isRed(color.Blue())\nif (red == blue) {\n    return 0\n}\nreturn 1\n}\n";
         assert!(check_full(source).is_empty());
     }
 }

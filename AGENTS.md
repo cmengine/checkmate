@@ -57,7 +57,9 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 ## Repository State Notes
 
 - The root binary reports how to build with the `cli` feature when that feature is absent.
-- Newline handling is intentionally significant at statement boundaries; do not remove this behavior without explicit user direction.
+- Newline handling is intentionally significant at statement boundaries; do not remove this behavior without explicit user direction. Newlines are insignificant only inside the innermost PARENTHESES (§A.8); inside brackets and braces they stay significant (collection elements, map entries, match arms, struct members).
+- The full whitepaper language surface (structs, enums with generics, `option`/`result` and `?`, `match`, `for`-in, arrays, maps, interpolation, named arguments) parses, checks, and runs on the tree walker; `syntax.cm` at the root is its fixture (returns 0 when all internal checks pass). Not yet implemented: megaprogramming (`magic`), the bytecode VM, AOT, host schema imports, and `impl` blocks.
+- Block comments end at the first `*/`; an unterminated block comment swallows the rest of the file (one clean lex error).
 
 <!-- CODEGRAPH_START -->
 

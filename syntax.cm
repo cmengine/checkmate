@@ -552,6 +552,14 @@ int checkMaps() {
 // $"..." — string interpolation
 // ----------------------------------------------------------------------------
 
+// A pure probe for the integration test: the exact rendered string.
+str probeInterpolation() {
+    int hp = 100
+    vec2 p = vec2(x: 3.5, y: -1.5)
+    bool armed = true
+    return $"hp={hp} pos=({p.x},{p.y}) score={hp * 2 + 1} next={fib(7)} armed={armed}"
+}
+
 int checkInterpolation() {
     int failures = 0
 

@@ -8,6 +8,7 @@ use cme_interp::{InterpError, Interpreter, Value};
 
 const BASIC_CM: &str = include_str!("../basic.cm");
 const BOOM_CM: &str = include_str!("../boom.cm");
+const SYNTAX_CM: &str = include_str!("../syntax.cm");
 
 /// The pipeline the `run` command drives. Panics on any compile-stage
 /// diagnostic so these tests only ever execute programs the gate accepts.
@@ -17,10 +18,34 @@ fn run_main(source: &str) -> Result<Value, InterpError> {
     diagnostics.extend(check(&outcome.statements));
     assert!(
         diagnostics.is_empty(),
-        "the pipeline only runs clean programs: {diagnostics:#?}"
+        "the pipeline only runs clean programs: {diagnostics:?}"
     );
     let interpreter = Interpreter::new(&outcome.statements);
     interpreter.invoke("main", &[])
+}
+
+/// A `gameEvent.Spawn(kind, position)` value, for the describeEvent pin.
+fn spawn_event(kind: &str, x: f64, y: f64) -> Value {
+    Value::Enum {
+        name: "gameEvent".into(),
+        variant: "Spawn".into(),
+        payload: vec![
+            Value::Str(kind.into()),
+            Value::Struct {
+                name: "vec2".into(),
+                fields: vec![("x".into(), Value::Float(x)), ("y".into(), Value::Float(y))],
+            },
+        ],
+    }
+}
+
+/// A `result` value, for the chain / safeDiv pins.
+fn result_value(variant: &str, payload: Value) -> Value {
+    Value::Enum {
+        name: "result".into(),
+        variant: variant.into(),
+        payload: vec![payload],
+    }
 }
 
 #[test]
@@ -32,6 +57,112 @@ fn basic_cm_runs_end_to_end_and_returns_three() {
 }
 
 #[test]
+fn syntax_cm_runs_end_to_end_and_every_check_passes() {
+    // The full-language fixture: main returns the number of failed
+    // internal checks — zero when the entire surface behaves per the
+    // whitepaper.
+    assert_eq!(run_main(SYNTAX_CM), Ok(Value::Int(0)));
+}
+
+#[test]
+fn syntax_cm_function_pins() {
+    // Exact-value pins for the fixture's helpers, one per feature family.
+    let outcome = cme_compiler::parse_source(SYNTAX_CM);
+    let mut diagnostics = outcome.diagnostics;
+    diagnostics.extend(check(&outcome.statements));
+    assert!(
+        diagnostics.is_empty(),
+        "the pipeline only runs clean programs: {diagnostics:?}"
+    );
+    let interpreter = Interpreter::new(&outcome.statements);
+
+    // Recursion and control flow.
+    assert_eq!(
+        interpreter.invoke("fib", &[Value::Int(10)]),
+        Ok(Value::Int(55))
+    );
+    assert_eq!(
+        interpreter.invoke("grade", &[Value::Int(95)]),
+        Ok(Value::Str("A".into()))
+    );
+    assert_eq!(
+        interpreter.invoke("sumDown", &[Value::Int(5)]),
+        Ok(Value::Int(15))
+    );
+
+    // for-in over arrays.
+    assert_eq!(
+        interpreter.invoke(
+            "sumAll",
+            &[Value::Array(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3)
+            ])]
+        ),
+        Ok(Value::Int(6))
+    );
+
+    // Positional and named arguments (§2.12).
+    assert_eq!(
+        interpreter.invoke("clamp", &[Value::Int(15), Value::Int(0), Value::Int(10)]),
+        Ok(Value::Int(10))
+    );
+
+    // option: construction, match, and defaulting.
+    assert_eq!(
+        interpreter.invoke(
+            "findEven",
+            &[Value::Array(vec![
+                Value::Int(3),
+                Value::Int(9),
+                Value::Int(14)
+            ])]
+        ),
+        Ok(Value::Enum {
+            name: "option".into(),
+            variant: "Some".into(),
+            payload: vec![Value::Int(14)]
+        })
+    );
+    assert_eq!(
+        interpreter.invoke(
+            "optionOrDefault",
+            &[
+                Value::Array(vec![Value::Int(1), Value::Int(3)]),
+                Value::Int(-1)
+            ]
+        ),
+        Ok(Value::Int(-1))
+    );
+
+    // result and the ? operator through call boundaries (§2.8).
+    assert_eq!(
+        interpreter.invoke("chain", &[Value::Int(64), Value::Int(4), Value::Int(2)]),
+        Ok(result_value("Ok", Value::Int(24)))
+    );
+    assert_eq!(
+        interpreter.invoke("chain", &[Value::Int(64), Value::Int(0), Value::Int(2)]),
+        Ok(result_value("Err", Value::Str("division by zero".into())))
+    );
+
+    // Enum construction, destructuring match, and interpolation (§2.7,
+    // §2.15, §2.8).
+    assert_eq!(
+        interpreter.invoke("describeEvent", &[spawn_event("goblin", 2.0, 3.0)]),
+        Ok(Value::Str("spawn:goblin@2,3".into()))
+    );
+
+    // The pure interpolation probe.
+    assert_eq!(
+        interpreter.invoke("probeInterpolation", &[]),
+        Ok(Value::Str(
+            "hp=100 pos=(3.5,-1.5) score=201 next=13 armed=true".into()
+        ))
+    );
+}
+
+#[test]
 fn prefix_truncation_never_panics_the_pipeline_or_the_interpreter() {
     // Extends the front-end truncation property through execution: for
     // every char-boundary prefix of every fixture, parse + check must
@@ -39,7 +170,7 @@ fn prefix_truncation_never_panics_the_pipeline_or_the_interpreter() {
     // clean. Runtime errors (a prefix without `main`, a truncated
     // computation hitting a limit) are normal outcomes; only a panic
     // fails the property.
-    for fixture in [BASIC_CM, BOOM_CM] {
+    for fixture in [BASIC_CM, BOOM_CM, SYNTAX_CM] {
         for end in 0..=fixture.len() {
             if !fixture.is_char_boundary(end) {
                 continue;

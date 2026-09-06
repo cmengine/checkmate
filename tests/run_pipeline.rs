@@ -164,6 +164,81 @@ fn syntax_cm_function_pins() {
     );
 }
 
+/// A `counter` value, for the impl-block pins.
+fn counter_value(value: i64) -> Value {
+    Value::Struct {
+        name: "counter".into(),
+        fields: vec![("value".into(), Value::Int(value))],
+    }
+}
+
+#[test]
+fn syntax_cm_impl_pins() {
+    // Exact-value pins for the §10.4 impl-block surface: associated members
+    // on a struct (unioned across two blocks), on an enum (feeding match),
+    // and through a host-style dotted path target.
+    let outcome = cme_compiler::parse_source(SYNTAX_CM);
+    let mut diagnostics = outcome.diagnostics;
+    diagnostics.extend(check(&outcome.statements));
+    assert!(
+        diagnostics.is_empty(),
+        "the pipeline only runs clean programs: {diagnostics:?}"
+    );
+    let interpreter = Interpreter::new(&outcome.statements);
+
+    // Struct members: plain read and a forward reference across blocks.
+    assert_eq!(
+        interpreter.invoke_member("counter", "peek", &[counter_value(41)]),
+        Ok(Value::Int(41))
+    );
+    assert_eq!(
+        interpreter.invoke_member("counter", "peekTwice", &[counter_value(41)]),
+        Ok(Value::Int(82))
+    );
+
+    // Value semantics: bump mutates its own clone (§2.13).
+    assert_eq!(
+        interpreter.invoke_member("counter", "bump", &[counter_value(41)]),
+        Ok(counter_value(42))
+    );
+
+    // Enum member.
+    assert_eq!(
+        interpreter.invoke_member(
+            "suit",
+            "label",
+            &[Value::Enum {
+                name: "suit".into(),
+                variant: "Hearts".into(),
+                payload: vec![]
+            }]
+        ),
+        Ok(Value::Str("hearts".into()))
+    );
+
+    // Host-style dotted path target: engine.gamemode.InitGame(config).
+    assert_eq!(
+        interpreter.invoke_member(
+            "engine.gamemode",
+            "InitGame",
+            &[Value::Struct {
+                name: "GameConfig".into(),
+                fields: vec![
+                    ("startingScore".into(), Value::Int(100)),
+                    ("active".into(), Value::Bool(true)),
+                ],
+            }]
+        ),
+        Ok(Value::Struct {
+            name: "GameState".into(),
+            fields: vec![
+                ("score".into(), Value::Int(100)),
+                ("active".into(), Value::Bool(true)),
+            ],
+        })
+    );
+}
+
 #[test]
 fn prefix_truncation_never_panics_the_pipeline_or_the_interpreter() {
     // Extends the front-end truncation property through execution: for

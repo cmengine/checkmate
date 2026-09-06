@@ -18,6 +18,8 @@
 //   §2.15   match: expression and statement forms, destructuring, wildcard,
 //            exhaustiveness
 //   §2.16   `infer` crystallization for every construct
+//   §10.4   impl blocks: associated functions on structs and enums, unions
+//            of multiple blocks per target, host-style dotted path targets
 //   §11     arrays (T[]) with indexing and .length, maps (map<K, V>)
 //   §A      the full operator table, precedence, evaluation, stringification
 //   §2.8/§4.1  $"..." string interpolation with {expr} islands
@@ -30,9 +32,11 @@
 // `failures=N`, where 0 == success.
 //
 // Deliberately out of scope here (per owner direction): host schema imports
-// and capability namespaces (§2.3, §9), impl blocks (§10.4), megaprogramming
-// `magic` (§8), and the bytecode / AOT backends (§5) — this file targets the
-// tree-walking interpreter.
+// and capability namespaces (§2.3, §9), megaprogramming `magic` (§8), and the
+// bytecode / AOT backends (§5) — this file targets the tree-walking
+// interpreter. impl targets are therefore local structs/enums or dotted
+// host-style paths (§10.4 syntax); interface completeness against a schema
+// contract is future host work.
 // ============================================================================
 
 /* A multi-line block comment. It is completely ignored by the toolchain,
@@ -738,6 +742,122 @@ int checkControl() {
 }
 
 // ----------------------------------------------------------------------------
+// §10.4 — impl blocks: associated functions on a declared target
+// ----------------------------------------------------------------------------
+//
+// Members are plain function declarations (§2.11 shape) scoped under the
+// target's path. Blocks may split across the file: the compiler unions every
+// impl block for the same target, and a member implemented twice is an error.
+
+struct counter {
+    int value
+}
+
+impl counter {
+    int peek(counter c) {
+        return c.value
+    }
+
+    counter reset() {
+        return counter(value: 0)
+    }
+}
+
+// A second block for the same target is unioned with the first (§10.4).
+impl counter {
+    counter bump(counter c) {
+        c.value += 1
+        return c
+    }
+
+    // Qualified member calls resolve inside member bodies too, including
+    // across blocks — forward references work like top-level functions.
+    int peekTwice(counter c) {
+        return counter.peek(c) + counter.peek(c)
+    }
+}
+
+// Enums can carry impls alongside their variants.
+enum suit {
+    Clubs()
+    Diamonds()
+    Hearts()
+    Spades()
+}
+
+impl suit {
+    str label(suit s) {
+        str name = match (s) {
+            Clubs() => "clubs"
+            Diamonds() => "diamonds"
+            Hearts() => "hearts"
+            Spades() => "spades"
+        }
+        return name
+    }
+}
+
+// Host-style dotted path targets (§10.4: `impl engine.gamemode { ... }`).
+// Without a host schema the members still type-check and run; contract
+// completeness is host work, not language work.
+struct GameConfig {
+    int startingScore
+    bool active
+}
+
+struct GameState {
+    int score
+    bool active
+}
+
+impl engine.gamemode {
+    GameState InitGame(GameConfig config) {
+        return GameState(
+            score: config.startingScore
+            active: config.active
+        )
+    }
+
+    void OnTick(GameState state, float deltaTime) {
+        state.score += 1
+    }
+}
+
+int checkImpls() {
+    int failures = 0
+
+    // Associated functions on a struct: called by qualified path.
+    counter c = counter(value: 41)
+    failures += expect(counter.peek(c) == 41)
+    failures += expect(c.value == 41)
+    failures += expect(counter.peekTwice(c) == 82)
+
+    // Value semantics (§2.13): bump mutates its own clone, not the caller.
+    counter bumped = counter.bump(c)
+    failures += expect(bumped.value == 42)
+    failures += expect(c.value == 41)
+
+    counter fresh = counter.reset()
+    failures += expect(fresh.value == 0)
+
+    // Associated functions on an enum, feeding match destructuring.
+    failures += expect(suit.label(suit.Hearts()) == "hearts")
+    infer cardLabel = suit.label(suit.Clubs())
+    failures += expect(cardLabel == "clubs")
+
+    // Host-style path calls: `engine.gamemode.InitGame(config)`.
+    GameConfig config = GameConfig(startingScore: 100, active: true)
+    GameState state = engine.gamemode.InitGame(config)
+    failures += expect(state.score == 100)
+    failures += expect(state.active == true)
+
+    engine.gamemode.OnTick(state, 0.016)
+    failures += expect(state.score == 100)
+
+    return failures
+}
+
+// ----------------------------------------------------------------------------
 // Entry point (CLI convention — the host picks the target, §2.1)
 // ----------------------------------------------------------------------------
 
@@ -754,6 +874,7 @@ str main() {
     failures += checkInfer()
     failures += checkOperators()
     failures += checkControl()
+    failures += checkImpls()
     ping()
 
     player hero = player(name: "Hero", position: vec2(x: 10.0, y: 5.0), health: 100, alive: true)

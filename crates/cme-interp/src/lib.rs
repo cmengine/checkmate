@@ -301,15 +301,44 @@ impl<'a> Interpreter<'a> {
                 Span::new(0, 0),
             ));
         };
-        let mut runner = Runner {
+        let mut runner = self.make_runner();
+        runner.call_function(declaration, name, args.to_vec(), Span::new(0, 0))
+    }
+
+    /// Invokes an impl member (§10.4) by target path and member name — the
+    /// host-facing entry into interface implementations ("host execution
+    /// targets specific interface functions", §1). Errors defensively on
+    /// an unknown target or member.
+    pub fn invoke_member(
+        &self,
+        target: &str,
+        member: &str,
+        args: &[Value],
+    ) -> Result<Value, InterpError> {
+        let Some(&declaration) = self
+            .impls
+            .get(target)
+            .and_then(|registry| registry.get(member))
+        else {
+            return Err(InterpError::new(
+                format!("unknown impl member `{target}.{member}`"),
+                Span::new(0, 0),
+            ));
+        };
+        let display = format!("{target}.{member}");
+        let mut runner = self.make_runner();
+        runner.call_function(declaration, &display, args.to_vec(), Span::new(0, 0))
+    }
+
+    fn make_runner(&self) -> Runner<'_, 'a> {
+        Runner {
             functions: &self.functions,
             structs: &self.structs,
             enums: &self.enums,
             impls: &self.impls,
             scopes: Vec::new(),
             depth: 0,
-        };
-        runner.call_function(declaration, name, args.to_vec(), Span::new(0, 0))
+        }
     }
 }
 

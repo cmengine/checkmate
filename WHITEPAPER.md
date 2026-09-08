@@ -1,6 +1,6 @@
 # Checkmate: A Static, Safe, Embeddable Scripting Language
 
-**Version 0.5 — Consolidated Whitepaper**
+**Version 0.6**
 
 ---
 
@@ -629,37 +629,76 @@ Checkmate provides a secure execution environment built on language-level isolat
 
 ## 8. Megaprogramming
 
-Checkmate supports compile-time syntax transformations (megaprograms) that allow developers to embed domain-specific grammars that expand into type-checked Checkmate code. Megaprograms are purely script-side; they cannot access host capabilities or observe ambient compiler state.
+Checkmate's megaprogramming system is a declarative macro facility designed around one ambition: **any formal language — HTML, CSS, JavaScript, TypeScript, JSON, YAML, TOML, regular expressions — must be embeddable as a megaprogram, and the definition of that embedding must itself be pleasant to read.**
 
+The acid test is not "can macros generate boilerplate" but "can a macro author write a grammar for a real-world language, with every feature, in a page of pattern code, and get precise error messages pointing into that language's source." Checkmate passes by construction: the standard library ships `std.json`, `std.yaml`, `std.toml`, `std.re`, `std.html`, `std.css`, `std.js`, and `std.ts` — none of which use a private compiler hook. They are ordinary megaprograms.
+
+Megaprograms are purely script-side: no host capabilities, no ambient compiler state. Expansion happens after parsing and before name resolution, so generated code is type-checked against the host schema exactly like hand-written code (§5):
+
+```text
+        magic(name) { …region… }
+                     │
+                     ▼
+        ┌──────────────────────────┐
+        │ Region Scan & Normalize   │  brace balancing under the composed
+        │ (string/comment/island    │  profile of every grammar the entry
+        │  forms of every grammar)  │  pattern touches; edge trim (§8.6)
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │ Packrat Pattern Match     │  grammar rules → capture tree
+        │ (deterministic, memoized) │  every capture carries source spans
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │ Template Elaboration      │  capture tree + template → Checkmate AST
+        │ (@-calls run in the       │  spans remapped to the call site
+        │  sandboxed interpreter)   │
+        └────────────┬─────────────┘
+                     ▼
+        repeat until no magic() invocation remains
+                     ▼
+        Name Resolution & Type Checking  (validated against host schema)
 ```
-       Source Code with magic(...)
-                   │
-                   ▼
-       ┌────────────────────────┐
-       │ Megaprogram Expansion  │ ◄── Pure syntax matching & template expansion
-       └───────────┬────────────┘
-                   │
-                   ▼
-       Standard Checkmate AST
-                   │
-                   ▼
-       ┌────────────────────────┐
-       │ Name Resolution & Type │ ◄── Validated against Host Schema
-       │        Checking        │
-       └────────────────────────┘
-```
 
-### 8.1. Declaration and Invocation (`magic`)
+Design tenets:
 
-Megaprograms are declared using the `magic` keyword inside modules, and invoked at call sites using `magic(module.name) { ... }`.
+1. **The read-aloud test.** Patterns are built from keywords (`each`, `optional`, `oneof`, `where`, `indent`, `soft`), never sigil soup.
+2. **Character-precise, line-honest grammars.** Matching operates on raw UTF-8 text; character classes, maximal-munch scans, verbatim runs, and indentation blocks are first-class — and line boundaries remain _visible_ to a grammar until it explicitly softens them. Languages whose semantics are defined over line boundaries (JavaScript's ASI, TOML's tables, YAML's blocks) must be able to see those boundaries.
+3. **Zero private hooks.** The shipped grammars use only the public system.
+4. **Deterministic and terminating.** Ordered choice plus packrat memoization; compile-time computation under §5.5 budgets, which are operation counts, never wall-clock time.
+5. **Diagnostics are first-class.** Errors inside embedded languages point at the embedded source.
+6. **Purity.** No host access, no I/O — identical expansion on every platform, keeping §5.4 artifact hashes reproducible.
+
+Existing macro systems offer these powers separately (token-level patterns, unrestricted compile-time languages, external grammar frameworks, template languages); Checkmate unifies all four in one declarative, span-faithful surface.
+
+### 8.1. The Three Artifacts
+
+| Artifact              | Role                                                      | Analogy             |
+| --------------------- | --------------------------------------------------------- | ------------------- |
+| `grammar`             | A named library of matching rules                         | The lexer + parser  |
+| `magic`               | An entry point binding a pattern to an expansion template | The semantic action |
+| Compile-time function | An ordinary pure Checkmate function invoked with `@`      | The code generator  |
+
+Simple megaprograms need only a `magic` declaration — pattern in the parentheses, template in the braces:
 
 ```checkmate
-// Declaration inside module `agent`
-magic spawn($tag model, $ident effort, $text prompt) {
-    engine.SpawnAgent(model: "$model", effort: "$effort", prompt: $prompt)
+magic agent.spawn(
+    #complete(engine.availableModels)
+    #hover("Target model identifier, e.g. claude-opus-latest")
+    "model:" $tag model
+    "effort:" $word effort
+
+    $text prompt
+) {
+    engine.SpawnAgent(
+        model: $"{$model}"
+        effort: $"{$effort}"
+        prompt: $prompt
+    )
 }
 
-// Invocation in consumer code
+// Consumer code:
 magic(agent.spawn) {
     model: claude-opus-latest
     effort: high
@@ -668,110 +707,969 @@ magic(agent.spawn) {
 }
 ```
 
-### 8.2. Syntax Patterns and Fragment Kinds
+`#complete` / `#hover` are inert editor metadata consumed by `cme-lsp` (§8.9); they never affect matching, and they are the _only_ place host registries are visible (§8.5). Invocation is `magic(name) { … }`; the declaration form `magic name(…) { … }` is distinguished by the identifier between `magic` and `(`.
 
-The parameter list of a `magic` declaration defines its pattern. Tokens and match fragments define the expected syntax:
+**Names.** Magics are module-scope declarations, qualified by their module: the `value` macro of `std.json` is invoked as `magic(json.value)`. Grammar rules are qualified by their grammar: `json.value`. The two namespaces never meet — `magic(…)` resolves macro names, pattern positions resolve rule names — and the standard library names each grammar after its module, so the spellings coincide in §8.8's examples. Which is intended is decided by syntactic position, never by search. Invocation names resolve at parse time (§8.6): a macro must be imported, or declared earlier in the same file, before it is invoked.
 
-```
-$ident                Checkmate identifier
-$expr                 Standard Checkmate expression (typechecked at call site)
-$type                 Checkmate type identifier
-$tt                   Single token or balanced delimiter tree
-$tag                  Relaxed foreign token (letters, numbers, '-', '.')
-$text                 Verbatim text block (uninterpreted)
-$raw                  Verbatim text captured for late reinterpretation (§8.5)
-$rawvalue<fn(...)>    Late-reinterpreted value resolved via contextual lookup
-$template             Text with {{ expr }} expression interpolation islands
-$path                 Route syntax (/users/{id}/profile)
-$selector<css>        CSS selector supporting '&' context splicing
-```
+### 8.2. Grammars
 
-### 8.3. Schema-Validated Contextual Identifiers
-
-Fragment kinds can validate against active host schemas or engine registries at compile time:
+A grammar is a named, importable library of rules. Grammars and rules are script-internal and follow the `camelCase` enforcement of §2.5. Five lexical declarations define a grammar's **profile**:
 
 ```checkmate
-$ident<schema.table>   tableName   // Checked against live database schema
-$ident<schema.column>  columnName  // Checked against table columns
-$ident<css.property>   cssProp     // Checked against known CSS properties
-```
+// File: std/css.cm  (excerpt — full treatment in §8.8)
+import std.re
 
-### 8.4. Repetition, Optionals, and Choice
-
-```checkmate
-each { ... }                     // Match zero-or-more repetitions
-each sep "," { ... }             // Repetition with required separator
-optional { ... }                 // Enclosed sequence matches atomically as a unit
-oneof { A => (...), B => (...) } // Ordered choice branch
-```
-
-### 8.5. Backreferences and Constraints (`where`)
-
-Patterns can enforce syntactic match constraints via compile-time `where` clauses:
-
-```checkmate
-magic view(
-    "<" $tag<HtmlTag> tagName
-    ">"
-    each { oneof { child => recur view, text => $template } } as children
-    "</" $tag<HtmlTag> closeName ">"
-) where closeName == tagName {
-    engine.RenderElement(
-        tag: "$tagName"
-        children: [ each in children {
-            match (kind) { child => $child, text => engine.TextNode($text) }
-        }]
-    )
+grammar css {
+    skip    [ ' ', '\t', '\r', '\n' ]     // the skip set
+    comment ( "/*" until "*/" )            // a comment form
+    string  ( '"' )                        // a string form: opens and closes on
+    string  ( "'" )                        // the delimiter, backslash escapes
+    island  ( "${" "}" )                   // honored, single-line by default
+                                           // an interpolation island
+    rule styleRule(context { selector parent = none }) {
+        selector sel "{"
+        each { declaration } as decls
+        each { styleRule with context { parent: sel } } as nested
+        "}"
+    }
+    // rule selector, rule declaration, rule value, …
 }
 ```
 
-If `closeName` does not equal `tagName`, compilation fails at the call site: `closing tag 'div' does not match opening tag 'p'`.
+**Line-oriented vs. flow-oriented.** If the skip set contains a line terminator, the grammar is _flow-oriented_: newlines are layout, skipped between elements, and `eol`/`line`/`indent` are unavailable. Otherwise it is _line-oriented_: the skipper never crosses a line boundary, line structure is visible, and `eol`, `line`, and `indent` are first-class. This is the most consequential choice a grammar author makes:
 
-### 8.6. Context Blocks and Ancestor State
+- JSON, CSS, and HTML are flow-oriented.
+- YAML, TOML, Python — and, necessarily, JavaScript — are line-oriented. ASI and restricted productions are _defined_ over line boundaries; a grammar that cannot see them cannot express them. Inside a line-oriented grammar, `soft { p }` (§8.3.2) grants newline-skipping exactly where the language allows it — inside brackets, after operators — so line-visibility costs nothing where newlines are free (§8.8 demonstrates the full JS line grammar in this style).
 
-When recursive megaprograms need ambient data from parent matches (e.g., resolving `&` in nested CSS blocks), ancestor data is explicitly passed via `context { }`:
+**Comments.** In flow grammars, comment forms are consumed by the skipper. In line grammars they are _not_ auto-skipped; instead:
+
+- a **transparent line** — a line containing only skip-set characters, or only skip-set characters plus one or more comment forms — is skipped by `eol`, `eof`, and the `indent` block protocol (§8.3.5), and
+- `eol` itself consumes the line terminator and the entire following **transparent tail** (skip-set characters and zero or more consecutive comment forms) (§8.3.2).
+
+Interior comments are matched explicitly, as pattern alternatives. The consequence: a line-oriented grammar never strands a comment on a line boundary, and a comment line — at _any_ column — can neither open, close, nor be swallowed by an indented block. §8.3.1's worked TOML example demonstrates the split.
+
+**String forms** are consumed by the profile's consumers: the invocation-region scanner of §8.6 and `$tt` balancing. They never run in the skipper; in-pattern matching uses fragments and explicit rules, so `"a # not a comment"` in TOML and `content: "/* keep */"` in CSS are settled by atomicity alone (§8.3.1).
+
+**Islands.** String forms may declare an **island** (e.g., `island ( "${" "}" )`). The region scanner (§8.6) treats the island delimiters as transparent to brace balancing, allowing nested macro invocations inside interpolations to be discovered and expanded.
+
+- **Rules** reference each other by bare name (recursion is a self-reference) or qualified name across grammars. `recur` is sugar for the innermost enclosing rule.
+- Grammars **extend** others: `grammar ts extends js { rule type { … } }` — overriding or adding rules. This is how user megaprograms patch the shipped grammars. **Lexical profile inheritance:** a child grammar inherits the parent's `skip`, `comment`, `string`, and `island` declarations. The child may override them or append to them.
+- **Profile inheritance:** a magic whose entry pattern is a rule reference inherits that grammar's lexical profile for matching _and_ region scanning; a magic with an inline pattern uses the default profile (horizontal and newline skipping, `"` strings, no comments). `indent`, `eol`, and `line` are reachable only through line-oriented grammars, and the compiler rejects them in flow-oriented contexts and inside `soft`.
+
+### 8.3. The Pattern Language
+
+#### 8.3.1. Match Domain, Skipping, and Atomicity
+
+Matching operates on a cursor over raw region text. Three rules govern the skipper, and the first is exhaustive — the grammar's correctness must never depend on an unstated case:
+
+1. The skipper runs **immediately before exactly these elements**: literals and `i"…"` literals, classes, fragments, rule references, groups, `oneof` branches, `each` iterations, `optional` attempts (`optional` ≡ `each [0,1]`), `soft` regions, and `indent` starts. It **never** runs before `eol`, `eof`, `line`, `where`, `label`, or `peek`/`not` — those observe the cursor as it stands (`peek`/`not` apply the enclosing mode's skipper tentatively _within_ their subpattern and then restore it). `raw { p }` suspends the skipper entirely within `p`; a rule referenced inside `p` applies its own grammar's skipper within its own match — the delegation boundary is exempt.
+2. **Atomic matchers never skip internally.** `$str`, `$word`, `$tag`, `$int`, `$float`, `$ident`, `$text`, `$raw`, `$expr`, `$type`, `$block`, `scan`, `until`, `lineRest`, `$tt`, `$template`, and `raw { … }` regions consume their extent in one step; skip-set characters and comment forms inside that extent are data, not syntax. `soft { p }` is likewise atomic: if `p` fails, all of its skips are undone.
+3. Zero-width assertions (`peek`, `not`, `line`) restore the cursor entirely.
+
+Rule 2 settles the comment-in-string question by construction: the skipper only ever inspects text at element boundaries, and by the time the boundary after a string is reached, the string — `#` and all — has already been consumed atomically:
+
+```toml
+motto = "a # not a comment"   # but this is
+```
+
+```text
+keyval → dottedKey(motto) → "=" → value → string → $str
+    [atomic: consumes "a # not a comment", '#' included]
+→ eol    [remainder is one comment form; consumes the line end]
+```
+
+The same invariant covers JSON (`"http://x#frag"`), CSS (`content: "/* keep */"`), and the region scanner of §8.6. In line-oriented grammars the trailing comment is consumed by `eol` itself, and comment-only lines are transparent to the line machinery — there is no stranding hazard and no comment that can eat a block terminator.
+
+The remaining hazard is **loose string matching** — building strings from element sequences, where rule 1 lets the skipper eat string-internal content. Loose matching must be atomic or sealed:
 
 ```checkmate
-magic style(
-    context { $selector<css> parentSel }
-    each {
-        oneof {
-            rule => (
-                $selector<css> sel "{"
-                    each { $ident<css.property> prop ":" $rawvalue<css.valueOf(prop)> val ";" } as decls
-                    each { recur style with context { parentSel: sel } } as nested
-                "}"
-            )
-            atrule => ("@media" $text query "{" each { recur style } as mediaBody "}")
+// wrong: the skipper runs before `any`, eating spaces inside the string
+rule badString { "\"" each { not { "\"" } any } as chars "\"" }
+
+// right: an atomic fragment, or a raw region
+rule goodString { $str text }
+rule alsoGood   { "\"" raw { each { not { "\"" } any } as chars } "\"" }
+```
+
+#### 8.3.2. Combinators
+
+| Form                                                                      | Matches                                                                                                                                                                        | Capture              |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- |
+| `"lit"` / `i"lit"`                                                        | exact character sequence (`i`: case-insensitive)                                                                                                                               | —                    |
+| `[a-z0-9_]` / `[^…]`                                                      | exactly **one** character in / not in the set                                                                                                                                  | `as name`            |
+| `any`                                                                     | any single character                                                                                                                                                           | `as name`            |
+| `scan […]`                                                                | maximal run of ≥ 1 characters from the set                                                                                                                                     | text                 |
+| `until "lit"` / `until { p }`                                             | verbatim run stopping at the first position where `lit` / `p` matches **as a whole**; the stop condition consumes nothing                                                      | text                 |
+| `lineRest`                                                                | verbatim run to end of line (terminator excluded)                                                                                                                              | text                 |
+| `eol`                                                                     | _line mode only._ Consumes the terminator (or matches at region end) and the entire following **transparent tail** (skip-set characters and zero or more comment forms)        | —                    |
+| `line`                                                                    | _line mode only, zero-width._ A non-skip-set character remains before the line's terminator                                                                                    | —                    |
+| `eof`                                                                     | only skip-set characters and transparent lines remain to region end; consumed                                                                                                  | —                    |
+| `soft { p }`                                                              | _line mode only._ Newlines join the skip set within `p`; atomic (failed skips are undone)                                                                                      | —                    |
+| `optional { p }`                                                          | `p` or nothing, atomically                                                                                                                                                     | `opt` capture (§8.4) |
+| `each { p }`, `each+`, `each sep pattern trailing { p }`, `each [n, m]`   | repetition; separator (literal or pattern); trailing separator; bounds                                                                                                         | list `as xs`         |
+| `oneof { label => ( p ) … }`                                              | first matching branch, in declaration order                                                                                                                                    | tagged record        |
+| `peek { p }` / `not { p }`                                                | zero-width positive / negative lookahead                                                                                                                                       | —                    |
+| `( p )`                                                                   | grouping                                                                                                                                                                       | `as name`            |
+| `ruleName`, `grammar.ruleName`                                            | rule reference; recursion; delegation                                                                                                                                          | `as name`            |
+| `recur`                                                                   | innermost enclosing rule                                                                                                                                                       | —                    |
+| `indent { p }` / `indent verbatim`                                        | indentation-delimited block (§8.3.5)                                                                                                                                           | record / text        |
+| `raw { p }`                                                               | `p` with the skipper suspended                                                                                                                                                 | —                    |
+| `where cond`                                                              | validates captures in scope (§8.3.4)                                                                                                                                           | —                    |
+| `context { … }` / `with context { … }`                                    | ancestor data (§8.3.7)                                                                                                                                                         | —                    |
+| `label "msg" { p }`                                                       | diagnostic context for failures inside `p` (§8.3.9)                                                                                                                            | —                    |
+
+**Ordered choice with complete fall-through.** A `oneof` tries branches in declaration order; a branch fails if _any_ element of its sequence fails — a literal, a fragment, a `where`, anything — and the next alternative is tried. **There is no point in the system at which entering a branch becomes irreversible.** Indented-block failures that "look" committed (§8.3.5) are backtrackable like any other; commitment is a diagnostic annotation, not control flow. Prefix-colliding alternatives (`(?<!`, `(?<=`, `(?<name`) are written longest-prefix-first, which is precisely how ordered choice stays deterministic.
+
+#### 8.3.3. Fragments
+
+Fragments are pre-parameterized matchers that bind a capture name directly: `$tag name`, `$str key`, `$raw value`. Any word/tag/ident fragment accepts an `i` prefix — `i$tag name` — which matches case-insensitively and folds the capture to lowercase; this is how HTML's case-insensitive tag names stay first-class (§8.8).
+
+| Fragment                                   | Extent / what it matches                                                                                                                            | Capture kind  |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `$ident`                                   | a Checkmate-valid identifier token                                                                                                                  | ident         |
+| `$word`                                    | foreign identifier: `[A-Za-z_$][0-9A-Za-z_$]*`                                                                                                      | text          |
+| `$tag`                                     | relaxed foreign token: letters, digits, `-`, `.`, `_`                                                                                               | text          |
+| `$int` / `$float`                          | numeric literal forms (decimal, fractional, exponent; `0x`/`0o`/`0b` prefixes)                                                                      | int / float   |
+| `$str`                                     | double-quoted string with backslash escapes                                                                                                         | str           |
+| `$tt` / `$tt<"{{" "}}">`                   | a single token or balanced delimiter tree, honoring the grammar's profile string forms                                                              | text          |
+| `$text`                                    | effective tail if one exists, else remainder of region                                                                                              | text          |
+| `$template` / `$template<open close rule>` | same extent, split at island delimiters; islands parsed by `rule` (default `{{ }}` + Checkmate expression); `\{{` / `\}}` escape literal delimiters | tagged parts  |
+| `$raw` / `$raw<grammar.rule>`              | effective tail (§8.3.6), parsed as Checkmate code / by the referenced rule — boundary search is parse-integrated                                    | code / record |
+| `$expr` / `$type` / `$block`               | a live Checkmate island: the same tail-bounded, parse-integrated extent, parsed by the real Checkmate parser                                        | code          |
+
+Any fragment accepts a **validator** — `$ident<self.notReserved>`, `$word<std.html.voidTag>` — naming a grammar rule (the matched text must match it) or a pure function from the same module or core library. Validators never touch host schemas: §8.5's purity rule is absolute, and host registries are reachable only through inert `#complete` metadata.
+
+Live islands make embedded data contain real, type-checked Checkmate expressions:
+
+```checkmate
+magic ui.banner($template body) {
+    ui.compound([each in body {
+        match ($item) {
+            text => ui.label($"{$item.text}")
+            expr => ui.live($item.value)
         }
-    } as rules
-) {
-    engine.CompileStyle(rules: [ each in rules { match (kind) {
-        rule   => css.rule(selector: sel.resolve(parentSel), decls: [each in decls { (prop: "$prop", value: css.coerce(prop, val)) }], nested: [each in nested { $nested }])
-        atrule => css.media(query: "$query", body: [each in mediaBody { $mediaBody }])
-    }}])
+    }])
+}
+
+ui.banner {
+    Welcome back, {{ playerName }}!
+    You have {{ player.score }} points.
 }
 ```
 
-### 8.7. Indentation-Sensitive Matching (`indent { }`)
+#### 8.3.4. Constraints: `where` and `require`
 
-For embedded languages that rely on significant whitespace (e.g., Python), the `indent { }` combinator captures matching indentation blocks based on column alignment:
+**`where` is an ordinary pattern element.** It consumes no input; it succeeds if its condition — a compile-time expression over captures — is truthy, and fails otherwise. A failing element fails its enclosing sequence. Inside `oneof`, a branch whose sequence fails falls through to the next alternative **for any reason, including a failed `where`**.
+
+The scope of a `where` condition is:
+
+- every capture bound anywhere within the **current rule invocation** — earlier in the same sequence, in enclosing groups, in the `oneof` branch currently being attempted, or in earlier iterations of an enclosing repetition; and
+- the rule's declared `context` (§8.3.7).
+
+Captures from the _calling_ rule are deliberately out of scope. This restriction makes a rule's result a function of (position, context, skip mode) alone, which is what keeps packrat memoization sound (§8.7).
+
+Conditions may use equality and comparison, `&&`/`||`/`!` (Appendix A), `some x in xs { … }` / `all x in xs { … }`, `present(x)` for optional captures (§8.4), capture accessors (`.line`, `.col`, `.span`), and calls to pure functions (§8.5).
+
+Worked example — the HTML `element` rule of §8.8 against four inputs:
+
+| Input        | Behavior                                                                                                                                                                                      |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<br>`       | `styleEl`/`scriptEl` fail their `where name == …`; `selfClose` fails its literal `"/>"`; `voidEl`'s `where @isVoid(name)` succeeds and `">"` matches. Match.                                  |
+| `<br/>`      | Same fall-through; `selfClose` matches `"/>"`. Match.                                                                                                                                         |
+| `<p>…</div>` | Earlier branches fail; `normal` matches through `…`, then `where close == name` fails with no alternatives left. Whole-match failure; the constraint is the furthest failure and is reported. |
+| `<div/>`     | Every branch fails; the furthest failure is the literal `">"` at the `/`, with the `isVoid` constraint also recorded.                                                                         |
+
+The first three rows are why `where` must backtrack out of branches: the void-element checks are _branch selectors_, not validators.
+
+**Division of labor.** Templates may call `require(cond, "message")` (§8.4), which emits a compile-time error anchored at a capture's span. The decision procedure is mechanical:
+
+| The check…                                                                                                                    | Mechanism                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| can be decided from the current rule instance's captures (+ context), and must be able to steer which alternative matches     | `where`                                                                |
+| needs captures from any other rule instance — siblings, ancestors, the whole tree — and only needs to reject the final result | template `require`                                                     |
+| is cross-instance but must steer matching                                                                                     | accumulate a list downward through `context` and check it with `where` |
+
+The third row's syntax: `context { str[] open }`, extended at each recursion via
 
 ```checkmate
-magic def("def" $ident fname "(" each sep "," { $ident param } "):" indent { each { recur stmt } as body }) {
-    str $fname(each { str $param }) { each in body { $stmt } }
+recur with context { open: append(open, name) }
+```
+
+Binding values in `with context` are captures or compile-time expressions over in-scope captures and the current context — that expression form is what makes accumulation possible.
+
+The underlying invariant: **matching is stateless across rule instances.** No rule observes another instance's captures; everything cross-instance is either explicit downward context or post-match validation. This is the same property that keeps memoization sound, so the division is load-bearing, not stylistic.
+
+Under this procedure: HTML's closing-tag check is a `where` (single instance, and it selects branches); TOML's table-reopening check is a `require` (needs every header in the document); YAML's alias resolution is a `require` (needs the whole tree); an "unclosed ancestor tag" checker is either a `require` (if rejecting suffices) or the context-carried open-tag list above (if it must steer). Prefer `require` when rejecting suffices — it reports at the offending node instead of at a backtracked position.
+
+#### 8.3.5. Indentation
+
+`indent` maintains a **block stack** of the base columns of all currently open indented blocks. Column is measured in visual spaces: tab characters (`\t`) advance the column to the next multiple of 8. However, if a line's indentation prefix mixes tabs and spaces, it triggers a committed-block failure ("mixed tabs and spaces in indentation").
+
+The protocol for `indent { p }`:
+
+1. **Start.** If the cursor is mid-line, `B` is the current column and matching begins at the cursor. Otherwise the cursor must be at end of line; `indent` consumes the newline, skips **transparent lines** (§8.2), and `B` is the column of the next non-transparent line (none remaining → the block matches empty).
+2. **Depth.** If a block is open, `B` must be **strictly greater** than its base column; otherwise this element fails — an ordinary, backtrackable failure. This rule is what separates a nested block from a following sibling.
+3. **Iteration.** The cursor is placed at the start of the next non-transparent line, whose column must equal `B`; `p` is matched; only skip-set characters or one comment form may remain on the line, and the protocol then consumes the terminator and any transparent lines. A failing iteration is discarded and backtracked.
+4. **Termination.** Let `L` be the next non-transparent line after the last completed iteration (or none):
+   - **No `L`, or column(`L`) < `B`** — clean end, cursor at the start of `L`. Every open block whose base exceeds column(`L`) also ends cleanly at `L`; the innermost block whose base equals column(`L`) claims `L` as its next iteration. A dedent is never an error, and one dedented line may close several nested blocks at once. Comment-only lines are transparent: they close nothing, open nothing, and are skipped wherever `L` is sought — so the Python idiom of an outdented comment inside a block, and the YAML idiom of a comment at any column between entries, both parse.
+   - **column(`L`) ≥ `B` with ≥ 1 completed iteration** — the block fails. The failure is backtrackable like any element failure, but it records a **committed-block diagnostic** — "line at column c belonged to this block and could not be parsed" — which §8.3.9's reporter prefers over ordinary furthest failures. Commitment is a report, not control flow: `oneof` fall-through, `peek`, and `$raw`'s speculative tails all observe an ordinary failure. This keeps the system's backtracking story uniform (no exceptions) _and_ keeps the error quality the commitment was invented for.
+   - **column(`L`) ≥ `B` but does not match the base column of any currently open block** — committed-block failure: "indentation level does not match any open block". This prevents silent misalignment in No-Man's Land.
+   - **column(`L`) ≥ `B` with 0 iterations** — ordinary failure: the block could not start; the enclosing sequence backtracks and may try other alternatives.
+
+`indent verbatim as name` follows steps 1–2 restricted to end-of-line starts (empty match permitted only at region end), then captures verbatim every line — blank lines _and comment lines_ included — with column ≥ `B`, ending at the first non-transparent line with column < `B`. Comment lines are content inside a verbatim block; this covers YAML block scalars and Python-style raw bodies.
+
+Static checks: rules containing `indent` are memoized with the enclosing base column in the key (§8.7); `indent`/`eol`/`line` require line mode; and `indent` may not directly follow `eol` in a sequence — `indent` performs its own line advancement, and the check catches the double-advance mistake at compile time.
+
+Worked example (`std.yaml`):
+
+```yaml
+title: Checkmate
+limits:
+  fuel: 1000000
+deadlineMs: 50
+```
+
+The outer mapping opens at the document root with a mid-line start, `B` = 0. `title`'s value takes the same-line branch (`peek { line }` — content remains on the line). `limits`'s value: the same-line branch fails at end of line, the block branch opens a nested map with `B` = 4 — strictly deeper than 0. After `fuel`, the next line `deadlineMs` is at column 0 < 4, so the nested block ends cleanly and the outer map (base 0) claims it. Had `limits` been followed directly by a sibling at column 0, the nested map's `indent` would compute `B` = 0, violating step 2, and the value would fall back to empty (null) — **instead of swallowing the rest of the document.** That is the ambiguity step 2 exists to kill.
+
+#### 8.3.6. Verbatim Capture and `$raw`
+
+`$raw` looks like the most novel primitive in the system; it is sugar over `until`, plus a parse:
+
+```text
+( … e ($raw x) t1 t2 … )   ≡   ( … e (until { t1 t2 … } as x) … ) + parse x
+```
+
+**Effective tail.** The tail is the sequence of siblings following the `$raw`, extended outward through enclosing groups and repetition bodies until non-empty. Inside `each sep "," { … $raw x … } as xs ")"`, the tail is "the separator-continued repetition, or `")"`". A `$raw` with an empty tail (nothing follows it anywhere in the pattern) is a compile-time error: `raw capture requires a following terminator; use $text or until`. `$text` and `$template` use the same extent computation but fall back to the region remainder when no tail exists.
+
+**Boundary semantics — parse-integrated.** The scan is lazy and first-boundary, but a candidate boundary is accepted only when _both_ hold: the tail matches **as a whole** at that position, **and** the captured text parses. This is what makes nested structures work. In `f(g(x), y)`, the boundary at the inner comma is rejected — the tail matches, but `g(x` does not parse — and the scan continues to the outer comma, where `g(x)` does. A tail `":" indent { … }` does not stop at a `:` that is not followed by end-of-line-plus-deeper-block; in §8.4's grammar, `if a ? b : c:` therefore captures `a ? b : c`, not `a ? b`.
+
+If no boundary is accepted, the element fails at the furthest position where the tail matched, reporting the parse error there — the boundary the input most nearly reached.
+
+**Parsing.** Captured text is parsed at capture time. `$raw` parses as Checkmate code; `$raw<grammar.rule>` delegates to the referenced rule. `$expr`, `$type`, and `$block` are live islands with the same extent rule and the real Checkmate parser as the parse step. **For Checkmate expressions, prefer `$expr`:** the real parser's delimiter tracking is exact where `$raw`'s boundary search is a heuristic — a heuristic that handles nesting correctly (above) but at cost.
+
+**Speculation and the cycle cut.** Tail matching is speculative — it succeeds or fails without consuming. If speculative evaluation reaches the same `$raw`/`until` instance at the same position — possible when a separator-less repetition body begins with a `$raw` — the re-entrant attempt fails. This keeps `$raw` total. The documented consequence: a separator-less `each { $raw x }` merges greedily into one capture; use `sep` to separate items.
+
+**Cost.** `until` is O(characters × tail cost) before memoization — and with parse integration, × the parse cost of each candidate — so packrat memoization of tail attempts is what bounds the total; the worst case remains quadratic in region size. Because speculative tail matching can be expensive, the compiler statically warns if a `$raw` tail contains unbounded repetitions or complex recursive rules. If a `$raw` exhausts the §5.5 compile-time fuel limit during boundary search, it terminates with a budget error rather than hanging, and the diagnostic explicitly names the `$raw` instance and the furthest boundary attempted.
+
+#### 8.3.7. Ancestor Context
+
+Recursive rules needing ambient data — the parent selector when resolving `&` in nested CSS — declare it explicitly:
+
+```checkmate
+rule styleRule(context { selector parent = none }) {
+    selector sel "{"
+    each { declaration } as decls
+    each { styleRule with context { parent: sel } } as nested
+    "}"
 }
 ```
 
-### 8.8. Editor & LSP Annotations
+Context flows only downward, is always explicit, and is visible to `where` clauses and templates. Fields may declare defaults (`= none`); a call without `with context` uses them — so a top-level `styleRule` (no parent) and a delegated one compose without special cases. Binding values are captures or compile-time expressions over in-scope captures and the current context — the sanctioned mechanism for the third row of §8.3.4's decision table.
 
-Patterns can embed metadata hints to provide rich IDE support:
+#### 8.3.8. Delegation and Composition
+
+A qualified rule reference inside a pattern invokes another grammar inline:
 
 ```checkmate
-#complete(engine.availableModels)
-#hover("Target model identifier, e.g. claude-opus-latest")
-$tag model
+import std.json
+
+grammar conf {
+    skip    [ ' ', '\t' ]
+    comment ( "#" )
+
+    rule file {
+        each { oneof { setting => setting, include => include } } as entries
+    }
+
+    rule setting {
+        $word key "=" json.value as value
+        eol
+    }
+
+    rule include {
+        "include" $str path
+        eol
+    }
+}
 ```
+
+Delegation relies on **grammar-local termination**: a sub-grammar's top-level repetition stops when the next characters cannot start another rule of that grammar — a JSON value ends exactly where JSON's structure closes, so control returns precisely at conf's line end. The sub-grammar's own skipper applies within its match (json's is flow-oriented, so a value may legally span lines); the host's line discipline resumes at the boundary. A line-oriented host and a flow sub-language compose without friction, and both directions are used by the standard library: the JavaScript grammar delegates to `re.literal` for regex literals; the conf grammar above delegates to `json.value`.
+
+**Inline vs. late delegation.** `$raw<grammar.rule>` and `cm.parse(grammar.rule, text, span)` (§8.5) perform the same delegation on _captured_ text — late, after an `until` has fixed the extent. The distinction matters when the embedded language's termination rule disagrees with its own lexer: HTML's raw-text elements end at the first matching end tag **lexically**, regardless of strings inside the embedded CSS or JavaScript, so `std.html` captures `<script>` bodies with `until` and parses them late (§8.8). When termination is grammar-local — JSON in conf, regex literals in JS — inline delegation is exact. The choice of strategy belongs to the macro author, like every other strategy in this system.
+
+#### 8.3.9. Failure Semantics and Diagnostics
+
+Matching failures are reported at the **furthest position reached**, with the set of alternatives expected there, contextualized by enclosing `label` blocks and rule names. `where` failures participate like any element. Committed-block failures (§8.3.5) are reported in preference to ordinary furthest failures — "this line belonged to this block" is a better diagnosis than whatever far-away alternative happened to be tried last. If a match later succeeds through another branch, all recorded failures are discarded:
+
+```text
+error[magic]: mods/hud/src/hud.cm:17:5
+    constraint failed: close == name  ('div' ≠ 'p')
+    element opened at mods/hud/src/hud.cm:15:5
+    ┆ <p class="hud">
+    ┆     <span>HP</span>
+    ┆ </div>
+    ┆  ^^^ while matching 'html.element' → branch 'normal' → 'close'
+```
+
+A magic invocation's pattern must consume the entire region; leftover content is reported the same way, along with any region-scan hint from §8.6.
+
+#### 8.3.10. Pattern Grammar (Condensed)
+
+```ebnf
+pattern    → { term }
+term       → literal | iliteral | class | fragment | ruleref | group
+           | repetition | optional | choice | look
+           | verbatim | rawregion | softregion | indentBlock
+           | constraint | label | lineend | lineassert | eof
+literal    → STRING ;  iliteral → "i" STRING
+class      → "[" items "]" [ "as" BIND ]              // exactly one character
+fragment   → [ "i" ] "$" IDENT [ "<" ( validator | ruleref | templateSpec ) ">" ] [ "as" BIND ]
+ruleref    → qualified [ "with" "context" "{" { IDENT [ ":" cexpr ] } "}" ] [ "as" BIND ]
+           | "recur"
+repetition → "each" [ "+" ] [ "sep" pattern ] [ "trailing" ] [ bounds ]
+             "{" pattern "}" [ "as" BIND ]
+optional   → "optional" "{" pattern "}" [ "as" BIND ]        // ≡ each [0,1], atomic
+choice     → "oneof" "{" { IDENT "=>" [ "(" pattern ")" | pattern ] } "}"
+look       → ("peek" | "not") "{" pattern "}"
+verbatim   → ("until" ( literal | "{" pattern "}" ) | "lineRest") [ "as" BIND ]
+rawregion  → "raw" "{" pattern "}"
+softregion → "soft" "{" pattern "}"
+indentBlock→ "indent" ( "{" pattern "}" | "verbatim" [ "as" BIND ] )
+constraint → "where" cexpr
+label      → "label" STRING "{" pattern "}"
+lineend    → "eol" ;  lineassert → "line" ;  eof → "eof"
+annotation → ("#complete" "(" expr ")" | "#hover" "(" STRING ")" | "#token" "(" STRING ")")
+```
+
+Annotations may appear between any terms; they are inert (§8.1, §8.9).
+
+### 8.4. Expansion Templates
+
+The template is the target code with holes. Holes are typed by capture kind and syntactic position:
+
+| Hole position                                    | ident / text / numeric capture | list capture     | tagged record     | code capture            | optional capture          |
+| ------------------------------------------------ | ------------------------------ | ---------------- | ----------------- | ----------------------- | ------------------------- |
+| name (function, field, param)                    | splices the identifier         | —                | —                 | parsed as an identifier | —                         |
+| type                                             | —                              | —                | —                 | parsed as a type        | —                         |
+| expression                                       | splices as a literal value     | array literal    | must be `match`ed | parsed as an expression | —                         |
+| element lists (params, args, statements, fields) | single element                 | repeats elements | —                 | repeats elements        | single element if present |
+
+An `optional { p } as x` capture holds `some(value)` or `none`; `present($x)` tests it in `where` conditions and template `[when]` guards, and splicing an absent optional is a template compile error.
+
+**Name resolution in templates.** Inside `match ($item) { label => … }` arms and inside `each in xs { … }` bodies, a bare `$field` resolves to the current element's field; the qualified form (`$item.field`) is always available and means the same thing. A `match` must list every branch label of the tagged capture; exhaustiveness is checked.
+
+Template constructs: `$cap` splices; `$"…{cap}…"` interpolates into strings; `[each in xs { … }]` repeats (with optional `where` filters); `[when cond { … } else { … }]` selects; `match ($cap) { label => … }` dispatches on `oneof` tags; `let` binds; `require(cond, "message")` emits a compile-time error anchored at a capture's span; `@fn(…)` invokes a compile-time function (§8.5).
+
+Every generated AST node carries the span of the template element and capture that produced it, so **type errors in generated code point at the embedded-language source**. A complete example — a Python-flavored `def` generating a real Checkmate function:
+
+```checkmate
+// File: src/bridge.cm
+grammar py {
+    skip    [ ' ' ]
+    comment ( "#" )
+
+    rule def {
+        "def" $word fname
+        "(" soft { each sep "," { $word param optional { ":" $type ptype } } as params ")" }
+        "->" $type ret ":"
+        indent { each { recur } as body }
+    }
+
+    rule stmt {
+        oneof {
+            ifStmt => (
+                "if" $expr cond ":"
+                indent { each { recur } as body }
+            )
+            return => ( "return" optional { $expr value } eol )
+            call   => ( $word callee "(" soft { each sep "," { $expr arg } as args ")" } eol )
+        }
+    }
+}
+
+magic def(py.def as d) {
+    $d.ret $d.fname(each in d.params {
+        [when present($ptype) { $ptype $param } else { infer $param }]
+    }) {
+        each in d.body {
+            match ($item) {
+                ifStmt  => if ($cond) { @py.emitBody($body) }
+                return  => return $value
+                call    => $callee(each in $args { $arg })
+            }
+        }
+    }
+}
+```
+
+```checkmate
+magic(def) {
+    def clamp(v: int, lo: int, hi: int) -> int:
+        if v < lo:
+            return lo
+        if v > hi:
+            return hi
+        return v
+}
+```
+
+expands to ordinary, fully type-checked Checkmate:
+
+```checkmate
+int clamp(int v, int lo, int hi) {
+    if (v < lo) {
+        return lo
+    }
+    if (v > hi) {
+        return hi
+    }
+    return v
+}
+```
+
+`$expr cond` is a live island whose boundary is the tail `":" indent { … }`, parse-integrated (§8.3.6) — so `if a ? b : c:` captures `a ? b : c`, and `if clamp(v, lo) > hi:` works because the inner commas fail the Checkmate parse and the scan continues. `$type ptype` is a live island type-checked after expansion; the template's `[when present($ptype) … else { infer $param }]` handles untyped parameters (a typed function is generated either way). `soft` around the parameter and argument lists matches Python's bracket rule: newlines are free inside `(`…`)`, significant outside. The nested `if` bodies dedent from column 12 to 8, closing the inner block cleanly and continuing the outer one (§8.3.5); `@py.emitBody` (§8.5) handles recursive statement codegen. Invocation positions: **declaration, statement, expression, and type** — macros can generate anything the language can declare.
+
+### 8.5. Compile-Time Computation
+
+Templates can call any pure Checkmate function with the `@` prefix. Unmarked calls are ordinary runtime code emitted into the output; `@`-marked calls execute during expansion, in the sandboxed bytecode interpreter (§5.1), under §5.5 limits. §5.5 fuel is an **operation count**, never wall-clock time — compilation is deterministic and byte-reproducible across platforms. Compile-time code may import only `self` modules and the core library; schema imports inside compile-time-evaluated code are compile errors, and there are no exceptions — validators included (§8.3.3).
+
+Compile-time functions receive capture values (records, lists, texts, numbers, spans) and return values or `code` — a compile-time-only syntax-fragment type, constructed by the parsers (`$raw`, `$expr`, `$type`), by a builder API (`cm.code.call`, `cm.code.fn`, …), or by parsing text. **Parsing API:**
+
+- `cm.parseExpr(text, span)` / `cm.parseStmts(text, span)` — Checkmate expressions and statements; the text may contain `magic(…) { … }` invocations, which enter the expansion queue of §8.6 like any other.
+- `cm.parse(grammar.rule, text, span)` — delegate to any grammar rule (late delegation, §8.3.8).
+
+The `span` argument threads provenance: every node parsed from the text carries it. Nodes built by `cm.code.*` inherit the span of the `@`-call's template element unless given one explicitly. Diagnostics for generated code therefore keep pointing at embedded-language source even through recursive generators — `@py.emitBody`, `@std.html.emitElement`, `@std.re.emitMatcher` are ordinary recursive Checkmate functions. `code` exists only during compilation: §5.2 is strict AOT, so this is metaprogramming, not dynamic code execution.
+
+### 8.6. Invocation and Post-Expansion
+
+**Region location.** `magic(name) { …region… }` — the parser resolves `name` in the macro namespace (imports precede use; unresolved names are parse errors), then locates the region by brace balancing under the **composed profile**: the comment, string, and island forms of the entry grammar _and of every grammar its entry pattern references_, transitively. At each position the scanner tries comment forms longest-first, then string forms longest-first. If a string form declares an **island** (e.g., `${` to `}`), the scanner recursively balances braces inside the island, allowing nested macro invocations to be discovered and expanded. A single-line string form that does not close on the same line is treated as ordinary text (an apostrophe in prose cannot swallow the file); forms declared `multiline` may span. Everything else counts braces.
+
+Composition is what makes nesting Just Work: an HTML region containing `console.log("}")` (js strings composed in), `// it's fine` (js comments, matched before strings), `` `a ${b} c` `` (js multiline strings), or `console.log(\`val: ${ magic(json.value) { 1 } }\`)` (js island composed in, balancing the inner `{`) all balance correctly — no single profile could know all three, but the pattern's own reference graph does.
+
+**Region normalization.** The region excludes one line terminator immediately after `{`, one immediately before `}`, and horizontal whitespace at the region's start and end. Line-oriented grammars therefore begin matching at the first content character — `magic(def) {⏎    def clamp(…` matches `def` directly, and `magic(re.compile) {⏎    ^[\w.…` does not silently absorb the indentation into the regex (std.re's skip set is empty). Flow-oriented grammars skip the trimmed whitespace anyway; the rule is uniform and harmless to them.
+
+**No speculative extension.** If the pattern fails at the region's last character, the diagnostic reports the furthest failure and adds the scan hint where relevant: _an inner `}` invisible to every composed profile — a brace inside an embedded regex literal, say — may have closed the region early; the heredoc form is exact._ The scanner never guesses a larger extent: a wrong guess can silently absorb host code into the macro, and no syntactic signal distinguishes that case from a genuine truncation. Heredocs are the zero-approximation escape hatch:
+
+```checkmate
+magic(name) <<tag … tag
+```
+
+— the region extends verbatim to the first line whose content is exactly `tag`; only the edge trims of normalization apply.
+
+A magic invocation's pattern must consume the entire region; leftover content is reported with the furthest-failure diagnostics.
+
+**One AST, one queue.** Expansion is a worklist over a single AST representation. `magic()` invocation nodes enter that tree from exactly three places, and all three are processed identically:
+
+1. literal template text;
+2. text parsed at compile time — `$raw` captures, `$expr`/`$type`/`$block` islands, and `cm.parse*` results;
+3. `code` values returned by `@`-functions.
+
+After each pass, the expander sweeps the entire tree in fixed depth-first source order and enqueues every remaining invocation. The sweep repeats until none remain, bounded by an **expansion-tree depth cap of 64, counting all origins** — nesting depth, not pass count: sibling invocations at the same depth expand in the same pass, so breadth is unbounded and legitimate wide generation never hits the cap. Exceeding it reports the full expansion stack — each macro, span, and pass.
+
+**Provenance never affects processing.** A node returned by an `@`-function is expanded in the same pass as a node spliced from a template or parsed from an island; origin is recorded only for diagnostics (§8.9). Islands are type-checked after the fixpoint together with all other generated code: there is exactly one name-resolution and type-checking pass over the final tree (§5), regardless of how each node arrived. Because `@`-functions are pure and the traversal order is fixed, the fixpoint is deterministic — which is what keeps §5.4 artifact hashes reproducible.
+
+### 8.7. Guarantees
+
+1. **Determinism.** Ordered choice, no ambiguity, stateless matching, pure `@`-functions, deterministic operation-count fuel, and a fixed traversal order in the expansion fixpoint: the same source and the same grammars produce byte-identical expansion on every platform.
+2. **Complexity, honestly stated.** Packrat memoization bounds matching time by O(region × rules) **per environment**, where an environment is a (context bindings, enclosing block column, skip mode) tuple. Environments are few in practice — contexts are small and indentation is shallow — but neither factor is _structurally_ bounded: an accumulated context list grows with input depth, and distinct indentation columns grow with input width; in the worst case total time is O(region² × rules). Memo storage is O(environments × positions) and is the practical memory bound. `until`/`$raw` add a quadratic worst case (§8.3.6). All matching and compile-time evaluation run under §5.5 fuel, so pathological grammars terminate with a budget error rather than hanging. Catastrophic _regex-style_ backtracking is impossible by construction — at compile time; the runtime complexity of matchers _generated_ by macros (e.g. `std.re`'s backtracking path) is the macro author's responsibility, stated in that macro's documentation.
+3. **Termination.** Fuel-metered compile-time evaluation; expansion depth capped across all origins (§8.6); left recursion — including **nullable-prefix cycles**, a rule reaching itself while consuming nothing through `optional`, empty iterations, `peek`/`not`, `where`, or `label` — statically rejected with a rewrite suggestion; as a backstop, a re-entrant rule invocation against an in-progress memo entry fails immediately. Speculative tails are cycle-cut (§8.3.6).
+4. **Purity.** No host capabilities, no I/O, no clock, no ambient compiler state — enforced by the import checker, not convention, with no exceptions for validators or annotations.
+5. **Span faithfulness.** From furthest-failure parse errors to final type errors, diagnostics point at the embedded language's source, in the user's file — including code built by `@`-functions (§8.5's span threading).
+6. **Uniform provenance.** One expansion mechanism and one AST; how a node arrived never affects which passes process it (§8.6).
+
+### 8.8. The Standard Grammar Library
+
+Shipped under the `std` root alongside the §11 core. Deleting them and re-implementing them in user space yields identical behavior. Coverage is stated exactly; where a construct is out of scope, the grammar rejects it with a diagnostic rather than silently mis-parsing it.
+
+| Grammar             | Coverage                                                                                                                                                                 | Key mechanisms exercised                                             |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| `std.json`          | RFC 8259, strict (leading zeros rejected)                                                                                                                                | flow skipper, `oneof`, recursion, `scan`, `sep`                      |
+| `std.toml`          | TOML 1.0 incl. multi-line arrays and dotted keys                                                                                                                         | line mode + `soft`, explicit key charset, `require`                  |
+| `std.yaml`          | YAML 1.2 core: block/flow (multi-line flow included), anchors, tags, multi-doc, block scalars, merge keys, plain multi-line scalars                                      | `indent`, `indent verbatim`, transparent comments, `peek`, `require` |
+| `std.re`            | ECMAScript regex plus PCRE lookbehind, named groups, possessive/atomic groups, inline flags; POSIX classes; conditionals, subroutines, `\Q…\E` rejected with diagnostics | guarded classes, ordered prefix choice, `until`, `@` codegen         |
+| `std.html`          | HTML5 syntax minus foreign content; raw-text termination per spec                                                                                                        | `i$tag`, whole-tail `until`, late parsing, delegation                |
+| `std.css`           | selectors incl. nesting and `&`, `:has()`/`:is()`, at-rules, custom properties, `!important`                                                                             | `context`, `$tt`, `scan`, `string` forms                             |
+| `std.js` / `std.ts` | full ES statement/expression surface incl. ASI and restricted productions; TS via `grammar ts extends js`                                                                | line mode, `soft`, `eol`-ASI, postfix repetition, delegation         |
+
+**JSON** — the whole grammar, verbatim:
+
+```checkmate
+grammar json {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule value {
+        oneof {
+            null   => "null"
+            bool   => oneof { t => "true", f => "false" }
+            number => number
+            string => $str text
+            array  => ( "[" each sep "," { value } as items "]" )
+            object => ( "{" each sep "," { member } as fields "}" )
+        }
+    }
+
+    rule member {
+        $str key ":" value
+    }
+
+    rule number {
+        optional { "-" }
+        oneof { zero => "0", pos => ( [1-9] as first scan [0-9] as rest ) }
+        optional { "." scan [0-9] as frac }
+        // ...
+    }
+}
+
+magic value(json.value as v) {
+    @toValue($v)
+}
+```
+
+```checkmate
+import std.json
+
+infer config = magic(json.value) {
+    {
+        "host": "db.local",
+        "ports": [5432, 6432],
+        "retries": 3
+    }
+}
+```
+
+`@toValue` turns the capture tree into typed `code` constructing a `jsonValue` enum; a CMON-oriented variant splices directly into struct literals for §11.1 deserialization.
+
+**TOML** — dotted keys, tables, and the line/soft split:
+
+```checkmate
+grammar toml {
+    skip    [ ' ', '\t' ]                 // line-oriented: tables are lines
+    comment ( "#" )
+
+    rule document {
+        each { oneof { table => tableHeader, kv => keyval } } as items
+    }
+
+    rule tableHeader {
+        oneof {
+            arrayTable => ( "[[" dottedKey path "]]" eol )
+            table      => ( "[" dottedKey path "]" eol )
+        }
+    }
+
+    rule keyval {
+        dottedKey key "=" value eol        // trailing comments: eol's job
+    }
+
+    rule dottedKey {
+        each sep "." {
+            oneof { bare => scan [A-Za-z0-9_-] as part, quoted => $str part }
+        } as parts
+    }
+
+    rule value {
+        oneof {
+            string   => string
+            integer  => integer
+            float    => floatV
+            bool     => oneof { t => "true", f => "false" }
+            datetime => datetime
+            array    => ( "[" soft { each sep "," trailing { value } as items "]" } )
+            inline   => ( "{" soft { each sep "," { dottedKey k "=" value v } as fields "}" } )
+        }
+    }
+
+    // rule string (basic / literal / multiline), rule integer
+    // (dec, 0x, 0o, 0b), rule floatV, rule datetime — elided
+}
+
+magic value(toml.document as doc) {
+    require(@tablesConsistent($doc), "table redefined or reopened with a conflicting type")
+    @toValue($doc)
+}
+```
+
+Two details are load-bearing. Bare key segments are `scan [A-Za-z0-9_-]` — the exact TOML bare-key set, _without_ `.` — because `$tag` would maximal-munch the dots and collapse `owner.name` into one segment; quoted segments are the `oneof`'s second branch. And arrays/inline tables are `soft` regions: `[1,\n 2, 3,]` spans lines exactly as TOML 1.0 allows, while `keyval` stays line-terminated. Standalone comment lines are transparent (§8.2) and trailing comments are consumed by `eol`, so no comment rule appears in `document` or `keyval` — the discipline is in the machinery, not sprinkled through the grammar. Table reopening is _semantic_ validation — a `require` over the capture tree, per §8.3.4's decision table.
+
+**YAML** — indentation, anchors, block scalars:
+
+```checkmate
+grammar yaml {
+    skip    [ ' ' ]
+    comment ( "#" )
+
+    rule document {
+        optional { "---" }
+        oneof { blockDoc => blockNode, flowDoc => flowNode }
+        optional { "..." }
+    }
+
+    rule node {
+        oneof {
+            anchor => ( "&" $word name node )
+            alias  => ( "*" $word name )
+            flow   => ( peek { line } flowNode )
+            block  => ( peek { not { line } } blockNode )
+        }
+    }
+
+    rule blockNode {
+        oneof {
+            seq => indent { each+ { "-" node } as items }
+            map => indent { each+ { field } as fields }
+        }
+        // plain multi-line scalars, column-exact variants — elided
+    }
+
+    rule field {
+        key key ":"
+        oneof {
+            blockScalar => (
+                oneof { literal => "|", folded => ">" }
+                optional { $tag header }
+                indent verbatim as text
+            )
+            sameLine => ( peek { line } node value )
+            block    => node value
+            empty    => peek { not { line } }
+        }
+    }
+
+    rule flowNode {
+        oneof {
+            seq    => ( "[" soft { each sep "," { node } as items "]" } )
+            map    => ( "{" soft { each sep "," { key key ":" node } as fields "}" } )
+            scalar => scalar
+        }
+    }
+
+    // rule key, rule scalar (plain, quoted, multi-line continuations),
+    // tags ("!!str" …), merge keys ("<<") — elided
+}
+
+magic value(yaml.document as doc) {
+    require(@anchorsResolve($doc), "alias references an undefined anchor")
+    @toValue($doc)
+}
+```
+
+```checkmate
+import std.yaml
+
+infer settings = magic(yaml.value) {
+    ---
+    title: Checkmate
+    limits:
+        fuel: 1000000
+        deadlineMs: 50
+    tags: [embeddable, aot, arc]
+    defaults: &def
+        retries: 3
+    production:
+        <<: *def
+        retries: 5
+}
+```
+
+`peek { line }` / `peek { not { line } }` dispatch same-line values from block values; §8.3.5's strictly-deeper rule then separates a nested block from a following sibling. Flow collections are `soft`, so `[a,\n b]` — multi-line flow, valid YAML — parses. Comments at any column between entries are transparent lines (§8.3.5).
+
+**Regular expressions** — the acid test for character-level power (~90 rules total; the heart):
+
+```checkmate
+grammar re {
+    skip [ ]
+
+    rule pattern {
+        each sep "|" { alternative } as alts
+    }
+
+    rule alternative {
+        each { quantified } as terms
+    }
+
+    rule quantified {
+        atom
+        optional {
+            oneof {
+                star  => ( "*"  quantSuffix )
+                plus  => ( "+"  quantSuffix )
+                opt   => ( "?"  quantSuffix )
+                bound => ( "{" $int min optional { "," optional { $int max } } "}" quantSuffix )
+            }
+        }
+    }
+
+    rule quantSuffix {
+        optional { oneof { lazy => "?", possessive => "+" } }
+    }
+
+    rule atom {
+        oneof {
+            anyChar  => "."
+            anchor   => oneof { start => "^", end => "$" }
+            class    => class
+            escape   => escape
+            group    => group
+            literal  => [^.^$*+?(){}|/\[\]] as ch       // exactly one character
+        }
+    }
+
+    rule class {
+        "[" optional { "^" }
+        each { classItem } as items
+        "]"
+    }
+
+    rule classItem {
+        oneof {
+            posix   => ( "[:" $tag name ":]" )
+            escape  => escape
+            range   => ( any lo "-" peek { not { "]" } } any hi )
+            single  => ( peek { not { "]" } } any as ch )
+        }
+    }
+
+    rule escape {
+        "\\"
+        oneof {
+            classEscape  => scan [dDwWsS] as kind
+            anchorEscape => oneof { b => "b", B => "B", A => "A", z => "z", Z => "Z", G => "G" }
+            ctrl         => oneof { n => "n", r => "r", t => "t", f => "f", "0" => "0" }
+            backref      => oneof { num => scan [1-9] as index,
+                                    named => ( "k" "<" $word name ">" ) }
+            unicodeClass => ( "p" "{" $tag category "}" )
+            char         => [^A-Za-z0-9] as ch           // escaped punctuation only
+        }
+    }
+
+    rule group {
+        "("
+        oneof {
+            lookBehindNeg => ( "?<!" pattern )
+            lookBehind    => ( "?<=" pattern )
+            named         => ( "?<" $word name ">" pattern )
+            lookAheadNeg  => ( "?!"  pattern )
+            lookAhead     => ( "?="  pattern )
+            atomic        => ( "?>"  pattern )
+            inlineFlags   => ( "?" scan [-imsxu]* as flags ":" pattern )
+            nonCapturing  => ( "?:"  pattern )
+            capturing     => pattern
+        }
+        ")"
+    }
+}
+
+magic compile(re.pattern as p) {
+    @emitMatcher($p)
+}
+```
+
+Three guards make the shipped example parse correctly. Class items refuse `]` — `range` before the `]`-guard, `single` behind one — so `[\w.+-]` is four items (`\w`, `.`, `+`, `-`) with the class closing at its own bracket, and a class never swallows past its closer. Literal atoms are single characters (a class, not a `scan` run), so `ab*` is `a` then `b*` — quantifiers attach to the last character, as in every regex engine. And the escape fallback is escaped _punctuation_ only: `\Q`, `\g`, or any unsupported alphanumeric escape is a parse error pointing at its span — PCRE constructs outside the declared scope (conditionals, subroutines, `\Q…\E`) fail loudly instead of silently becoming literals. `\A`, `\z`, `\Z`, `\G`, `\b`, `\B` are anchor escapes, not characters. Prefix-colliding group forms are listed longest-first. `@emitMatcher` inspects the capture tree: backreference- and lookaround-free patterns compile to a linear-time Thompson NFA; the rest to a memoized backtracking matcher. That dispatch is ordinary compile-time Checkmate — the macro author owns the strategy.
+
+```checkmate
+import std.re
+
+infer isEmail = magic(re.compile) {
+    ^[\w.+-]+@[\w-]+(\.[\w-]+)+$
+}
+```
+
+**HTML with embedded CSS and JavaScript** — the composition showcase:
+
+```checkmate
+// File: std/html.cm  (excerpt)
+import std.css
+import std.js
+
+grammar html {
+    skip    [ ' ', '\t', '\r', '\n' ]
+    comment ( "<!--" until "-->" )
+    string  ( '"' )  string ( "'" )
+
+    rule document {
+        optional { "<!" i"doctype" $tag name ">" }
+        each { content } as children
+    }
+
+    rule content {
+        oneof {
+            element => element
+            text    => until { "<" [a-zA-Z!/] } as text
+        }
+    }
+
+    rule element {
+        "<" i$tag name
+        each { attribute } as attrs
+        oneof {
+            scriptEl => (
+                where name == "script" ">"
+                until { "</" i$tag close where close == name } as body
+                "</" i$tag close ">"
+            )
+            styleEl => (
+                where name == "style" ">"
+                until { "</" i$tag close where close == name } as body
+                "</" i$tag close ">"
+            )
+            selfClose => ( where @isVoid(name) "/>" )
+            voidEl    => ( where @isVoid(name) ">" )
+            rawEl     => (
+                where @isRawText(name) ">"
+                until { "</" i$tag close where close == name } as body
+                "</" i$tag close ">"
+            )
+            normal => (
+                ">"
+                each { content } as children
+                "</" i$tag close
+                where close == name
+                ">"
+            )
+        }
+    }
+
+    rule attribute {
+        i$tag name
+        optional {
+            "="
+            oneof {
+                quoted => $str value
+                single => ( "'" until "'" as value "'" )
+                bare   => scan [^ \t\r\n>] as value
+            }
+        }
+    }
+}
+
+magic fragment(html.document as doc) {
+    engine.ui.mount([each in doc.children {
+        match ($item) {
+            element => @emitElement($item)
+            text    => engine.ui.text(@decodeEntities($item.text))
+        }
+    }])
+}
+```
+
+```checkmate
+import std.html
+
+magic(html.fragment) {
+    <!doctype html>
+    <html>
+        <style>
+            body { margin: 0; font: 14px system-ui }
+            .hud > .bar { width: 100% }
+            .hud > .bar:hover { opacity: 0.8 }
+        </style>
+        <body>
+            <div class="hud">
+                <span class="bar">HP</span>
+                <p>1 < 2</p>
+            </div>
+            <script>
+                console.log("hud mounted")
+            </script>
+        </body>
+    </html>
+}
+```
+
+**Conformance notes — every choice here is a stress-test scar.** Tag and attribute names are `i$tag` captures, folded to lowercase: `<BR>` is void, `</DIV>` closes `<div>`, `where name == "script"` sees `<SCRIPT>` — HTML is case-insensitive and so is the grammar. Text nodes stop only at tag starts — `until { "<" [a-zA-Z!/] }` — so `1 < 2` is text, not a parse error. Raw-text and script/style bodies are captured _lexically_: `until { "</" i$tag close where close == name }` stops at the first end tag whose folded name matches, ignoring strings in the embedded language, because that is HTML's actual rule — `<script>document.write("</script>")</script>` ends the script inside the string, and `@emitElement` then reports the broken JavaScript at the string's span (write `<\/script>`). The same whole-tail stop condition means `</b` inside a `<textarea>` is content, not a terminator. The bodies are parsed _late_ — `@emitElement` calls `cm.parse(js.program, $item.body, …)` and `cm.parse(css.sheet, $item.body, …)` — rather than by inline delegation, because inline delegation is string-aware and would diverge from the spec (§8.3.8). `style="…"` attribute values are likewise re-parsed by `css.decls` at expansion time. Non-void self-closing tags (`<div/>`) are errors — std.html is a validator. Foreign content (SVG/MathML), where self-closing is significant, is out of scope: `<svg><path/></svg>` is rejected with the furthest failure at the `/>`, not mis-parsed.
+
+**JavaScript and TypeScript** — the excerpt that matters:
+
+```checkmate
+// File: std/js.cm  (excerpt)
+import std.re
+
+grammar js {
+    skip    [ ' ', '\t' ]                  // line-oriented: ASI is defined over lines
+    comment ( "//" )                       // to end of line
+    comment ( "/*" until "*/" )
+    string  ( '"' )  string ( "'" )  string ( '`' multiline island ( "${" "}" ) )
+
+    rule program {
+        each { statement } as stmts
+    }
+
+    rule statement {
+        oneof {
+            block  => ( "{" optional { eol } each { statement } as body "}" optional { eol } )
+            if     => ( "if" soft { "(" expression cond ")" } optional { eol } statement then
+                        optional { "else" optional { eol } statement otherwise } )
+            while  => ( "while" soft { "(" expression cond ")" } optional { eol } statement body )
+            ret    => ( "return" optional { expression value } semi )
+            decl   => ( oneof { let => "let", const => "const" } $word name
+                        optional { soft { "=" expression init } } semi )
+            expr   => ( expression value semi )
+            // for, class, try, switch, throw — elided; same shape
+        }
+    }
+
+    // ASI: a statement ends at ";" (consuming any following line ends) or at
+    // end of line.  `ret` is the restricted production: its value is NOT
+    // wrapped in soft, so `return` followed by a line end returns undefined
+    // and the next line starts a new statement — JavaScript's actual rule.
+    rule semi {
+        oneof { explicit => ( ";" optional { eol } ), inserted => eol }
+    }
+
+    rule expression { assignment }        // full precedence ladder elided;
+                                          // every binary level is
+                                          //   operand each { soft { op operand } }
+
+    rule unary {
+        oneof {
+            neg     => ( "-" soft { unary } )
+            not     => ( "!" soft { unary } )
+            postfix => postfix
+        }
+    }
+
+    // no left recursion: member/call chains are a postfix repetition
+    rule postfix {
+        primary first
+        each {
+            soft {
+                oneof {
+                    call   => ( "(" soft { each sep "," { expression arg } as args ")" } )
+                    member => ( "." $word field )
+                    index  => ( "[" soft { expression idx } "]" )
+                }
+            }
+        } as ops
+    }
+
+    rule primary {
+        oneof {
+            number   => $float literal        // hex/octal/binary forms elided
+            string   => $str literal
+            ident    => $word name
+            regex    => re.literal            // grammar reuse
+            paren    => ( "(" soft { expression inner ")" } )
+            // object & array literals, template literals (a parameterized
+            // $template<"${" "}" expression>), arrow functions, new, await — elided
+        }
+    }
+}
+
+magic run(js.program as program) {
+    engine.javascript.Execute(@emitSource($program))
+}
+```
+
+```checkmate
+import std.js
+
+magic(js.run) {
+    const greeting = `Hello, ${ magic(json.value) { "world" } }!`
+    console.log(greeting)
+}
+```
+
+Because JS template literals are declared with an `island ( "${" "}" )` in the grammar profile (§8.2), the region scanner pierces the string literal, discovers the nested `magic(json.value)`, and expands it before handing the text to the JS parser. The generated JS becomes ``const greeting = `Hello, world!`;``. ASI works correctly: `return` followed by a newline matches `semi`'s `inserted => eol` branch, terminating the statement exactly where JavaScript specifies.
 
 ---
 

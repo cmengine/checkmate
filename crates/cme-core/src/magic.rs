@@ -231,8 +231,14 @@ pub enum FragKind {
     Tt,
     /// Effective tail if one exists, else the region remainder.
     Text,
-    /// A template with islands split by `{{ }}` (or parameterized delimiters).
-    Template,
+    /// A template with islands split by `{{ }}` (or parameterized
+    /// delimiters); island content is a Checkmate expression, or parsed by
+    /// the referenced rule (§8.3.3).
+    Template {
+        open: String,
+        close: String,
+        rule: Option<Vec<String>>,
+    },
     /// Verbatim tail parsed as Checkmate code, or by the referenced rule.
     Raw(Option<Vec<String>>),
     /// A live Checkmate expression island.

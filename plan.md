@@ -420,17 +420,28 @@ pub enum CaptureValue {
       end to end (expand → check → run expanded → `main` returns 0).
 - [x] Commit(s): `test: pin magic.cm megaprograms end to end`.
 
-### Task 6 — Parse-integrated extents  `[ ]`
-- [ ] Public sub-parser helpers in cme-compiler (`parse_expr_text`,
+### Task 6 — Parse-integrated extents  `[x]`
+- [x] Public sub-parser helpers in cme-compiler (`parse_expr_text`,
       `parse_type_text`, `parse_block_text`) returning success/failure
-      (used ONLY for boundary checking + capture parsing).
-- [ ] `$expr`/`$type`/`$block`/`$raw`: boundary accepted only when the tail
+      (used ONLY for boundary checking + capture parsing). They live in
+      parser.rs, drive the real lexer + Parser, and require zero
+      diagnostics plus full consumption.
+- [x] `$expr`/`$type`/`$block`/`$raw`: boundary accepted only when the tail
       matches as a whole AND the candidate text parses (§8.3.6); speculative
-      tail evaluation with cycle cut; furthest-boundary diagnostics.
-- [ ] `$template` islands (default `{{ }}` + Checkmate expression; `\{{`
-      escapes; `<open close rule>` parameterization).
-- [ ] py/JS tests with commas/nested calls (`if clamp(v, lo) > hi:`).
-- [ ] Commit: `feat(compiler): parse-integrated raw/expr/type/template extents`.
+      tail evaluation with cycle cut (depth-capped `tail_matches`, and its
+      failures are suppressed from the report as noise); furthest-boundary
+      diagnostics ("no parseable boundary …" at the furthest tail-matched
+      position, with the parse error). `$raw<grammar.rule>` delegates the
+      parse to the referenced rule. A `$raw`/`$expr`/`$type`/`$block` with
+      an empty tail in an entry pattern is a compile-time error (§8.3.6).
+- [x] `$template` islands (default `{{ }}` + Checkmate expression; `\{{`
+      escapes; `<open close rule>` parameterization). The capture is a list
+      of tagged records (`text` with a `text` field, `expr` with a `value`
+      field), islands are parse-checked, and a missing closer is a clean
+      diagnostic.
+- [x] py/JS tests with commas/nested calls (`if useTwo(v, lo) > 0:` expands,
+      parses and type-checks; `call (f(1, 2), g(3))` keeps each call whole).
+- [x] Commit: `feat(compiler): parse-integrated raw/expr/type/template extents`.
 
 ### Task 7 — §8.5 compile-time computation  `[ ]`
 - [ ] Compile-time evaluator for pure Checkmate functions (bridge capture
@@ -500,6 +511,13 @@ pub enum CaptureValue {
   ends are after-terminator positions, and a `>=` search broke last-line
   handling. `.line`/`.col` accessors report real one-based positions;
   `col_of` already stores one-based columns for content characters.
+- Task 6 notes: the sub-parser helpers are boolean on purpose (spans come
+  from the region, not the fragment). `tail_bounded_extent` still serves
+  `$text`; `$raw`/`$expr`/`$type`/`$block` moved to
+  `parse_integrated_extent`. Speculative tail failures are suppressed from
+  the furthest-failure report while the extent scan tracks its own
+  furthest parse rejection. `$template` captures are lists of tagged
+  records so template `match`/`[each]` work unchanged.
 - Task 5 notes: the two HTML child-count checks were the only fails;
   both decisions (no zero-width text node; `1 < 2` is one text node) are
   whitepaper-consistent and pinned with comments in `magic.cm`. The real

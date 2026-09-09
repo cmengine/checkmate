@@ -741,7 +741,11 @@ impl<'a> PatternParser<'a> {
             "str" => FragKind::Str,
             "tt" => FragKind::Tt,
             "text" => FragKind::Text,
-            "template" => FragKind::Template,
+            "template" => FragKind::Template {
+                open: "{{".to_string(),
+                close: "}}".to_string(),
+                rule: None,
+            },
             "raw" => FragKind::Raw(None),
             "expr" => FragKind::Expr,
             "type" => FragKind::Type,
@@ -757,18 +761,84 @@ impl<'a> PatternParser<'a> {
             // parameterized spec (`$raw<grammar.rule>`,
             // `$template<open close rule>`).
             if matches!(self.rest().chars().next(), Some('"')) {
-                // Template delimiters: parse and drop for now (Task 6).
-                while !self.rest().starts_with('>') && self.cursor < self.text.len() {
+                // `$template<open close [rule]>`: up to two delimiter
+                // strings plus an optional rule path for island parsing.
+                let mut delimiters: Vec<String> = Vec::new();
+                let mut rule: Option<Vec<String>> = None;
+                loop {
+                    self.skip_trivia();
+                    if self.rest().starts_with('>') {
+                        self.cursor += 1;
+                        break;
+                    }
                     if matches!(self.rest().chars().next(), Some('"')) {
-                        let (_, len) = parse_string_literal(self.text, self.cursor)
+                        if delimiters.len() == 2 {
+                            return Err(self.error("$template takes at most two delimiters"));
+                        }
+                        let (value, len) = parse_string_literal(self.text, self.cursor)
                             .ok_or_else(|| self.error("malformed template delimiter"))?;
                         self.cursor += len;
-                    } else {
-                        self.cursor += self.rest().chars().next().unwrap().len_utf8();
+                        delimiters.push(value);
+                        continue;
                     }
-                    self.skip_trivia();
+                    let word = self.peek_word();
+                    if word.is_empty() {
+                        return Err(self.error("malformed fragment parameter"));
+                    }
+                    // A dotted rule path (`re.pattern`).
+                    let mut path = vec![word.to_string()];
+                    self.cursor += word.len();
+                    loop {
+                        self.skip_trivia();
+                        if self.rest().starts_with('.')
+                            && self
+                                .text
+                                .get(self.cursor + 1..)
+                                .and_then(|rest| rest.chars().next())
+                                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                        {
+                            self.cursor += 1;
+                            let segment = self.peek_word().to_string();
+                            self.cursor += segment.len();
+                            path.push(segment);
+                            continue;
+                        }
+                        break;
+                    }
+                    rule = Some(path);
                 }
-                kind
+                let (open, close) = match delimiters.len() {
+                    0 => ("{{".to_string(), "}}".to_string()),
+                    2 => (delimiters[0].clone(), delimiters[1].clone()),
+                    _ => {
+                        return Err(
+                            self.error("$template takes two delimiters (open and close), or none")
+                        );
+                    }
+                };
+                match kind {
+                    FragKind::Template { .. } => FragKind::Template { open, close, rule },
+                    other => {
+                        return Err(self.error(format!(
+                            "delimiters are only valid on `$template`, not `${}`",
+                            match other {
+                                FragKind::Ident => "ident",
+                                FragKind::Word => "word",
+                                FragKind::Tag => "tag",
+                                FragKind::Int => "int",
+                                FragKind::Float => "float",
+                                FragKind::Str => "str",
+                                FragKind::Tt => "tt",
+                                FragKind::Text => "text",
+                                FragKind::Raw(_) => "raw",
+                                FragKind::Expr => "expr",
+                                FragKind::Type => "type",
+                                FragKind::Block => "block",
+                                FragKind::Template { .. } => unreachable!(),
+                            }
+                        )));
+                    }
+                }
             } else {
                 let mut path = vec![self.ident()];
                 loop {

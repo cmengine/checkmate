@@ -333,6 +333,12 @@ struct Matcher<'a> {
     /// Rule invocations currently being matched; a re-entrant call against an
     /// in-progress entry fails immediately (§8.7's cycle-cut backstop).
     in_progress: HashSet<MemoKey>,
+    /// Depth of speculative tail evaluation (§8.3.6): failures recorded
+    /// while speculating are noise (each candidate boundary tries the tail
+    /// and almost always misses), so they do not enter the furthest-failure
+    /// report. The parse-integrated extent machinery reports its own,
+    /// position-accurate diagnostics instead.
+    speculative: usize,
 }
 
 /// One recorded failure: position, message, and the diagnostic context that
@@ -489,6 +495,7 @@ impl<'a> Matcher<'a> {
             committed: Vec::new(),
             memo: HashMap::new(),
             in_progress: HashSet::new(),
+            speculative: 0,
         }
     }
 
@@ -541,6 +548,9 @@ impl<'a> Matcher<'a> {
     }
 
     fn note_failure(&mut self, position: usize, message: impl Into<String>) {
+        if self.speculative > 0 {
+            return;
+        }
         self.failures.push(FailureRecord {
             position,
             message: message.into(),
@@ -1885,14 +1895,32 @@ impl<'a> Matcher<'a> {
                 };
                 (start, end, false)
             }
-            FragKind::Text | FragKind::Template => {
+            FragKind::Text => {
                 let start = self.skip(pos, env);
                 let end = self.tail_bounded_extent(start, siblings, cont, env)?;
                 (start, end, false)
             }
-            FragKind::Raw(_) | FragKind::Expr | FragKind::Type | FragKind::Block => {
+            FragKind::Template { open, close, rule } => {
+                // Same extent as `$text` (§8.3.3), then split at island
+                // delimiters into tagged parts.
                 let start = self.skip(pos, env);
                 let end = self.tail_bounded_extent(start, siblings, cont, env)?;
+                let parts = self.template_parts(start, end, open, close, rule.as_deref(), env)?;
+                let capture = Capture {
+                    kind: CaptureKind::List(parts),
+                    matched: self.text(start, end).trim().to_string(),
+                    span: self.span(start, end),
+                };
+                let mut out = Out::empty(end);
+                match bind {
+                    Some(name) => out.binds.push((name, capture)),
+                    None => out.primary = Some(capture),
+                }
+                return Some(out);
+            }
+            FragKind::Raw(_) | FragKind::Expr | FragKind::Type | FragKind::Block => {
+                let start = self.skip(pos, env);
+                let end = self.parse_integrated_extent(start, &kind, siblings, cont, env)?;
                 (start, end, false)
             }
         };
@@ -2130,12 +2158,257 @@ impl<'a> Matcher<'a> {
         }
     }
 
+    /// The parse-integrated extent (§8.3.6): the smallest extent (at least
+    /// one character) whose tail matches as a whole AND whose captured text
+    /// parses — as Checkmate code (`$raw`, `$expr`), a type (`$type`), a
+    /// block (`$block`), or against the referenced rule (`$raw<grammar.rule>`
+    /// late delegation). Nested structures work because the inner boundary
+    /// candidates fail to parse (`f(g(x)` in `f(g(x), y)`). If no boundary
+    /// is accepted, the element fails at the furthest position where the
+    /// tail matched, reporting the parse failure there. Tail evaluation is
+    /// the same speculative machinery as [`Matcher::tail_matches`] (depth-
+    /// capped, so re-entrant tails cut).
+    fn parse_integrated_extent(
+        &mut self,
+        start: usize,
+        kind: &FragKind,
+        siblings: &[PatElem],
+        cont: &Continuation<'_>,
+        env: &mut Env,
+    ) -> Option<usize> {
+        let has_tail = !siblings.is_empty() || has_effective_tail(cont);
+        if !has_tail {
+            // The static compile-time check rejects these patterns before any
+            // region is matched; this message keeps the runtime defensive.
+            self.note_failure(
+                start,
+                "raw capture requires a following terminator; use $text or until",
+            );
+            return None;
+        }
+        let tail = Continuation::Elems(siblings, cont);
+        // The furthest boundary the tail matched and why its text failed to
+        // parse — the diagnostic the whitepaper asks for when everything is
+        // rejected.
+        let mut furthest: Option<(usize, String)> = None;
+        let mut end = start + 1;
+        loop {
+            if end > self.region.chars.len() {
+                match furthest {
+                    Some((position, message)) => {
+                        self.note_failure(
+                            position,
+                            format!("no parseable boundary for the capture; {message}"),
+                        );
+                    }
+                    None => self.note_failure(start, "no boundary satisfied the pattern tail"),
+                }
+                return None;
+            }
+            let saved_scope = env.scope.clone();
+            let tail_hit = self.tail_matches(end, &tail, env);
+            env.scope = saved_scope;
+            if tail_hit {
+                if let Err(message) = self.extent_parses(start, end, kind, env) {
+                    furthest = Some((end, message));
+                } else {
+                    return Some(end);
+                }
+            }
+            end += 1;
+        }
+    }
+
+    /// Splits a `$template` extent into tagged parts (§8.3.3): literal text
+    /// between islands becomes `text` records, island content becomes `expr`
+    /// records after parse integration (a Checkmate expression, or a
+    /// whole-match against the referenced rule). `\{{` / `\}}` (backslash
+    /// before either delimiter) splice the delimiter literally.
+    fn template_parts(
+        &mut self,
+        start: usize,
+        end: usize,
+        open: &str,
+        close: &str,
+        rule: Option<&[String]>,
+        env: &mut Env,
+    ) -> Option<Vec<Capture>> {
+        let open_chars: Vec<char> = open.chars().collect();
+        let close_chars: Vec<char> = close.chars().collect();
+        let mut parts: Vec<Capture> = Vec::new();
+        let mut literal = String::new();
+        let mut chunk_start = start;
+        let mut cursor = start;
+
+        while cursor < end {
+            // Escape: backslash directly before a delimiter splices it
+            // literally (§8.3.3).
+            if self.region.chars.get(cursor) == Some(&'\\') {
+                let rest_starts_with = |delimiter: &[char]| {
+                    delimiter.iter().enumerate().all(|(index, expected)| {
+                        self.region.chars.get(cursor + 1 + index) == Some(expected)
+                    })
+                };
+                if rest_starts_with(&open_chars) || rest_starts_with(&close_chars) {
+                    let delimiter = if rest_starts_with(&open_chars) {
+                        open
+                    } else {
+                        close
+                    };
+                    literal.push_str(delimiter);
+                    cursor += 1 + delimiter.chars().count();
+                    continue;
+                }
+            }
+            // Island opener?
+            if open_chars
+                .iter()
+                .enumerate()
+                .all(|(index, expected)| self.region.chars.get(cursor + index) == Some(expected))
+            {
+                // Flush the pending literal text as a text part.
+                if !literal.is_empty() {
+                    parts.push(self.text_part(literal.clone(), chunk_start, cursor));
+                    literal.clear();
+                }
+                let island_start = cursor + open_chars.len();
+                let mut scan = island_start;
+                let mut island_end = None;
+                while scan < end {
+                    if close_chars.iter().enumerate().all(|(index, expected)| {
+                        self.region.chars.get(scan + index) == Some(expected)
+                    }) {
+                        island_end = Some(scan);
+                        break;
+                    }
+                    scan += 1;
+                }
+                let Some(island_end) = island_end else {
+                    self.note_failure(cursor, "unterminated template island");
+                    return None;
+                };
+                let content: String = self.region.chars[island_start..island_end].iter().collect();
+                // Parse integration (§8.3.6): the island content must parse.
+                if let Some(rule_path) = rule {
+                    if let Err(message) = self.extent_parses(
+                        island_start,
+                        island_end,
+                        &FragKind::Raw(Some(rule_path.to_vec())),
+                        env,
+                    ) {
+                        self.note_failure(cursor, format!("template island rejected: {message}"));
+                        return None;
+                    }
+                } else if let Err(message) = crate::parser::parse_expr_text(content.trim()) {
+                    self.note_failure(
+                        cursor,
+                        format!(
+                            "template island does not parse as a Checkmate expression; {message}"
+                        ),
+                    );
+                    return None;
+                }
+                parts.push(Capture {
+                    kind: CaptureKind::Record {
+                        tag: "expr".to_string(),
+                        fields: vec![(
+                            "value".to_string(),
+                            Capture {
+                                kind: CaptureKind::Text(TextKind::Raw),
+                                matched: content.trim().to_string(),
+                                span: self.span(island_start, island_end),
+                            },
+                        )],
+                    },
+                    matched: content,
+                    span: self.span(cursor, island_end + close_chars.len()),
+                });
+                cursor = island_end + close_chars.len();
+                chunk_start = cursor;
+                continue;
+            }
+            literal.push(*self.region.chars.get(cursor).unwrap());
+            cursor += 1;
+        }
+        if !literal.is_empty() {
+            parts.push(self.text_part(literal, chunk_start, end));
+        }
+        Some(parts)
+    }
+
+    /// One `text` part of a `$template` capture.
+    fn text_part(&self, text: String, from: usize, to: usize) -> Capture {
+        Capture {
+            kind: CaptureKind::Record {
+                tag: "text".to_string(),
+                fields: vec![(
+                    "text".to_string(),
+                    Capture {
+                        kind: CaptureKind::Text(TextKind::Raw),
+                        matched: text,
+                        span: self.span(from, to),
+                    },
+                )],
+            },
+            matched: self.text(from, to),
+            span: self.span(from, to),
+        }
+    }
+
+    /// The parse step of §8.3.6's boundary acceptance: the captured text
+    /// must parse as the fragment's code form (or match the delegated rule).
+    fn extent_parses(
+        &self,
+        start: usize,
+        end: usize,
+        kind: &FragKind,
+        env: &Env,
+    ) -> Result<(), String> {
+        let text = self.text(start, end);
+        match kind {
+            FragKind::Raw(Some(rule_path)) => {
+                // Late delegation (§8.3.8): the text must match the
+                // referenced rule as a whole; `self.` names the current
+                // grammar.
+                let effective: Vec<String> =
+                    if rule_path.first().map(String::as_str) == Some("self") {
+                        rule_path[1..].to_vec()
+                    } else {
+                        rule_path.clone()
+                    };
+                let Some((grammar_index, rule_index)) = self.resolve(&effective, env) else {
+                    return Err(format!(
+                        "`$raw<{}>` names no rule in this file",
+                        rule_path.join(".")
+                    ));
+                };
+                let rule = self.set.grammars[grammar_index].rules[rule_index].clone();
+                let sub_region = MatchRegion::new(self.region.source, self.absolute(start), &text);
+                match_entry(self.set, grammar_index, &rule.pattern, &sub_region)
+                    .map(|_| ())
+                    .map_err(|failure| failure.message)
+            }
+            FragKind::Raw(None) | FragKind::Expr => crate::parser::parse_expr_text(&text),
+            FragKind::Type => crate::parser::parse_type_text(&text),
+            FragKind::Block => crate::parser::parse_block_text(&text),
+            _ => Ok(()),
+        }
+    }
+
     /// Speculatively: does the continuation match at `pos`? Tail sequences
     /// are exact-anchored (§8.3.6): the tail's first element may not skip.
+    /// Failures inside are speculative noise and stay out of the report.
     fn tail_matches(&mut self, pos: usize, cont: &Continuation<'_>, env: &mut Env) -> bool {
         if !self.spend() || self.depth > 128 {
             return false;
         }
+        self.speculative += 1;
+        let hit = self.tail_matches_inner(pos, cont, env);
+        self.speculative -= 1;
+        hit
+    }
+
+    fn tail_matches_inner(&mut self, pos: usize, cont: &Continuation<'_>, env: &mut Env) -> bool {
         match cont {
             Continuation::End => true,
             Continuation::Elems(elems, after) => {
@@ -3036,5 +3309,153 @@ mod tests {
         );
         // An unbalanced tree fails.
         assert!(match_rule(&set, "doc", "(oops").is_err());
+    }
+
+    // -- Task 6: parse-integrated extents and $template islands (§8.3.6) ------
+
+    #[test]
+    fn expr_extents_survive_nested_calls_with_commas() {
+        // The sep-continued tail matches at the INNER comma, but "f(1, 2"
+        // does not parse: the parse-integrated boundary skips to the comma
+        // after the closed call (§8.3.6's f(g(x), y) example).
+        let set = compile_rules(&[
+            "rule call { \"call\" \"(\" each sep \",\" { $expr arg } as args \")\" }",
+        ]);
+        let capture = match_rule(&set, "call", "call (f(1, 2), g(3))").unwrap();
+        // The single bind IS the entry capture: the args list (match_entry §2.2).
+        match capture.kind {
+            CaptureKind::List(items) => {
+                assert_eq!(items.len(), 2);
+                // The nested call stays whole; the inner comma does not
+                // split it.
+                assert_eq!(items[0].matched(), "f(1, 2)");
+                assert_eq!(items[1].matched(), "g(3)");
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unparseable_extents_fail_at_the_furthest_tail_boundary() {
+        let set = compile_rules(&["rule call { $expr e \";\" }"]);
+        let failure = match_rule(&set, "call", "f(, ;").expect_err("nothing parses");
+        assert!(
+            failure.contains("no parseable boundary"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn raw_with_rule_delegation_parses_through_the_rule() {
+        let set = compile_rules(&[
+            "rule doc { $raw<num> x \";\" }",
+            "rule num { scan [0-9] as digits }",
+        ]);
+        assert_eq!(match_rule(&set, "doc", "42;").unwrap().matched(), "42");
+        // "ab" never matches the num rule, so no boundary is accepted.
+        assert!(match_rule(&set, "doc", "ab;").is_err());
+    }
+
+    #[test]
+    fn template_islands_split_into_tagged_parts() {
+        let set = compile_rules(&["rule doc { $template body eof }"]);
+        let capture = match_rule(&set, "doc", "Hello {{ name }}!").unwrap();
+        match capture.kind {
+            CaptureKind::List(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(
+                    parts[0].kind,
+                    CaptureKind::Record {
+                        tag: "text".to_string(),
+                        fields: vec![(
+                            "text".to_string(),
+                            Capture {
+                                kind: CaptureKind::Text(TextKind::Raw),
+                                matched: "Hello ".to_string(),
+                                span: parts[0].span,
+                            }
+                        )],
+                    }
+                );
+                match &parts[1].kind {
+                    CaptureKind::Record { tag, fields } => {
+                        assert_eq!(tag, "expr");
+                        assert_eq!(fields[0].0, "value");
+                        assert_eq!(fields[0].1.matched(), "name");
+                    }
+                    other => panic!("unexpected {:?}", other),
+                }
+                match &parts[2].kind {
+                    CaptureKind::Record { tag, fields } => {
+                        assert_eq!(tag, "text");
+                        assert_eq!(fields[0].1.matched(), "!");
+                    }
+                    other => panic!("unexpected {:?}", other),
+                }
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_escapes_splice_delimiters_literally() {
+        let set = compile_rules(&["rule doc { $template body eof }"]);
+        let capture = match_rule(&set, "doc", r"a \{{ b {{ name }}").unwrap();
+        match capture.kind {
+            CaptureKind::List(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0].kind {
+                    CaptureKind::Record { tag, fields } => {
+                        assert_eq!(tag, "text");
+                        assert_eq!(fields[0].1.matched(), "a {{ b ");
+                    }
+                    other => panic!("unexpected {:?}", other),
+                }
+                match &parts[1].kind {
+                    CaptureKind::Record { tag, fields } => {
+                        assert_eq!(tag, "expr");
+                        assert_eq!(fields[0].1.matched(), "name");
+                    }
+                    other => panic!("unexpected {:?}", other),
+                }
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_delimiters_are_parameterizable() {
+        let set = compile_rules(&["rule doc { $template<\"[\" \"]\"> body eof }"]);
+        let capture = match_rule(&set, "doc", "[x] y [z]").unwrap();
+        match capture.kind {
+            CaptureKind::List(parts) => {
+                assert_eq!(parts.len(), 3);
+                match &parts[0].kind {
+                    CaptureKind::Record { tag, fields } => {
+                        assert_eq!(tag, "expr");
+                        assert_eq!(fields[0].1.matched(), "x");
+                    }
+                    other => panic!("unexpected {:?}", other),
+                }
+                match &parts[1].kind {
+                    CaptureKind::Record { tag, fields } => {
+                        assert_eq!(tag, "text");
+                        assert_eq!(fields[0].1.matched(), " y ");
+                    }
+                    other => panic!("unexpected {:?}", other),
+                }
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn template_islands_must_parse() {
+        let set = compile_rules(&["rule doc { $template body eof }"]);
+        let failure = match_rule(&set, "doc", "a {{ 1 + }} b").expect_err("1 + does not parse");
+        assert!(
+            failure.contains("template island does not parse"),
+            "unexpected failure message: {failure}"
+        );
     }
 }

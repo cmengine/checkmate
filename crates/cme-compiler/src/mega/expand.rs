@@ -10,7 +10,7 @@
 //! counts).
 
 use cme_core::Span;
-use cme_core::magic::{PatElem, PatKind, Pattern};
+use cme_core::magic::{FragKind, PatElem, PatKind, Pattern};
 
 use crate::diagnostics::Diagnostic;
 use crate::mega::matcher::{CompiledGrammar, CompiledRule, GrammarSet, MatchRegion, match_entry};
@@ -532,6 +532,63 @@ fn elem_nullable(kind: &PatKind, nullable: &[Vec<bool>], gi: usize) -> bool {
     }
 }
 
+/// True when the pattern contains a `$raw`/`$expr`/`$type`/`$block` capture
+/// with no effective tail anywhere after it (§8.3.6's compile-time error).
+/// The walk mirrors the matcher's continuation structure: each-body tails
+/// are always live (the repetition offers another iteration), and every
+/// other construct passes down whether anything follows it.
+fn pattern_has_untailed_code_fragment(pattern: &Pattern) -> bool {
+    fn walk(pattern: &Pattern, inherited_tail: bool) -> bool {
+        let elems = &pattern.elems;
+        for (index, elem) in elems.iter().enumerate() {
+            let has_tail = index + 1 < elems.len() || inherited_tail;
+            match &elem.kind {
+                PatKind::Fragment { kind, .. }
+                    if matches!(
+                        kind,
+                        FragKind::Raw(_) | FragKind::Expr | FragKind::Type | FragKind::Block
+                    ) && !has_tail =>
+                {
+                    return true;
+                }
+                PatKind::Soft(body)
+                | PatKind::Raw(body)
+                | PatKind::Label { body, .. }
+                | PatKind::Group { body, .. }
+                | PatKind::Optional { body, .. }
+                | PatKind::Peek { body, .. }
+                | PatKind::Until { stop: body, .. } => {
+                    if walk(body, has_tail) {
+                        return true;
+                    }
+                }
+                PatKind::Each { body, .. } => {
+                    // Inside an each body the repetition itself is a tail.
+                    if walk(body, true) {
+                        return true;
+                    }
+                }
+                PatKind::OneOf { branches, .. } => {
+                    for (_, branch) in branches {
+                        if walk(branch, has_tail) {
+                            return true;
+                        }
+                    }
+                }
+                PatKind::Indent {
+                    body: Some(body), ..
+                } if walk(body, has_tail) => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    // The entry pattern's own continuation is End: nothing follows it.
+    walk(pattern, false)
+}
+
 /// Parses every magic declaration into a compiled macro.
 fn compile_macros(
     scan: &MagicScan,
@@ -554,6 +611,18 @@ fn compile_macros(
                 continue;
             }
         };
+        // §8.3.6's compile-time error: a code fragment with an empty tail
+        // (nothing follows it anywhere in the pattern) has no boundary to
+        // stop at. Magic entry patterns are fully known continuations
+        // (End), so the check is exact here; rule bodies receive their
+        // caller's continuation at match time and are exempt.
+        if pattern_has_untailed_code_fragment(&pattern) {
+            diagnostics.push(Diagnostic::parse(
+                "raw capture requires a following terminator; use $text or until (§8.3.6)",
+                magic.pattern_span,
+            ));
+            continue;
+        }
         // Entry grammar + bind name from the pattern's leading rule ref.
         let first = pattern.elems.first();
         if let Some(PatElem {
@@ -906,5 +975,154 @@ str config = magic(jsonValue) {
 "#;
         let outcome = expand_source(source).expect("legitimate recursion must expand");
         assert!(outcome.expanded.contains("\"db.local\""));
+    }
+
+    // -- Task 6: parse-integrated extents (§8.3.6) ----------------------------
+
+    #[test]
+    fn py_conditions_with_nested_calls_expand_and_check() {
+        // §8.3.6's flagship example: `useTwo(v, lo) > 0` must capture as ONE
+        // condition — the comma inside the call must not end the `$expr`
+        // extent (the boundary is parse-integrated), and the `:` + indent
+        // tail stops it exactly where Python's grammar says.
+        let source = r##"
+grammar py {
+    skip    [ ' ' ]
+    comment ( "#" )
+
+    rule def {
+        "def" $word fname
+        "(" soft { each sep "," { $word param optional { ":" $type ptype } } as params ")" }
+        "->" $type ret ":"
+        indent { each { stmt } as body }
+    }
+
+    rule stmt {
+        oneof {
+            ifStmt => (
+                "if" $expr cond ":"
+                indent { each { recur } as body }
+            )
+            return => ( "return" optional { $expr value } eol )
+            call   => ( $word callee "(" soft { each sep "," { $expr arg } as args ")" } eol )
+        }
+    }
+}
+
+magic def(py.def as d) {
+    $d.ret $d.fname(each in d.params {
+        [when present($ptype) { $ptype $param } else { infer $param }]
+    }) {
+        each in d.body {
+            match ($item) {
+                ifStmt => if ($item.cond) {
+                    [each in $item.body {
+                        match ($item) {
+                            return => return $item.value
+                            call   => $item.callee(each in $item.args { $item.arg })
+                        }
+                    }]
+                }
+                return => return $item.value
+                call   => $item.callee(each in $item.args { $item.arg })
+            }
+        }
+    }
+}
+
+int useTwo(int a, int b) {
+    return a
+}
+
+magic(def) {
+    def pyNestedFn(v: int, lo: int) -> int:
+        if useTwo(v, lo) > 0:
+            return lo
+        return useTwo(v, v)
+}
+"##;
+        let outcome = expand_source(source).expect("nested-call py def must expand");
+        let normalized: String = outcome
+            .expanded
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(normalized.contains("if (useTwo(v, lo) > 0) {"));
+        assert!(normalized.contains("return useTwo(v, v)"));
+
+        let parsed = crate::parse_source(&outcome.expanded);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "expanded program must parse: {:?}",
+            parsed
+                .diagnostics
+                .iter()
+                .map(|error| error.message().to_string())
+                .collect::<Vec<_>>()
+        );
+        let type_errors = crate::check::check(&parsed.statements);
+        assert!(
+            type_errors.is_empty(),
+            "expanded program must type-check: {:?}",
+            type_errors
+                .iter()
+                .map(|error| error.message().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn untailed_code_fragments_are_a_compile_time_error() {
+        // §8.3.6: a `$raw` with an empty tail has no boundary to stop at.
+        // The entry pattern's continuation is fully known (End), so the
+        // static check rejects it before any region is matched.
+        let source = r#"
+grammar test {
+    rule thing {
+        scan [a-z] as w
+    }
+}
+
+magic runIt(test.thing as t $raw x) {
+    "x"
+}
+
+magic(runIt) {
+    hello
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("requires a following terminator")),
+            "expected the untailed-fragment diagnostic: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn tailed_code_fragments_in_entry_patterns_are_fine() {
+        let source = r#"
+grammar test {
+    rule thing {
+        scan [a-z] as w
+    }
+}
+
+magic runIt(test.thing as t $raw x "!") {
+    $"{$t.x}"
+}
+
+magic(runIt) {
+    hello world!
+}
+"#;
+        let outcome = expand_source(source).expect("tailed $raw must expand");
+        // The $raw capture ("world") splices into the interpolation; the
+        // rule capture ("hello") was consumed but never spliced.
+        assert!(
+            outcome.expanded.contains("\"world\""),
+            "the $raw text splices"
+        );
     }
 }

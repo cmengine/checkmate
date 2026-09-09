@@ -2888,3 +2888,72 @@ fn can_end_statement(t: &Token) -> bool {
             | Token::Question
     )
 }
+
+// ---------------------------------------------------------------------------
+// Sub-parser helpers (§8.3.6) — parse-integrated extents for megaprograms
+// ---------------------------------------------------------------------------
+
+/// The outcome of one sub-parse: `Ok(())` when the text parses as the
+/// requested fragment and nothing is left over, `Err(message)` otherwise.
+type SubParseResult = Result<(), String>;
+
+/// Shared driver for the `parse_*_text` helpers: lex, strip insignificant
+/// newlines, run `parse`, then require zero diagnostics and full
+/// consumption (trailing newlines allowed — they are insignificant at
+/// statement level).
+fn subparse_text(
+    text: &str,
+    what: &str,
+    parse: impl FnOnce(&mut Parser<'_, '_>) -> bool,
+) -> SubParseResult {
+    let (tokens, lex_errors) = crate::lexer::lex_with_errors(text);
+    if !lex_errors.is_empty() {
+        return Err(format!("the text does not lex as Checkmate ({what})"));
+    }
+    let (tokens, strip_errors) = Parser::strip_insignificant_newlines_with_errors(tokens);
+    if !strip_errors.is_empty() {
+        return Err(format!("the text does not lex as Checkmate ({what})"));
+    }
+    let mut parser = Parser::new(&tokens);
+    if !parse(&mut parser) {
+        return Err(format!("the text does not parse as a Checkmate {what}"));
+    }
+    parser.skip_newlines();
+    if !parser.at_eof() {
+        return Err(format!(
+            "unexpected trailing input after the Checkmate {what}"
+        ));
+    }
+    if let Some(error) = parser.take_errors().first() {
+        return Err(error.message().to_string());
+    }
+    Ok(())
+}
+
+/// Parses `text` as one Checkmate expression (§8.3.6). Used by the megaprogram
+/// matcher for parse-integrated `$expr`/`$raw` boundaries and `$template`
+/// islands: a candidate boundary is accepted only when the captured text
+/// actually parses. Success/failure only — spans come from the original
+/// region, not the fragment text.
+pub fn parse_expr_text(text: &str) -> SubParseResult {
+    subparse_text(text, "expression", |parser| {
+        parser.parse_expression().is_ok()
+    })
+}
+
+/// Parses `text` as one Checkmate type (§8.3.6) — `$type` islands.
+pub fn parse_type_text(text: &str) -> SubParseResult {
+    subparse_text(text, "type", |parser| parser.parse_type().is_some())
+}
+
+/// Parses `text` as one Checkmate block `{ … }` (§8.3.6) — `$block` islands.
+pub fn parse_block_text(text: &str) -> SubParseResult {
+    subparse_text(text, "block", |parser| {
+        if !parser.at(Token::LBrace) {
+            return false;
+        }
+        let open = parser.advance().span.start;
+        parser.parse_block_body(open);
+        true
+    })
+}

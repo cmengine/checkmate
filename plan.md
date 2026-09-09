@@ -328,11 +328,11 @@ pub enum CaptureValue {
   the TDD north star for Tasks 3–10. Documented in the header.
 - [x] Commit: `test: add magic.cm megaprogramming fixture (TDD spec)`.
 
-### Task 2 — Detection: IR + scanner  `[ ]`
-- [ ] `crates/cme-core/src/magic.rs`: data models of §2.1 (Grammar/Rule/
+### Task 2 — Detection: IR + scanner  `[x] DONE`
+- [x] `crates/cme-core/src/magic.rs`: data models of §2.1 (Grammar/Rule/
       Pattern/Template/CharSet/CtxExpr + spans) + unit tests. Wire
       `pub mod magic;` into cme-core lib.
-- [ ] `crates/cme-compiler/src/mega/mod.rs` + `scan.rs`:
+- [x] `crates/cme-compiler/src/mega/mod.rs` + `scan.rs`:
   - word-boundary scan for `magic` / `grammar` keywords (comment/string aware
     at the Checkmate level for headers);
   - `grammar <ident> { … }` → verbatim body extraction (default-profile brace
@@ -341,12 +341,12 @@ pub enum CaptureValue {
   - `magic ( qualified.name ) { … }` invocation → composed-profile region
     balancing (§2.4) + normalization; heredoc `<<tag` deferred to Task 9;
   - output `MagicScan { grammars, magics, invocations, … }` preserving spans.
-- [ ] `crates/cme-compiler/src/mega/profile.rs`: CharSet matching helpers +
+- [x] `crates/cme-compiler/src/mega/profile.rs`: CharSet matching helpers +
       composed-profile computation.
-- [ ] Focused unit tests: region balancing with `console.log("}")`,
+- [x] Focused unit tests: region balancing with `console.log("}")`,
       `<!-- -->`, `'` apostrophes, nested `{}` in strings, island forms;
       decl/invocation distinction; spans exact.
-- [ ] Commit: `feat(compiler): scan magic declarations and invocation regions`.
+- [x] Commit: `feat(compiler): scan magic declarations and invocation regions`.
 
 ### Task 3 — Expansion core + `cme expand` CLI  `[ ]`
 - [ ] `mega/pattern.rs`: parse pattern text → `cme_core::magic::Pattern`

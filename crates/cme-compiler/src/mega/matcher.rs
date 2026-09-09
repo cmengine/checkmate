@@ -10,11 +10,16 @@
 //! `recur`, `where`, `label`, and the `$ident $word $tag $int $float $str
 //! $text $type $expr $raw $block` fragments. Tail-bounded fragments use
 //! exact-anchored tail-matching extents; the parse-integrated boundary check
-//! (§8.3.6 "and the captured text parses") lands in Task 6. Memoization and
-//! furthest-failure polish land in Task 4; termination is guaranteed here by
-//! a fuel counter and a recursion depth cap.
+//! (§8.3.6 "and the captured text parses") lands in Task 6.
+//!
+//! Task-4 hardening (plan §3): packrat memoization of rule results keyed by
+//! (rule, position, environment, continuation identity), a re-entrant cycle
+//! cut (§8.7: "a re-entrant rule invocation against an in-progress memo
+//! entry fails immediately"), and a deterministic operation-count fuel
+//! budget whose exhaustion is a distinct budget error, never a hang
+//! (§5.5, §8.7).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cme_core::Span;
 use cme_core::magic::{
@@ -84,7 +89,7 @@ impl<'a> MatchRegion<'a> {
 }
 
 /// Skipper modes (§8.3.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SkipMode {
     /// Skip per the current grammar's profile (flow grammars also skip
     /// comment forms).
@@ -215,12 +220,20 @@ impl LineMap {
 }
 
 /// A pattern match failure: furthest position (char index and region-
-/// relative byte offset) plus the diagnostic message.
+/// relative byte offset) plus the diagnostic message. Task-4 failures carry
+/// composed context: `label` blocks (§8.3.9), the innermost rule name, and a
+/// distinct fuel-budget message (§5.5) when the operation count ran out.
 pub struct MatchFailure {
     pub position: usize,
     pub byte_offset: usize,
     pub message: String,
 }
+
+/// The default compile-time fuel budget: a deterministic OPERATION count
+/// (§5.5 — never wall-clock time), so expansion stays byte-reproducible
+/// across platforms while pathological grammars terminate with a budget
+/// error instead of hanging.
+const FUEL_BUDGET: u64 = 1_000_000;
 
 /// Matches `pattern` (a magic's entry pattern) against the whole region and
 /// returns the root capture. The pattern must consume the entire region
@@ -231,15 +244,19 @@ pub fn match_entry(
     pattern: &Pattern,
     region: &MatchRegion<'_>,
 ) -> Result<Capture, MatchFailure> {
-    let mut matcher = Matcher {
-        set,
-        region,
-        lines: LineMap::build(&region.chars),
-        fuel: 1_000_000,
-        depth: 0,
-        labels: Vec::new(),
-        failures: Vec::new(),
-    };
+    match_entry_with_fuel(set, grammar_index, pattern, region, FUEL_BUDGET)
+}
+
+/// [`match_entry`] with an explicit fuel budget (operation count). Used by
+/// tests to exercise the budget error deterministically.
+pub fn match_entry_with_fuel(
+    set: &GrammarSet,
+    grammar_index: usize,
+    pattern: &Pattern,
+    region: &MatchRegion<'_>,
+    fuel: u64,
+) -> Result<Capture, MatchFailure> {
+    let mut matcher = Matcher::new(set, region, fuel);
     let mut env = Env {
         skip: SkipMode::On,
         grammar: grammar_index,
@@ -277,32 +294,243 @@ struct Matcher<'a> {
     region: &'a MatchRegion<'a>,
     lines: LineMap,
     fuel: u64,
+    /// Set when an operation was attempted with the budget at zero (§5.5).
+    fuel_exhausted: bool,
     depth: usize,
     labels: Vec<String>,
-    failures: Vec<(usize, String)>,
+    /// The rule currently being matched, innermost last (diagnostics §8.3.9).
+    rule_stack: Vec<String>,
+    /// Ordinary furthest-failure records.
+    failures: Vec<FailureRecord>,
+    /// Committed-block failures (§8.3.5): reported in preference to ordinary
+    /// furthest failures because "this line belonged to this block" is the
+    /// better diagnosis.
+    committed: Vec<FailureRecord>,
+    /// Packrat memo (§8.7): rule results keyed by rule + position + match
+    /// environment + continuation identity.
+    memo: HashMap<MemoKey, Option<(Capture, usize)>>,
+    /// Rule invocations currently being matched; a re-entrant call against an
+    /// in-progress entry fails immediately (§8.7's cycle-cut backstop).
+    in_progress: HashSet<MemoKey>,
+}
+
+/// One recorded failure: position, message, and the diagnostic context that
+/// was active when it happened (label blocks and the innermost rule).
+#[derive(Clone)]
+struct FailureRecord {
+    position: usize,
+    message: String,
+    labels: Vec<String>,
+    rule: Option<String>,
+}
+
+/// The packrat memo key (plan §2.3): the rule, the position, and the match
+/// environment — skip mode, open indent-block base columns, and the identity
+/// of the rule's evaluated context bindings — plus the continuation identity
+/// (tail-bounded fragments inside a rule extend to the caller's boundary, so
+/// the same rule at the same position under a different continuation is a
+/// different match).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MemoKey {
+    grammar: usize,
+    rule: usize,
+    pos: usize,
+    skip: SkipMode,
+    blocks: Vec<usize>,
+    context: String,
+    tail: u64,
+}
+
+/// A stable identity for a continuation within one match: pointer-based,
+/// because the referenced patterns live in the `GrammarSet` / compiled macro
+/// for the whole match. Combined into one FNV-style hash.
+fn continuation_id(cont: &Continuation<'_>) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    let mut mix = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    };
+    match cont {
+        Continuation::End => mix(0),
+        Continuation::Elems(elems, after) => {
+            // Empty links carry no matching elements (the same normalization
+            // `has_effective_tail` applies): folding them away gives equal
+            // continuations equal identities regardless of which allocation
+            // the empty sibling slice points into.
+            if elems.is_empty() {
+                return continuation_id(after);
+            }
+            mix(1);
+            mix(elems.as_ptr() as usize as u64);
+            mix(elems.len() as u64);
+            mix(continuation_id(after));
+        }
+        Continuation::Repeat {
+            sep,
+            trailing,
+            body,
+            after,
+        } => {
+            mix(2);
+            let sep_ptr = sep
+                .map(|pattern: &Pattern| std::ptr::from_ref(pattern) as usize)
+                .unwrap_or(0);
+            mix(sep_ptr as u64);
+            mix(*trailing as u64);
+            mix(std::ptr::from_ref::<Pattern>(*body) as usize as u64);
+            mix(continuation_id(after));
+        }
+    }
+    hash
+}
+
+/// A canonical signature of the context bindings a rule instance was invoked
+/// with (§8.3.7). Matching is stateless across rule instances, so context
+/// identity is the only scope a rule's result may depend on.
+fn context_signature(pairs: &[(String, Capture)]) -> String {
+    let mut signature = String::new();
+    for (name, capture) in pairs {
+        signature.push_str(name);
+        signature.push('=');
+        capture_signature(capture, &mut signature);
+        signature.push(';');
+    }
+    signature
+}
+
+fn capture_signature(capture: &Capture, out: &mut String) {
+    out.push_str(capture.matched());
+    out.push('#');
+    match &capture.kind {
+        CaptureKind::Text(kind) => {
+            out.push('t');
+            out.push_str(match kind {
+                TextKind::Ident => "i",
+                TextKind::Word => "w",
+                TextKind::Tag => "g",
+                TextKind::Str => "s",
+                TextKind::Raw => "r",
+            });
+        }
+        CaptureKind::Int(value) => {
+            out.push('n');
+            out.push_str(&value.to_string());
+        }
+        CaptureKind::Float(value) => {
+            out.push('f');
+            out.push_str(&value.to_string());
+        }
+        CaptureKind::List(items) => {
+            out.push('[');
+            for item in items {
+                capture_signature(item, out);
+                out.push(',');
+            }
+            out.push(']');
+        }
+        CaptureKind::Record { tag, fields } => {
+            out.push('{');
+            out.push_str(tag);
+            out.push(':');
+            for (name, field) in fields {
+                out.push_str(name);
+                out.push('=');
+                capture_signature(field, out);
+                out.push(';');
+            }
+            out.push('}');
+        }
+        CaptureKind::Opt(inner) => match inner {
+            Some(value) => {
+                out.push_str("some(");
+                capture_signature(value, out);
+                out.push(')');
+            }
+            None => out.push_str("none"),
+        },
+    }
 }
 
 impl<'a> Matcher<'a> {
+    fn new(set: &'a GrammarSet, region: &'a MatchRegion<'a>, fuel: u64) -> Self {
+        Self {
+            set,
+            region,
+            lines: LineMap::build(&region.chars),
+            fuel,
+            fuel_exhausted: false,
+            depth: 0,
+            labels: Vec::new(),
+            rule_stack: Vec::new(),
+            failures: Vec::new(),
+            committed: Vec::new(),
+            memo: HashMap::new(),
+            in_progress: HashSet::new(),
+        }
+    }
+
+    /// Composes the final failure report (§8.3.9): the furthest position,
+    /// with committed-block failures preferred over ordinary ones, and the
+    /// label/rule context rendered after the message.
     fn failure(&self) -> MatchFailure {
-        let (position, message) = self
-            .failures
-            .iter()
-            .max_by_key(|(position, _)| *position)
-            .cloned()
-            .unwrap_or((0, "pattern did not match".to_string()));
+        if self.fuel_exhausted {
+            return MatchFailure {
+                position: 0,
+                byte_offset: 0,
+                message: "compile-time fuel budget exhausted (operation count limit, §5.5)"
+                    .to_string(),
+            };
+        }
+        let pick = |records: &[FailureRecord]| {
+            records.iter().max_by_key(|record| record.position).cloned()
+        };
+        // Committed-block failures outrank ordinary furthest failures (§8.3.9).
+        let record = pick(&self.committed).or_else(|| pick(&self.failures));
+        let Some(record) = record else {
+            return MatchFailure {
+                position: 0,
+                byte_offset: 0,
+                message: "pattern did not match".to_string(),
+            };
+        };
+        let mut message = record.message;
+        if let Some(rule) = &record.rule {
+            message.push_str(&format!(" (in rule `{rule}`"));
+            if !record.labels.is_empty() {
+                message.push_str(&format!(
+                    ", while matching '{}' )",
+                    record.labels.join("' → '")
+                ));
+            } else {
+                message.push(')');
+            }
+        } else if !record.labels.is_empty() {
+            message.push_str(&format!(
+                " (while matching '{}' )",
+                record.labels.join("' → '")
+            ));
+        }
         MatchFailure {
-            position,
-            byte_offset: self.absolute(position) - self.region.base,
+            position: record.position,
+            byte_offset: self.absolute(record.position) - self.region.base,
             message,
         }
     }
 
     fn note_failure(&mut self, position: usize, message: impl Into<String>) {
-        self.failures.push((position, message.into()));
+        self.failures.push(FailureRecord {
+            position,
+            message: message.into(),
+            labels: self.labels.clone(),
+            rule: self.rule_stack.last().cloned(),
+        });
     }
 
     fn spend(&mut self) -> bool {
         if self.fuel == 0 {
+            self.fuel_exhausted = true;
             return false;
         }
         self.fuel -= 1;
@@ -679,7 +907,9 @@ impl<'a> Matcher<'a> {
                     }
                 }
                 self.depth += 1;
+                self.rule_stack.push(rule.name.clone());
                 let out = self.sequence(&rule.pattern.elems, pos, &mut inner, &outer);
+                self.rule_stack.pop();
                 self.depth -= 1;
                 let out = out?;
                 // Same record rule as `rule_ref`: a oneof-topped rule yields
@@ -1133,15 +1363,10 @@ impl<'a> Matcher<'a> {
         }
         let (grammar_index, rule_index) = self.resolve(path, env)?;
         let rule = self.set.grammars[grammar_index].rules[rule_index].clone();
-        let mut inner = Env {
-            skip: SkipMode::On,
-            grammar: grammar_index,
-            open_blocks: env.open_blocks.clone(),
-            scope: HashMap::new(),
-            rule: Some((grammar_index, rule_index)),
-        };
         // Context: declared fields with defaults, overridden by bindings
-        // evaluated in the CALLER's scope (§8.3.7).
+        // evaluated in the CALLER's scope (§8.3.7). Evaluated before the memo
+        // check because context identity is part of the memo key.
+        let mut context_pairs: Vec<(String, Capture)> = Vec::new();
         for field in &rule.context {
             let value = match ctx.iter().find(|(name, _)| name == &field.name) {
                 Some((_, expression)) => self.eval_or_capture(expression, env),
@@ -1154,35 +1379,75 @@ impl<'a> Matcher<'a> {
                     None => continue,
                 },
             };
-            inner.scope.insert(field.name.clone(), value);
+            context_pairs.push((field.name.clone(), value));
+        }
+        let key = MemoKey {
+            grammar: grammar_index,
+            rule: rule_index,
+            pos,
+            skip: env.skip,
+            blocks: env.open_blocks.clone(),
+            context: context_signature(&context_pairs),
+            tail: continuation_id(cont),
+        };
+        // §8.7 backstop: a re-entrant invocation against an in-progress memo
+        // entry fails immediately. This is what keeps pathological recursive
+        // rules (including zero-width self-recursion inside `peek`) finite
+        // even before the static left-recursion check runs.
+        if self.in_progress.contains(&key) {
+            self.note_failure(
+                pos,
+                "recursive rule invocation cut at an in-progress memo entry",
+            );
+            return None;
+        }
+        if let Some(cached) = self.memo.get(&key) {
+            return cached.clone();
+        }
+        self.in_progress.insert(key.clone());
+        let mut inner = Env {
+            skip: SkipMode::On,
+            grammar: grammar_index,
+            open_blocks: env.open_blocks.clone(),
+            scope: HashMap::new(),
+            rule: Some((grammar_index, rule_index)),
+        };
+        for (name, value) in &context_pairs {
+            inner.scope.insert(name.clone(), value.clone());
         }
         self.depth += 1;
+        self.rule_stack.push(rule.name.clone());
         // The caller's continuation bounds fragments at the rule's edge
         // (§8.3.6); the depth counter cuts recursive tail evaluation.
         let out = self.sequence(&rule.pattern.elems, pos, &mut inner, cont);
+        self.rule_stack.pop();
         self.depth -= 1;
-        let out = out?;
-        let capture = match rule.pattern.elems.first().map(|element| &element.kind) {
-            // If the rule's top-level construct is a oneof, its record (tag
-            // = chosen branch) IS the rule's record (plan §2.2).
-            Some(PatKind::OneOf { .. }) => out.primary.clone().unwrap_or(Capture {
-                kind: CaptureKind::Record {
-                    tag: rule.name.clone(),
-                    fields: out.binds.clone(),
+        self.in_progress.remove(&key);
+        let result = out.map(|out| {
+            let capture = match rule.pattern.elems.first().map(|element| &element.kind) {
+                // If the rule's top-level construct is a oneof, its record (tag
+                // = chosen branch) IS the rule's record (plan §2.2).
+                Some(PatKind::OneOf { .. }) => out.primary.clone().unwrap_or(Capture {
+                    kind: CaptureKind::Record {
+                        tag: rule.name.clone(),
+                        fields: out.binds.clone(),
+                    },
+                    matched: self.text(pos, out.end),
+                    span: self.span(pos, out.end),
+                }),
+                _ => Capture {
+                    kind: CaptureKind::Record {
+                        tag: rule.name.clone(),
+                        fields: out.binds.clone(),
+                    },
+                    matched: self.text(pos, out.end),
+                    span: self.span(pos, out.end),
                 },
-                matched: self.text(pos, out.end),
-                span: self.span(pos, out.end),
-            }),
-            _ => Capture {
-                kind: CaptureKind::Record {
-                    tag: rule.name.clone(),
-                    fields: out.binds.clone(),
-                },
-                matched: self.text(pos, out.end),
-                span: self.span(pos, out.end),
-            },
-        };
-        Some((capture, out.end))
+            };
+            (capture, out.end)
+        });
+        self.memo.insert(key, result.clone());
+        result
     }
 
     fn resolve(&self, path: &[String], env: &Env) -> Option<(usize, usize)> {
@@ -2179,6 +2444,64 @@ mod tests {
             CaptureKind::List(items) => {
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[1].matched(), "42");
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    // -- Task 4: fuel budget, cycle cut, memoization -------------------------
+
+    #[test]
+    fn fuel_exhaustion_is_a_distinct_budget_error() {
+        // A modest repetition burns far more operations than the tiny budget
+        // given here; the failure must name the budget, not the pattern.
+        let set = compile_rules(&["rule run { each { \"a\" } }"]);
+        let grammar_index = 0;
+        let pattern = set.grammars[0].rules[0].pattern.clone();
+        let region = MatchRegion::new("aaaaaaaa", 0, "aaaaaaaa");
+        let failure = match_entry_with_fuel(&set, grammar_index, &pattern, &region, 5)
+            .expect_err("tiny fuel must not be enough");
+        assert!(
+            failure.message.contains("fuel budget exhausted"),
+            "unexpected failure message: {}",
+            failure.message
+        );
+        // The same region under the default budget matches cleanly.
+        assert!(match_entry(&set, grammar_index, &pattern, &region).is_ok());
+    }
+
+    #[test]
+    fn reentrant_rule_invocation_is_cut_not_spun() {
+        // `peek { r }` re-enters `r` at the SAME position while it is still
+        // in progress: the memo cycle cut fails the lookahead, the optional
+        // matches empty, and the literal consumes — before Task 4 this spun
+        // until the recursion depth cap.
+        let set = compile_rules(&["rule r { optional { peek { r } } \"x\" }"]);
+        assert!(match_rule(&set, "r", "x").is_ok());
+        assert!(match_rule(&set, "r", "y").is_err());
+    }
+
+    #[test]
+    fn memoization_preserves_results_across_repeat_visits() {
+        // The inner `pair` rule is visited repeatedly at the same positions
+        // through the repetition and the `where` re-check; memoized results
+        // must be indistinguishable from fresh matches.
+        let set = compile_rules(&[
+            "rule list { \"[\" each sep \",\" { pair } as items \"]\" }",
+            "rule pair { scan [0-9] as n \">\" scan [0-9] as m }",
+        ]);
+        let capture = match_rule(&set, "list", "[1>2, 3>4, 5>6]").unwrap();
+        match capture.kind {
+            CaptureKind::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[2].matched(), "5>6");
+                match &items[2].kind {
+                    CaptureKind::Record { tag, fields } => {
+                        assert_eq!(tag, "pair");
+                        assert!(fields.iter().any(|(name, _)| name == "m"));
+                    }
+                    other => panic!("unexpected {:?}", other),
+                }
             }
             other => panic!("unexpected {:?}", other),
         }

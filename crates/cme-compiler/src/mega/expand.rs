@@ -17,7 +17,7 @@ use crate::mega::matcher::{
     CompiledGrammar, CompiledRule, GrammarSet, MatchFailure, MatchRegion, match_entry,
 };
 use crate::mega::pattern::{parse_pattern, parse_rule_declaration};
-use crate::mega::profile::default_profile;
+use crate::mega::profile::{default_profile, with_default_strings};
 use crate::mega::scan::{InvocationScan, MagicScan, REGION_SCAN_HINT, scan_magic};
 use crate::mega::template::{elaborate, parse_template};
 
@@ -78,6 +78,7 @@ pub fn expand_source_with(
     let mut diagnostics = Vec::new();
     let set = compile_grammars(&scan, &mut diagnostics);
     let macros = compile_macros(&scan, &set, &mut diagnostics);
+    check_profiles(&set, &mut diagnostics);
     reject_left_recursion(&set, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(diagnostics);
@@ -393,16 +394,67 @@ struct CompiledMacro {
     bind_name: String,
 }
 
-/// Parses every grammar body into compiled rules.
+/// Parses every grammar body into compiled rules. `extends` chains (§8.2)
+/// are resolved here: the child's EFFECTIVE profile folds the parent chain
+/// (an absent `skip` inherits, comment/string forms append), and the child's
+/// rule list is its own rules plus inherited ones it does not override —
+/// so bare rule references and `recur` inside inherited rules resolve in
+/// the child exactly as they would in the parent.
 fn compile_grammars(scan: &MagicScan, diagnostics: &mut Vec<Diagnostic>) -> GrammarSet {
+    // Parent links first: unknown parents and cycles are compile errors.
+    for grammar in &scan.grammars {
+        if let Some(parent) = &grammar.extends {
+            let known = scan.grammars.iter().any(|other| &other.name == parent);
+            if !known {
+                diagnostics.push(Diagnostic::parse(
+                    format!("unknown grammar `{parent}` in `extends`"),
+                    grammar.extends_span.unwrap_or(grammar.span),
+                ));
+                continue;
+            }
+            // Cycle check: walk the chain; a grammar that revisits itself
+            // (including `extends` itself) can never inherit.
+            let mut current = Some(parent.clone());
+            let mut steps = 0usize;
+            while let Some(next) = current {
+                steps += 1;
+                if next == grammar.name {
+                    diagnostics.push(Diagnostic::parse(
+                        format!(
+                            "grammar `{}` extends itself (cyclic `extends` chain)",
+                            grammar.name
+                        ),
+                        grammar.extends_span.unwrap_or(grammar.span),
+                    ));
+                    break;
+                }
+                if steps > scan.grammars.len() {
+                    diagnostics.push(Diagnostic::parse(
+                        format!("cyclic `extends` chain reaching grammar `{}`", grammar.name),
+                        grammar.extends_span.unwrap_or(grammar.span),
+                    ));
+                    break;
+                }
+                current = scan
+                    .grammars
+                    .iter()
+                    .find(|other| other.name == next)
+                    .and_then(|other| other.extends.clone());
+            }
+        }
+    }
+
     let mut set = GrammarSet::default();
     for grammar in &scan.grammars {
+        // The effective profile: the extends chain folded root-first.
+        let profile = with_default_strings(
+            &scan
+                .inherited_profile(&grammar.name)
+                .unwrap_or_else(|| grammar.profile.clone()),
+        );
         let mut compiled = CompiledGrammar {
             name: grammar.name.clone(),
-            // §2.4's pragmatic default: a grammar that declares no string
-            // forms still gets the default `"` single-line form, so `$str`
-            // and the region balancer agree (JSON regions need it).
-            profile: crate::mega::profile::with_default_strings(&grammar.profile),
+            profile,
             rules: Vec::new(),
         };
         let body = grammar.body.clone();
@@ -443,6 +495,43 @@ fn compile_grammars(scan: &MagicScan, diagnostics: &mut Vec<Diagnostic>) -> Gram
         }
         set.grammars.push(compiled);
     }
+
+    // Materialize inheritance: append each grammar's inherited rules (its
+    // own wins on a name clash). The chain is walked root-first so a
+    // grandparent's rule overridden by the parent never reappears.
+    let indices: Vec<usize> = (0..set.grammars.len()).collect();
+    for index in indices {
+        let mut chain: Vec<String> = Vec::new();
+        let mut current = scan.grammars[index].extends.clone();
+        while let Some(next) = current {
+            if chain.contains(&next) || next == set.grammars[index].name {
+                break;
+            }
+            chain.push(next.clone());
+            current = scan
+                .grammars
+                .iter()
+                .find(|other| other.name == next)
+                .and_then(|other| other.extends.clone());
+        }
+        chain.reverse(); // root first
+        for ancestor in &chain {
+            let inherited: Vec<CompiledRule> = set
+                .grammars
+                .iter()
+                .find(|grammar| &grammar.name == ancestor)
+                .map(|grammar| grammar.rules.clone())
+                .unwrap_or_default();
+            let grammar = &mut set.grammars[index];
+            for rule in inherited {
+                if grammar.rules.iter().any(|own| own.name == rule.name) {
+                    continue; // the child's own rule overrides
+                }
+                grammar.rules.push(rule);
+            }
+        }
+    }
+
     // A synthetic default grammar hosts inline entry patterns.
     set.grammars.push(CompiledGrammar {
         name: "\u{0}default".to_string(),
@@ -450,6 +539,108 @@ fn compile_grammars(scan: &MagicScan, diagnostics: &mut Vec<Diagnostic>) -> Gram
         rules: Vec::new(),
     });
     set
+}
+
+// ---------------------------------------------------------------------------
+// Profile static checks (§8.2, §8.3.2, §8.3.5)
+// ---------------------------------------------------------------------------
+
+/// Rejects line-mode machinery in grammars that cannot host it: `eol`,
+/// `line`, `soft`, and `indent` are line-mode constructs (§8.3.2, §8.3.5),
+/// so a FLOW-oriented grammar (its skip set crosses line terminators) may
+/// not use them; and `indent`/`eol`/`line` are contradictory inside `soft`,
+/// whose whole job is joining newlines into the skip set for one construct.
+fn check_profiles(set: &GrammarSet, diagnostics: &mut Vec<Diagnostic>) {
+    for grammar in &set.grammars {
+        if grammar.name.starts_with('\u{0}') {
+            continue; // the synthetic inline-pattern host has no rules
+        }
+        let flow = grammar.profile.is_flow_oriented();
+        for rule in &grammar.rules {
+            check_pattern_profiles(&rule.pattern, &grammar.name, flow, false, diagnostics);
+        }
+    }
+}
+
+/// Walks one pattern for the profile checks. `in_soft` marks patterns under
+/// a `soft` region (the soft switch is per construct, not global).
+fn check_pattern_profiles(
+    pattern: &Pattern,
+    grammar: &str,
+    flow: bool,
+    in_soft: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for elem in &pattern.elems {
+        let line_mode_name = match &elem.kind {
+            PatKind::Eol => Some("eol"),
+            PatKind::Line => Some("line"),
+            PatKind::Indent { .. } => Some("indent"),
+            _ => None,
+        };
+        if let Some(name) = line_mode_name {
+            if in_soft {
+                diagnostics.push(Diagnostic::parse(
+                    format!(
+                        "`{name}` inside `soft` is rejected: soft joins newlines into the \
+                         skip set, the line machinery depends on them staying separate"
+                    ),
+                    elem.span,
+                ));
+                continue;
+            }
+            if flow {
+                diagnostics.push(Diagnostic::parse(
+                    format!(
+                        "line-mode element `{name}` in flow grammar `{grammar}`: the skip set \
+                         crosses line terminators, so `{name}` has no line to act on (§8.3.2)"
+                    ),
+                    elem.span,
+                ));
+                continue;
+            }
+        }
+        if flow && !in_soft && matches!(elem.kind, PatKind::Soft(_)) {
+            diagnostics.push(Diagnostic::parse(
+                format!(
+                    "`soft` in flow grammar `{grammar}`: newlines already join the skip set, \
+                     so soft is a no-op there (§8.3.2)"
+                ),
+                elem.span,
+            ));
+        }
+        match &elem.kind {
+            PatKind::Soft(body)
+            | PatKind::Raw(body)
+            | PatKind::Label { body, .. }
+            | PatKind::Group { body, .. }
+            | PatKind::Peek { body, .. }
+            | PatKind::Until { stop: body, .. } => {
+                let soft = matches!(&elem.kind, PatKind::Soft(_));
+                check_pattern_profiles(body, grammar, flow, in_soft || soft, diagnostics);
+            }
+            PatKind::Optional { body, .. } => {
+                check_pattern_profiles(body, grammar, flow, in_soft, diagnostics);
+            }
+            PatKind::Each { sep, body, .. } => {
+                if let Some(sep) = sep {
+                    check_pattern_profiles(sep, grammar, flow, in_soft, diagnostics);
+                }
+                check_pattern_profiles(body, grammar, flow, in_soft, diagnostics);
+            }
+            PatKind::OneOf { branches, .. } => {
+                for (_, branch) in branches {
+                    check_pattern_profiles(branch, grammar, flow, in_soft, diagnostics);
+                }
+            }
+            PatKind::Indent {
+                body: Some(body), ..
+            } => {
+                check_pattern_profiles(body, grammar, flow, in_soft, diagnostics);
+            }
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +1044,17 @@ fn compile_macros(
                     }
                 },
             };
+            // The entry pattern's elements after the leading rule ref run
+            // under the ENTRY grammar's orientation (the rule ref delegates
+            // to its own grammar): the profile checks apply to them too.
+            let entry = &set.grammars[grammar_index];
+            let flow = entry.profile.is_flow_oriented();
+            for elem in pattern.elems.iter().skip(1) {
+                let one = Pattern {
+                    elems: vec![elem.clone()],
+                };
+                check_pattern_profiles(&one, &entry.name, flow, false, diagnostics);
+            }
             let Some(bind_name) = bind.clone() else {
                 diagnostics.push(Diagnostic::parse(
                     "the entry pattern must bind its capture (`grammar.rule as name`)",
@@ -1503,5 +1705,233 @@ str s = magic(runIt) {
         // user's source — not the template or the invocation header.
         let anchor = source.find("hello").expect("region text in source");
         assert_eq!(require_error.span().start, anchor);
+    }
+
+    // -- Task 11: grammar extension + profile validation (§8.2) ---------------
+
+    /// A js/ts pair: `ts` extends `js`, overrides `stmt`, adds a `decl`
+    /// branch, and appends a `'` string form to the inherited profile.
+    const TS_EXTENDS_JS: &str = r#"
+grammar js {
+    skip    [ ' ' ]
+    string  ( '"' )
+    comment ( "//" )
+
+    rule program { each { stmt } as body }
+
+    rule stmt {
+        oneof {
+            call => ( $word callee "(" ")" eol )
+            ret  => ( "return" $word value eol )
+        }
+    }
+}
+
+grammar ts extends js {
+    string  ( '\'' )
+
+    rule stmt {
+        oneof {
+            call => ( $word callee "(" ")" eol )
+            ret  => ( "return" $word value eol )
+            decl => ( "let" $word name "=" $int init eol )
+        }
+    }
+}
+
+magic runJs(js.program as p) {
+    "js"
+}
+
+magic runTs(ts.program as p) {
+    "ts"
+}
+
+str a = magic(runJs) {
+    return done
+}
+
+str b = magic(runTs) {
+    return done
+}
+
+str c = magic(runTs) {
+    let n = 7
+}
+"#;
+
+    #[test]
+    fn ts_extends_js_inherits_overrides_and_adds_rules() {
+        let outcome = expand_source(TS_EXTENDS_JS).expect("ts extends js must expand");
+        // `return done` matches through BOTH grammars: js's own `stmt` and
+        // ts's overridden `stmt` (with the added `decl` branch).
+        assert!(outcome.expanded.contains("\"js\""));
+        assert_eq!(outcome.records.len(), 3);
+    }
+
+    #[test]
+    fn inherited_profiles_compose_for_region_balancing() {
+        // The region holds a `}` inside a `'` string. ts's OWN string form
+        // makes that brace transparent while balancing; js's profile alone
+        // would have closed the region early at it. The pattern is lineRest
+        // based so both lines match cleanly once the region is right.
+        let source = r#"
+grammar js {
+    skip    [ ' ' ]
+
+    rule program { each { stmt } as body }
+
+    rule stmt { lineRest as rest }
+}
+
+grammar ts extends js {
+    string  ( '\'' )
+}
+
+magic runTs(ts.program as p) {
+    "ts"
+}
+
+str b = magic(runTs) {
+    done
+    map('}') called
+}
+"#;
+        let outcome = expand_source(source).expect("the composed profile balances the region");
+        assert_eq!(outcome.records.len(), 1);
+        assert!(!outcome.expanded.contains("map('}')"));
+    }
+
+    #[test]
+    fn unknown_extends_parent_is_a_compile_error() {
+        let source = r#"
+grammar ts extends ghost {
+    rule r { $word w }
+}
+
+magic runIt(ts.r as x) {
+    "x"
+}
+
+str s = magic(runIt) {
+    hi
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("unknown grammar `ghost` in `extends`")),
+            "expected the unknown-parent diagnostic: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cyclic_extends_chains_are_rejected() {
+        let source = r#"
+grammar a extends b {
+    rule r { $word w }
+}
+
+grammar b extends a {
+    rule s { $word w }
+}
+
+magic runIt(a.r as x) {
+    "x"
+}
+
+str s = magic(runIt) {
+    hi
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("cyclic `extends`")),
+            "expected a cycle diagnostic: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn line_mode_elements_in_flow_grammars_are_rejected() {
+        let source = r#"
+grammar bad {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule r {
+        $word w eol
+    }
+}
+
+magic runIt(bad.r as x) {
+    "x"
+}
+
+str s = magic(runIt) {
+    hi
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("line-mode element `eol` in flow grammar `bad`")),
+            "expected the flow-grammar rejection: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn line_machinery_inside_soft_is_rejected() {
+        let source = r#"
+grammar pyish {
+    skip [ ' ' ]
+
+    rule def {
+        "def" $word name ":" soft { indent { $word body } }
+    }
+}
+
+magic runIt(pyish.def as x) {
+    "x"
+}
+
+str s = magic(runIt) {
+    def f: x
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("`indent` inside `soft` is rejected")),
+            "expected the in-soft rejection: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn line_grammars_keep_their_line_machinery() {
+        // The same shapes in a LINE grammar and OUTSIDE soft stay legal:
+        // eol and indent are exactly what line mode is for.
+        let source = r#"
+grammar py {
+    skip [ ' ' ]
+
+    rule def {
+        "def" $word name ":"
+        indent { $word body eol }
+    }
+}
+
+magic runIt(py.def as x) {
+    "x"
+}
+
+str s = magic(runIt) {
+    def f: run
+}
+"#;
+        expand_source(source).expect("line-mode machinery in a line grammar is legal");
     }
 }

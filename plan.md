@@ -492,11 +492,11 @@ pub enum CaptureValue {
       — keep default output byte-deterministic.
 - [x] Commit: `feat(compiler): megaprogram diagnostics polish`.
 
-### Task 11 — Grammar extension + profile validation  `[ ]`
-- [ ] `grammar ts extends js { … }` (override/add rules; lexical profile
+### Task 11 — Grammar extension + profile validation  `[x]`
+- [x] `grammar ts extends js { … }` (override/add rules; lexical profile
       inheritance), validators, profile static checks (line-mode elements in
       flow grammars rejected; `indent`/`eol`/`line` inside `soft` rejected).
-- [ ] Commit: `feat(compiler): grammar extension and profile validation`.
+- [x] Commit: `feat(compiler): grammar extension and profile validation`.
 
 ### Task 12 — Docs & status  `[ ]`
 - [ ] Update AGENTS.md "Repository State Notes" (megaprogramming implemented:

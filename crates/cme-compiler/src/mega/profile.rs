@@ -246,9 +246,17 @@ pub fn balance_island(source: &str, start: usize, closer: &str) -> Option<usize>
 /// Parses the lexical profile declarations (`skip`, `comment`, `string`) from
 /// a grammar body, skipping `rule` declarations wholesale. Bodies are
 /// Checkmate-shaped, so `//` and `/* */` comments are transparent here.
-pub fn parse_profile(body: &str, span: Span) -> Result<LexProfile, Diagnostic> {
+/// The `skip_declared` flag drives `extends` inheritance: an absent `skip`
+/// inherits the parent's set, a declared one replaces it.
+#[derive(Default)]
+pub struct ProfileParse {
+    pub profile: LexProfile,
+    pub skip_declared: bool,
+}
+
+pub fn parse_profile(body: &str, span: Span) -> Result<ProfileParse, Diagnostic> {
     let scanner = checkmate_scan_profile();
-    let mut profile = LexProfile::default();
+    let mut parsed = ProfileParse::default();
     let mut cursor = 0usize;
 
     while cursor < body.len() {
@@ -262,19 +270,20 @@ pub fn parse_profile(body: &str, span: Span) -> Result<LexProfile, Diagnostic> {
                 cursor += word.len();
                 skip_ws_and_comments(body, &mut cursor, &scanner);
                 let set = parse_bracket_set(body, &mut cursor, span)?;
-                profile.skip = set;
+                parsed.profile.skip = set;
+                parsed.skip_declared = true;
             }
             "comment" => {
                 cursor += word.len();
                 skip_ws_and_comments(body, &mut cursor, &scanner);
                 let form = parse_comment_form(body, &mut cursor, span)?;
-                profile.comments.push(form);
+                parsed.profile.comments.push(form);
             }
             "string" => {
                 cursor += word.len();
                 skip_ws_and_comments(body, &mut cursor, &scanner);
                 let form = parse_string_form(body, &mut cursor, span)?;
-                profile.strings.push(form);
+                parsed.profile.strings.push(form);
             }
             "rule" => {
                 skip_rule_declaration(body, &mut cursor, &scanner);
@@ -287,7 +296,7 @@ pub fn parse_profile(body: &str, span: Span) -> Result<LexProfile, Diagnostic> {
             }
         }
     }
-    Ok(profile)
+    Ok(parsed)
 }
 
 /// Skips whitespace and Checkmate-shaped comments from `cursor` onward.

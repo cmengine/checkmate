@@ -10,8 +10,8 @@
 
 use crate::diagnostics::Diagnostic;
 use crate::mega::profile::{
-    balance, balance_island, checkmate_scan_profile, comment_len, parse_profile, string_len,
-    with_default_strings,
+    ProfileParse, balance, balance_island, checkmate_scan_profile, comment_len, parse_profile,
+    string_len, with_default_strings,
 };
 use cme_core::Span;
 use cme_core::magic::LexProfile;
@@ -24,8 +24,8 @@ pub const REGION_SCAN_HINT: &str = "an inner `}` invisible to every composed pro
      inside an embedded regex literal, say - may have confused the region balance; the heredoc \
      form `magic(name) <<tag ... tag` is exact (§8.6)";
 
-/// One `grammar name { … }` declaration: verbatim body text plus the profile
-/// extracted from its `skip`/`comment`/`string` declarations.
+/// One `grammar name [extends parent] { … }` declaration: verbatim body text
+/// plus the profile extracted from its `skip`/`comment`/`string` declarations.
 #[derive(Debug, Clone)]
 pub struct GrammarScan {
     pub name: String,
@@ -35,6 +35,14 @@ pub struct GrammarScan {
     pub body_span: Span,
     pub body: String,
     pub profile: LexProfile,
+    /// `grammar ts extends js { … }` — the parent grammar's name (§8.2).
+    /// Rules and lexical profile inherit; the child overrides or appends.
+    pub extends: Option<String>,
+    /// The parent name's span, for unknown-parent diagnostics.
+    pub extends_span: Option<Span>,
+    /// Whether the body declared a `skip` set. Drives profile inheritance:
+    /// an absent `skip` inherits the parent's, a declared one replaces it.
+    pub skip_declared: bool,
 }
 
 /// One `magic name(pattern) { template }` declaration. Pattern and template
@@ -86,6 +94,43 @@ impl MagicScan {
             .iter()
             .find(|grammar| grammar.name == name)
             .map(|grammar| &grammar.profile)
+    }
+
+    /// The EFFECTIVE profile of the named grammar: the `extends` chain's
+    /// profiles folded from the root down, the child overriding `skip` when
+    /// it declares one and appending its comment/string forms (§8.2's
+    /// lexical profile inheritance). Unknown names return `None`; a cycle
+    /// stops the walk (the expander reports it separately).
+    pub fn inherited_profile(&self, name: &str) -> Option<LexProfile> {
+        let mut chain: Vec<&GrammarScan> = Vec::new();
+        let mut current = Some(name.to_string());
+        while let Some(next) = current {
+            if chain.iter().any(|grammar| grammar.name == next) {
+                break;
+            }
+            let grammar = self.grammars.iter().find(|grammar| grammar.name == next)?;
+            chain.push(grammar);
+            current = grammar.extends.clone();
+        }
+        let mut profile = LexProfile::default();
+        let mut skip_declared = false;
+        for grammar in chain.iter().rev() {
+            if grammar.skip_declared && !skip_declared {
+                profile.skip = grammar.profile.skip.clone();
+                skip_declared = true;
+            }
+            for comment in &grammar.profile.comments {
+                if !profile.comments.contains(comment) {
+                    profile.comments.push(comment.clone());
+                }
+            }
+            for string in &grammar.profile.strings {
+                if !profile.strings.contains(string) {
+                    profile.strings.push(string.clone());
+                }
+            }
+        }
+        Some(profile)
     }
 }
 
@@ -249,26 +294,89 @@ fn scan_grammar(
     }
     let body_open = skip_ws_and_comments(source, after_name, scanner);
     if !source[body_open..].starts_with('{') {
+        // `grammar ts extends js { … }` (§8.2): the parent sits between the
+        // name and the body.
+        if let Some(word) = keyword_at(source, body_open, "extends") {
+            let parent_start = skip_ws_and_comments(source, body_open + word, scanner);
+            if let Some((parent, after_parent)) = dotted_path(source, parent_start) {
+                if parent.len() != 1 {
+                    errors.push(Diagnostic::parse(
+                        "a grammar parent must be a single identifier",
+                        Span::new(parent_start, after_parent),
+                    ));
+                    return None;
+                }
+                let extends_span = Span::new(parent_start, after_parent);
+                let body_open = skip_ws_and_comments(source, after_parent, scanner);
+                return scan_grammar_body(
+                    source,
+                    keyword_pos,
+                    name[0].clone(),
+                    Some(parent[0].clone()),
+                    Some(extends_span),
+                    body_open,
+                    scanner,
+                    scan,
+                    errors,
+                );
+            }
+            errors.push(Diagnostic::parse(
+                "expected a grammar name after `extends`",
+                Span::new(parent_start, parent_start),
+            ));
+            return None;
+        }
         errors.push(Diagnostic::parse(
             "expected `{` to open the grammar body",
             Span::new(body_open, body_open),
         ));
         return None;
     }
+    scan_grammar_body(
+        source,
+        keyword_pos,
+        name[0].clone(),
+        None,
+        None,
+        body_open,
+        scanner,
+        scan,
+        errors,
+    )
+}
+
+/// Scans the body of an already-headered grammar declaration (both the
+/// plain and the `extends` form funnel here). Returns the offset just past
+/// the declaration, or `None` after recording a diagnostic.
+#[allow(clippy::too_many_arguments)]
+fn scan_grammar_body(
+    source: &str,
+    keyword_pos: usize,
+    name: String,
+    extends: Option<String>,
+    extends_span: Option<Span>,
+    body_open: usize,
+    scanner: &LexProfile,
+    scan: &mut MagicScan,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<usize> {
     match balance(source, body_open, '{', '}', scanner) {
         Ok(body_close) => {
             let body_span = Span::new(body_open + 1, body_close);
             let body = source[body_span.start..body_span.end].to_string();
-            let profile = parse_profile(&body, body_span).unwrap_or_else(|error| {
+            let parsed = parse_profile(&body, body_span).unwrap_or_else(|error| {
                 errors.push(error);
-                LexProfile::default()
+                ProfileParse::default()
             });
             scan.grammars.push(GrammarScan {
-                name: name[0].clone(),
+                name,
                 span: Span::new(keyword_pos, body_close + 1),
                 body_span,
                 body,
-                profile,
+                profile: parsed.profile,
+                extends,
+                extends_span,
+                skip_declared: parsed.skip_declared,
             });
             Some(body_close + 1)
         }
@@ -652,20 +760,19 @@ fn scan_island_checkmate(
 }
 
 /// The composed profile for one invocation (§8.6): the entry grammar's
-/// profile plus the default string form when the grammar declares none. The
-/// entry grammar is recovered by peeking at the macro's declared pattern
-/// (its first rule reference, e.g. `json.value`); unknown macros get the
-/// default profile. When patterns are parsed (Task 3), this widens to the
-/// full transitive reference closure of the entry pattern.
+/// EFFECTIVE profile (the `extends` chain folded) plus the default string
+/// form when it declares none. The entry grammar is recovered by peeking at
+/// the macro's declared pattern (its first rule reference, e.g.
+/// `json.value`); unknown macros get the default profile.
 fn composed_region_profile(scan: &MagicScan, macro_name: &str) -> LexProfile {
     let entry_grammar = scan
         .magics
         .iter()
         .find(|magic| magic.name == macro_name)
         .and_then(|magic| entry_grammar_name(&magic.pattern))
-        .and_then(|grammar| scan.grammar_profile(&grammar));
+        .and_then(|grammar| scan.inherited_profile(&grammar));
     match entry_grammar {
-        Some(profile) => with_default_strings(profile),
+        Some(profile) => with_default_strings(&profile),
         None => crate::mega::profile::default_profile(),
     }
 }

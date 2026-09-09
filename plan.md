@@ -119,7 +119,10 @@ this makes `\n`-joined template element lists safe inside `( )`.
    exposes `.matched` (the exact matched source text) to `where`/templates —
    needed to express bool/number JSON leaves without `@`-codegen. Named
    `.matched` (not `.text`) because grammars legitimately bind a field called
-   `text`. Documented as an extension.
+   `text`. `.matched` TRIMS leading/trailing whitespace (interior untouched):
+   indent blocks and skip-run edges would otherwise leak `\n    ` prefixes
+   into template strings. The exact extent stays available via `.span`.
+   Documented as an extension.
 5. **Bind syntax reconciliation (§8.3.10 vs §8.8).** The EBNF shows `as BIND`,
    but every §8.8 grammar binds with a bare trailing identifier (`selector sel`,
    `$word fname`, `statement then`). Both forms are supported and identical:
@@ -309,8 +312,8 @@ pub enum CaptureValue {
 
 ## 3. Task list (ordered; first 3 are this session's scope)
 
-### Task 1 — `magic.cm` TDD fixture  `[ ]`
-- [ ] Write `magic.cm` at repo root, structured as:
+### Task 1 — `magic.cm` TDD fixture  `[x] DONE`
+- [x] Write `magic.cm` at repo root, structured as:
   1. header comment (what the file is, how it is tested, expected expansions);
   2. `grammar json`, `grammar toml`, `grammar yaml`, `grammar css`,
      `grammar html`, `grammar re`, `grammar js`, `grammar py`, `grammar sql`
@@ -321,9 +324,9 @@ pub enum CaptureValue {
      `sqlQuery`) — templates avoid `@` for now (§1.4.2);
   4. a real consumer Checkmate program (structs/enums used by the templates +
      `main()` that exercises every megaprogram and returns 0 on success).
-- [ ] The file deliberately does NOT compile yet (no magic support) — it is
+- [x] The file deliberately does NOT compile yet (no magic support) — it is
   the TDD north star for Tasks 3–10. Documented in the header.
-- [ ] Commit: `test: add magic.cm megaprogramming fixture (TDD spec)`.
+- [x] Commit: `test: add magic.cm megaprogramming fixture (TDD spec)`.
 
 ### Task 2 — Detection: IR + scanner  `[ ]`
 - [ ] `crates/cme-core/src/magic.rs`: data models of §2.1 (Grammar/Rule/

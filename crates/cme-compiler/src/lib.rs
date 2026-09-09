@@ -16,6 +16,7 @@
 pub mod check;
 pub mod diagnostics;
 pub mod lexer;
+pub mod mega;
 pub mod parser;
 pub mod validate;
 pub use diagnostics::{Diagnostic, DiagnosticKind, ParseOutcome};

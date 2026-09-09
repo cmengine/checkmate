@@ -27,6 +27,7 @@
 //! assert_eq!(stmt.span.end, 13);
 //! ```
 
+pub mod magic;
 pub mod ast {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Span {

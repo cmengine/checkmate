@@ -414,7 +414,8 @@ pub enum CaptureValue {
       pure functions arrive with §8.5 / Task 7); unknown names are clear
       diagnostics.
 - [x] `$tt` (profile-string-aware balanced token tree).
-- [ ] Tests per feature in cme-compiler.
+- [x] Tests per feature in cme-compiler (memoization/fuel/cycle-cut, failure
+      context, indent protocol, validators, `$tt`, left recursion).
 
 ### Task 5 — All `magic.cm` megaprograms green  `[x]`
 - [x] Loop: `cargo run --features cli -- expand magic.cm` until clean; then
@@ -498,11 +499,11 @@ pub enum CaptureValue {
       flow grammars rejected; `indent`/`eol`/`line` inside `soft` rejected).
 - [x] Commit: `feat(compiler): grammar extension and profile validation`.
 
-### Task 12 — Docs & status  `[ ]`
-- [ ] Update AGENTS.md "Repository State Notes" (megaprogramming implemented:
+### Task 12 — Docs & status  `[x]`
+- [x] Update AGENTS.md "Repository State Notes" (megaprogramming implemented:
       which parts, where), README status + `cme expand` usage.
-- [ ] Final run: fmt/clippy/tests all green; worklog + plan checkboxes done.
-- [ ] Commit: `docs: record megaprogramming support and cme expand`.
+- [x] Final run: fmt/clippy/tests all green; worklog + plan checkboxes done.
+- [x] Commit: `docs: record megaprogramming support and cme expand`.
 
 ## 4. Definition of done (overall)
 
@@ -517,6 +518,49 @@ pub enum CaptureValue {
 
 ## 5. Session log / handoff notes
 
+- Session 3: Tasks 10, 11, and 12 completed on top of Task 9 — plan.md §3 is
+  now fully checked off. Per-commit patches exported for delivery.
+- Task 10 notes: pattern failures render in the §8.3.9 shape (the failing
+  region line, a caret, and region-relative coordinates — interior
+  indentation stays verbatim); failures at the region's last character and
+  leftover-content failures append the §8.6 scan hint (the heredoc form is
+  exact), and the scanner's unclosed-region balance error carries the same
+  hint. `require` failures anchor at the REFERENCED CAPTURE's span (the
+  first capture path in the condition that resolves in the current scopes;
+  the template's span is the fallback). `cme expand --provenance` annotates
+  each ROOT invocation of the original file with `// @ magic(name)
+  src:line:col` on its own line before the site's line; nested sites are
+  deliberately not annotated (a comment inside a foreign region could
+  pollute captures — the root's comment covers them), and default output is
+  byte-deterministic (ExpandOptions::default / expand_source unchanged).
+  Edit application sorts by (start desc, end desc) so a same-offset
+  zero-width comment insertion never invalidates the code replacement's
+  coordinates.
+- Task 11 notes: `grammar ts extends js { … }` resolves at compile time.
+  The child's EFFECTIVE profile folds the chain root-first: an absent
+  `skip` inherits the parent's (a `skip_declared` flag now accompanies the
+  parsed profile; `skip [ ]` is a deliberate declaration, not an absence),
+  and comment/string forms append with dedup. Rules are MATERIALIZED into
+  the child (own rules first, inherited ones appended unless overridden) so
+  bare refs, `recur`, and one-segment entry paths resolve in the child
+  exactly as at match time; two-segment paths still address the parent's
+  own namespace. Unknown parents and cyclic chains are compile errors.
+  Region balancing composes the inherited profile (a child's own string
+  forms make braces inside them transparent). Profile static checks:
+  `eol`/`line`/`indent` — and `soft` itself — are rejected in flow
+  grammars; `indent`/`eol`/`line` are rejected inside `soft`; the entry
+  pattern's trailing elements are checked under the entry grammar's
+  orientation. magic.cm's flow grammars (json/css/html/sql) use none of
+  these and stay green. Note: `lineRest` consumes through the line
+  terminator (pre-existing, magic.cm-yaml-compatible); a rule that wants
+  its own `eol` after it must not (that combination is a pattern bug, not
+  a checker target).
+- Task 12 notes: AGENTS.md's Repository State Notes now records the
+  megaprogramming subsystem (where it lives, what it covers, `cme expand`
+  and `--provenance`, magic.cm as the fixture); README gains a
+  `cme expand` usage section and updated status/crate table. Task 4's
+  "tests per feature" box is checked here (the tests landed with the Task 4
+  commits and are listed in its note).
 - Session 2 (continued): Tasks 7, 8, 9 completed on top of Task 6. Per-commit
   patches exported for delivery.
 - Task 7 notes: the compile-time evaluator lives in `mega/cteval.rs` and runs

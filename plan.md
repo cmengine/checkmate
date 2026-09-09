@@ -389,7 +389,7 @@ pub enum CaptureValue {
 - [ ] Left-recursion (nullable-prefix cycle) static rejection with rewrite hint.
 - [x] Memoization keyed by env; re-entrant cycle cut; fuel counter
       (operation count) with budget error.
-- [ ] Furthest-failure diagnostics with `label`/rule context; committed-block
+- [x] Furthest-failure diagnostics with `label`/rule context; committed-block
       diagnostics; `where` failures recorded like element failures.
 - [ ] `indent` full §8.3.5 protocol incl. the four termination cases and
       mixed-tabs check; `indent`-after-`eol` static rejection.

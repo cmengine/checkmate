@@ -151,6 +151,8 @@ enum Continuation<'p> {
 /// A line/column map over the region (§8.3.5 column arithmetic: tab = 8).
 struct LineMap {
     col_of: Vec<usize>,
+    /// One-based line index per char position.
+    line_of: Vec<usize>,
     /// Char index of the terminator ending each line (or chars.len()).
     line_ends: Vec<usize>,
 }
@@ -158,41 +160,57 @@ struct LineMap {
 impl LineMap {
     fn build(chars: &[char]) -> Self {
         let mut col_of = Vec::with_capacity(chars.len());
+        let mut line_of = Vec::with_capacity(chars.len());
         let mut line_ends = Vec::new();
         let mut col = 0usize;
+        let mut line = 1usize;
         let mut index = 0usize;
         while index < chars.len() {
             match chars[index] {
                 '\r' => {
                     col_of.push(col);
+                    line_of.push(line);
                     index += 1;
                     line_ends.push(index);
                     if chars.get(index) == Some(&'\n') {
                         col_of.push(col);
+                        line_of.push(line);
                         index += 1;
                     }
                     col = 0;
+                    line += 1;
                     continue;
                 }
                 '\n' => {
                     col_of.push(col);
+                    line_of.push(line);
                     index += 1;
                     line_ends.push(index);
                     col = 0;
+                    line += 1;
                     continue;
                 }
                 '\t' => col = (col / 8 + 1) * 8,
                 _ => col += 1,
             }
             col_of.push(col);
+            line_of.push(line);
             index += 1;
         }
         line_ends.push(chars.len());
-        Self { col_of, line_ends }
+        Self {
+            col_of,
+            line_of,
+            line_ends,
+        }
     }
 
     fn col(&self, pos: usize) -> usize {
         self.col_of.get(pos).copied().unwrap_or(0)
+    }
+
+    fn line(&self, pos: usize) -> usize {
+        self.line_of.get(pos).copied().unwrap_or(0)
     }
 
     /// The char index of the terminator ending the line containing `pos`
@@ -2023,7 +2041,7 @@ impl<'a> Matcher<'a> {
             CtxExpr::Bool(value) => Some(CtxVal::Bool(*value)),
             CtxExpr::Capture { path, accessor } => {
                 let capture = self.lookup(path, env)?;
-                apply_accessor(capture, accessor.clone())
+                self.apply_accessor(capture, accessor)
             }
             CtxExpr::Bin(op, lhs, rhs) => {
                 let lhs = self.eval(lhs, env)?;
@@ -2122,7 +2140,9 @@ impl<'a> Matcher<'a> {
     }
 
     /// Resolves a capture path against the current scope, unwrapping one
-    /// `Opt` layer per navigation step.
+    /// `Opt` layer per navigation step. Record navigation prefers field
+    /// names; any capture falls back to a trailing accessor keyword
+    /// (`w.line`, `xs.length`, plan §1.4.4).
     fn lookup(&self, path: &[String], env: &Env) -> Option<Capture> {
         let mut current = env.scope.get(&path[0]).cloned()?;
         for (index, segment) in path[1..].iter().enumerate() {
@@ -2138,17 +2158,110 @@ impl<'a> Matcher<'a> {
                         None => {
                             let last = index + 2 == path.len();
                             if last {
-                                current = apply_accessor_text(current, segment)?;
+                                current = self.accessor_capture(current, segment)?;
                             } else {
                                 return None;
                             }
                         }
                     }
                 }
-                _ => return None,
+                // A non-record capture can only be followed by an accessor
+                // keyword in the path's final position.
+                _ => {
+                    let last = index + 2 == path.len();
+                    if last {
+                        current = self.accessor_capture(current, segment)?;
+                    } else {
+                        return None;
+                    }
+                }
             }
         }
         Some(current)
+    }
+
+    /// Applies one trailing accessor to a capture (§8.3.4, plan §1.4.4).
+    /// `.line`/`.col` map the capture's start span back to a char index and
+    /// read the region's line/column map (one-based, §8.3.5 column
+    /// arithmetic); captures without a resolvable span report 0.
+    fn apply_accessor(&self, capture: Capture, accessor: &Option<Accessor>) -> Option<CtxVal> {
+        match accessor {
+            None => Some(CtxVal::Capture(capture)),
+            // `.matched` trims edge whitespace (plan §1.4.4): indent blocks
+            // and skip-run edges would otherwise leak `\n    ` prefixes.
+            Some(Accessor::Matched) => Some(CtxVal::Str(capture.matched().trim().to_string())),
+            Some(Accessor::Length) => {
+                let length = match capture.kind {
+                    CaptureKind::List(items) => items.len(),
+                    CaptureKind::Record { fields, .. } => fields.len(),
+                    _ => 0,
+                };
+                Some(CtxVal::Int(length as i64))
+            }
+            Some(Accessor::Line) => Some(CtxVal::Int(self.capture_line(&capture) as i64)),
+            Some(Accessor::Col) => Some(CtxVal::Int(self.capture_col(&capture) as i64)),
+        }
+    }
+
+    /// Path-navigation fallback: applies an accessor named by the path's
+    /// final segment (`.matched`, `.length`, `.line`, `.col`).
+    fn accessor_capture(&self, capture: Capture, segment: &str) -> Option<Capture> {
+        let accessor = match segment {
+            "matched" => Accessor::Matched,
+            "length" => Accessor::Length,
+            "line" => Accessor::Line,
+            "col" => Accessor::Col,
+            _ => return None,
+        };
+        match self.apply_accessor(capture, &Some(accessor))? {
+            CtxVal::Str(value) => Some(Capture {
+                kind: CaptureKind::Text(TextKind::Raw),
+                matched: value,
+                span: Span::missing(0),
+            }),
+            CtxVal::Int(value) => Some(Capture {
+                kind: CaptureKind::Int(value),
+                matched: value.to_string(),
+                span: Span::missing(0),
+            }),
+            CtxVal::Capture(capture) => Some(capture),
+            _ => None,
+        }
+    }
+
+    /// The region-relative char index of a capture's start, if its span
+    /// points inside this region (spans are absolute; byte offsets within the
+    /// region are sorted, so the search is binary).
+    fn capture_char_index(&self, capture: &Capture) -> Option<usize> {
+        if capture.span.start < self.region.base {
+            return None;
+        }
+        let relative = capture.span.start - self.region.base;
+        let offsets = &self.region.byte_offsets;
+        let index = offsets
+            .binary_search(&relative)
+            .unwrap_or_else(|next| if next == 0 { usize::MAX } else { next - 1 });
+        if index == usize::MAX {
+            None
+        } else {
+            Some(index)
+        }
+    }
+
+    fn capture_line(&self, capture: &Capture) -> usize {
+        self.capture_char_index(capture)
+            .map(|index| self.lines.line(index))
+            .unwrap_or(0)
+    }
+
+    fn capture_col(&self, capture: &Capture) -> usize {
+        // Column arithmetic is zero-based internally; accessors report the
+        // one-based visual column of the capture's first character.
+        // `col_of` stores the column AFTER consuming the char, which for a
+        // content character is its one-based visual column already.
+        self.capture_char_index(capture)
+            .map(|index| self.lines.col(index))
+            .unwrap_or(0)
     }
 }
 
@@ -2215,52 +2328,6 @@ enum CtxVal {
     Float(f64),
     Bool(bool),
     Capture(Capture),
-}
-
-fn apply_accessor(capture: Capture, accessor: Option<Accessor>) -> Option<CtxVal> {
-    match accessor {
-        None => Some(CtxVal::Capture(capture)),
-        // `.matched` trims edge whitespace (plan §1.4.4): indent blocks and
-        // skip-run edges would otherwise leak `\n    ` prefixes.
-        Some(Accessor::Matched) => Some(CtxVal::Str(capture.matched().trim().to_string())),
-        Some(Accessor::Length) => {
-            let length = match capture.kind {
-                CaptureKind::List(items) => items.len(),
-                CaptureKind::Record { fields, .. } => fields.len(),
-                _ => 0,
-            };
-            Some(CtxVal::Int(length as i64))
-        }
-        // Real source-line mapping lands with Task 4's diagnostics work.
-        Some(Accessor::Line) => Some(CtxVal::Int(0)),
-        Some(Accessor::Col) => Some(CtxVal::Int(0)),
-    }
-}
-
-/// Path-navigation fallback: applies an accessor named by the path's final
-/// segment (`.matched`, `.length`, `.line`, `.col`), yielding a capture.
-fn apply_accessor_text(capture: Capture, segment: &str) -> Option<Capture> {
-    let accessor = match segment {
-        "matched" => Accessor::Matched,
-        "length" => Accessor::Length,
-        "line" => Accessor::Line,
-        "col" => Accessor::Col,
-        _ => return None,
-    };
-    match apply_accessor(capture, Some(accessor)) {
-        Some(CtxVal::Str(value)) => Some(Capture {
-            kind: CaptureKind::Text(TextKind::Raw),
-            matched: value,
-            span: Span::missing(0),
-        }),
-        Some(CtxVal::Int(value)) => Some(Capture {
-            kind: CaptureKind::Int(value),
-            matched: value.to_string(),
-            span: Span::missing(0),
-        }),
-        Some(CtxVal::Capture(capture)) => Some(capture),
-        _ => None,
-    }
 }
 
 /// A capture in a scalar position: its number, or its trimmed matched text.
@@ -2360,6 +2427,7 @@ fn has_effective_tail(cont: &Continuation<'_>) -> bool {
 mod tests {
     use super::*;
     use crate::mega::pattern::parse_rule_declaration;
+    use cme_core::magic::CharSet;
 
     /// Compiles a grammar body (rules only, default profile) into a set.
     fn compile_rules(rules: &[&str]) -> GrammarSet {
@@ -2505,5 +2573,92 @@ mod tests {
             }
             other => panic!("unexpected {:?}", other),
         }
+    }
+
+    // -- Task 4: diagnostics composition (§8.3.9) ----------------------------
+
+    #[test]
+    fn failures_render_the_enclosing_rule_name() {
+        // The failing literal sits inside rule `inner`; the message must say
+        // so even though the entry pattern is `outer`.
+        let set = compile_rules(&[
+            "rule outer { \"a\" inner \"!\" }",
+            "rule inner { \"b\" \"c\" }",
+        ]);
+        let failure = match_rule(&set, "outer", "abx!").expect_err("c is missing");
+        assert!(
+            failure.contains("in rule `inner`"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn failures_render_label_context() {
+        let set = compile_rules(&[
+            "rule pair { label \"expected a key-value pair\" { \"k\" \":\" \"v\" } }",
+        ]);
+        let failure = match_rule(&set, "pair", "k:x").expect_err("v is missing");
+        assert!(
+            failure.contains("expected a key-value pair") && failure.contains("while matching"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn where_failures_carry_the_same_context_as_element_failures() {
+        let set = compile_rules(&[
+            "rule outer { \"<\" tagged \">\" }",
+            "rule tagged { label \"tag check\" { $word name where name == \"ok\" } }",
+        ]);
+        let failure = match_rule(&set, "outer", "<bad>").expect_err("where must fail");
+        assert!(
+            failure.contains("constraint failed") && failure.contains("tag check"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn line_and_col_accessors_report_source_positions() {
+        // A LINE-oriented grammar (skip set without `\n`) so `eol` is
+        // available; the word sits on the third line, column 3 (one-based).
+        let mut grammar = CompiledGrammar {
+            name: "test".to_string(),
+            profile: LexProfile {
+                skip: CharSet::of(&[' ', '\t']),
+                comments: Vec::new(),
+                strings: Vec::new(),
+            },
+            rules: Vec::new(),
+        };
+        let source = "rule doc { \"aa\" eol scan [a-z] as w where w.line == 3 && w.col == 3 eol }";
+        let (name, context, pattern, _) =
+            parse_rule_declaration(source, 0, Span::new(0, source.len())).unwrap();
+        grammar.rules.push(CompiledRule {
+            name,
+            context,
+            pattern,
+        });
+        let mut set = GrammarSet::default();
+        set.grammars.push(grammar);
+        set.grammars.push(CompiledGrammar {
+            name: "\u{0}default".to_string(),
+            profile: crate::mega::profile::default_profile(),
+            rules: Vec::new(),
+        });
+
+        let region = "aa\n\n  xyz\n";
+        if let Err(message) = match_rule(&set, "doc", region) {
+            panic!("debug failure: {message}");
+        }
+        // One row up, the same constraint must fail.
+        let source2 = "rule doc { \"aa\" eol scan [a-z] as w where w.line == 2 && w.col == 3 eol }";
+        let (name, context, pattern, _) =
+            parse_rule_declaration(source2, 0, Span::new(0, source2.len())).unwrap();
+        set.grammars[0].rules[0] = CompiledRule {
+            name,
+            context,
+            pattern,
+        };
+        assert!(match_rule(&set, "doc", region).is_err());
     }
 }

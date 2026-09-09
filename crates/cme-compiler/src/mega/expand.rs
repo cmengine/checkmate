@@ -13,10 +13,12 @@ use cme_core::Span;
 use cme_core::magic::{FragKind, PatElem, PatKind, Pattern};
 
 use crate::diagnostics::Diagnostic;
-use crate::mega::matcher::{CompiledGrammar, CompiledRule, GrammarSet, MatchRegion, match_entry};
+use crate::mega::matcher::{
+    CompiledGrammar, CompiledRule, GrammarSet, MatchFailure, MatchRegion, match_entry,
+};
 use crate::mega::pattern::{parse_pattern, parse_rule_declaration};
 use crate::mega::profile::default_profile;
-use crate::mega::scan::{InvocationScan, MagicScan, scan_magic};
+use crate::mega::scan::{InvocationScan, MagicScan, REGION_SCAN_HINT, scan_magic};
 use crate::mega::template::{elaborate, parse_template};
 
 /// One expanded invocation, recorded for tooling and provenance.
@@ -37,12 +39,31 @@ pub struct ExpansionOutcome {
     pub records: Vec<ExpansionRecord>,
 }
 
+/// Knobs for the expansion pass. The default is byte-deterministic output
+/// with no annotations; `provenance` adds a `// @ magic(name) src:L:C`
+/// comment above the line of every root invocation of the ORIGINAL file
+/// (§8.6: origin is recorded only for diagnostics — it never affects
+/// processing, and generated code carries no comments of its own).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExpandOptions {
+    pub provenance: bool,
+}
+
 /// The whitepaper's expansion-tree depth cap (§8.6), counting all origins.
 const DEPTH_CAP: usize = 64;
 
 /// Expands every megaprogram in `source`. Returns the expanded source, or
 /// every diagnostic encountered (spans anchored in `source`).
 pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> {
+    expand_source_with(source, ExpandOptions::default())
+}
+
+/// [`expand_source`] with options (provenance comments; see
+/// [`ExpandOptions`]).
+pub fn expand_source_with(
+    source: &str,
+    options: ExpandOptions,
+) -> Result<ExpansionOutcome, Vec<Diagnostic>> {
     let (scan, scan_errors) = scan_magic(source);
     if !scan_errors.is_empty() {
         return Err(scan_errors);
@@ -66,6 +87,18 @@ pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> 
     // against the interpreter during expansion (single-file megaprograms
     // make the §8.7.4 import-purity check trivially satisfied).
     let engine = crate::mega::cteval::CtEngine::new(source, &scan, &set);
+
+    // Provenance comments (§8.6, opt-in): computed ONCE against the original
+    // file, for its ROOT invocations only (those contained in no other
+    // invocation — nested sites are covered by their root's comment, and a
+    // comment inside a foreign region could pollute captures). The edits
+    // merge into the first pass; they sit outside every invocation span, so
+    // later rounds see them as inert comments.
+    let provenance_edits = if options.provenance {
+        provenance_edits(source, &scan)
+    } else {
+        Vec::new()
+    };
 
     let mut current = source.to_string();
     let mut records = Vec::new();
@@ -113,6 +146,9 @@ pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> 
             })
             .collect();
         let mut edits: Vec<(Span, String)> = Vec::new();
+        if depth == 1 {
+            edits.extend(provenance_edits.iter().cloned());
+        }
         for invocation in &innermost {
             let Some(macro_def) = macros
                 .iter()
@@ -165,7 +201,7 @@ pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> 
                 Err(failure) => {
                     let at = invocation.region_span.start + failure.byte_offset;
                     diagnostics.push(Diagnostic::parse(
-                        format!("magic pattern did not match: {}", failure.message),
+                        region_failure_message(invocation, &failure),
                         Span::new(at, at),
                     ));
                 }
@@ -220,6 +256,85 @@ fn count_newlines(text: &str, span: Span) -> usize {
         .count()
 }
 
+/// Builds the opt-in provenance edits (§8.6): one `// @ magic(name) src:L:C`
+/// comment line inserted at the start of the line containing each ROOT
+/// invocation (an invocation contained in no other). Positions refer to the
+/// ORIGINAL file. A comment inside a foreign region could pollute captures,
+/// so nested sites are deliberately not annotated — their root's comment
+/// covers the whole site.
+fn provenance_edits(source: &str, scan: &MagicScan) -> Vec<(Span, String)> {
+    let mut edits = Vec::new();
+    for invocation in &scan.invocations {
+        let is_root = !scan.invocations.iter().any(|other| {
+            !std::ptr::eq(other, invocation)
+                && other.span.start <= invocation.span.start
+                && other.span.end >= invocation.span.end
+                && (other.span.start != invocation.span.start
+                    || other.span.end != invocation.span.end)
+        });
+        if !is_root {
+            continue;
+        }
+        let line_start = source[..invocation.span.start]
+            .rfind('\n')
+            .map(|offset| offset + 1)
+            .unwrap_or(0);
+        let (line, column) = line_column(source, invocation.span.start);
+        edits.push((
+            Span::new(line_start, line_start),
+            format!("// @ magic({}) src:{}:{}\n", invocation.name, line, column),
+        ));
+    }
+    edits
+}
+
+/// One-based line/column of `offset` in `source` (for provenance comments).
+fn line_column(source: &str, offset: usize) -> (usize, usize) {
+    let before = &source[..offset.min(source.len())];
+    let line = 1 + before.bytes().filter(|byte| *byte == b'\n').count();
+    let column = before
+        .rsplit(['\n', '\r'])
+        .next()
+        .map(|tail| tail.chars().count() + 1)
+        .unwrap_or(1);
+    (line, column)
+}
+
+/// Renders a pattern-match failure in the §8.3.9 shape: the message, then the
+/// failing line of the EMBEDDED region with a caret at the failure column.
+/// The diagnostic's own span still anchors at the original file, so the CLI's
+/// caret and the embedded excerpt agree on the same spot.
+fn region_failure_message(invocation: &InvocationScan, failure: &MatchFailure) -> String {
+    let region = &invocation.region;
+    let offset = failure.byte_offset.min(region.len());
+    let line_start = region[..offset].rfind('\n').map(|at| at + 1).unwrap_or(0);
+    let line_end = region[offset..]
+        .find('\n')
+        .map(|at| offset + at)
+        .unwrap_or(region.len());
+    let line_text = region[line_start..line_end].trim_end_matches('\r');
+    let line = 1 + region[..offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    let column = region[line_start..offset].chars().count();
+    let mut message = format!("magic pattern did not match: {}", failure.message);
+    message.push_str(&format!("\n  ┆ {line_text}"));
+    message.push_str(&format!(
+        "\n  ┆ {}^ (region line {line}, column {})",
+        " ".repeat(column),
+        column + 1
+    ));
+    // §8.6: a failure at (or past) the region's last character, or leftover
+    // content after a complete match, is the signature of a mis-read brace;
+    // add the scan hint instead of letting the caller guess.
+    let leftover = failure.message.contains("leftover content");
+    if leftover || failure.byte_offset >= region.len() {
+        message.push_str(&format!("\n  scan hint: {REGION_SCAN_HINT}"));
+    }
+    message
+}
+
 /// The containment chain of the deepest invocation: outermost first. This is
 /// the expansion stack the depth-cap diagnostic reports (§8.6: "the full
 /// expansion stack — each macro, span, and pass").
@@ -254,10 +369,13 @@ fn expansion_stack(invocations: &[InvocationScan]) -> Vec<&InvocationScan> {
     chain
 }
 
-/// Applies non-overlapping span edits, highest position first.
+/// Applies non-overlapping span edits, highest position first; a tie on the
+/// start position applies the WIDER span first, so a zero-width insertion at
+/// the same offset (a provenance comment) lands before the replacement that
+/// follows it instead of invalidating its coordinates.
 fn apply_edits(text: &str, edits: &[(Span, String)]) -> String {
     let mut edits = edits.to_vec();
-    edits.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+    edits.sort_by_key(|(span, _)| (std::cmp::Reverse(span.start), std::cmp::Reverse(span.end)));
     let mut out = text.to_string();
     for (span, replacement) in edits {
         out.replace_range(span.start..span.end, &replacement);
@@ -1199,5 +1317,191 @@ magic(runIt) {
             outcome.expanded.contains("\"world\""),
             "the $raw text splices"
         );
+    }
+
+    // -- Task 10: diagnostics & provenance polish (§8.3.9, §8.6) --------------
+
+    #[test]
+    fn pattern_failures_render_the_embedded_source_caret() {
+        // The member pattern needs `:` between key and value; the region's
+        // second line lacks it, so the furthest failure sits there.
+        let source = r#"
+grammar json {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule value {
+        oneof {
+            string => $str text
+            object => ( "{" each sep "," { member } as fields "}" )
+        }
+    }
+
+    rule member {
+        $str key ":" value as val
+    }
+}
+
+magic jsonValue(json.value as v) {
+    "x"
+}
+
+str config = magic(jsonValue) {
+    {
+        "host" "db.local",
+        "retries": 3
+    }
+}
+"#;
+        let errors = expansion_errors(source);
+        let failure = errors
+            .iter()
+            .find(|message| message.contains("magic pattern did not match"))
+            .expect("a pattern-failure diagnostic");
+        // §8.3.9 shape: the embedded region line (interior indentation is
+        // verbatim), and the caret annotated with region-relative coords.
+        assert!(
+            failure.contains("┆         \"host\" \"db.local\","),
+            "expected the failing region line in the message: {failure}"
+        );
+        assert!(
+            failure.contains("^ (region line 2, column 16)"),
+            "expected the caret annotation: {failure}"
+        );
+    }
+
+    #[test]
+    fn leftover_content_and_region_edge_failures_carry_the_scan_hint() {
+        let source = r#"
+grammar test {
+    rule thing { $word w }
+}
+
+magic runIt(test.thing as t) {
+    "x"
+}
+
+str s = magic(runIt) {
+    hello world
+}
+"#;
+        let errors = expansion_errors(source);
+        let failure = errors
+            .iter()
+            .find(|message| message.contains("magic pattern did not match"))
+            .expect("a leftover-content failure");
+        assert!(
+            failure.contains("leftover content"),
+            "expected the leftover diagnosis: {failure}"
+        );
+        assert!(
+            failure.contains("scan hint:") && failure.contains("heredoc"),
+            "expected the §8.6 region-scan hint: {failure}"
+        );
+    }
+
+    #[test]
+    fn provenance_comments_annotate_root_sites_in_the_original_file() {
+        let source = r#"
+grammar test {
+    rule thing { $word w }
+}
+
+magic runIt(test.thing as t) {
+    "x"
+}
+
+str a = magic(runIt) {
+    alpha
+}
+
+str b = magic(runIt) { beta }
+"#;
+        let with_provenance =
+            expand_source_with(source, ExpandOptions { provenance: true }).expect("expands");
+        // Line 10 is `str a = magic(runIt) {`, line 14 is `str b = …`; both
+        // roots are annotated with their ORIGINAL-file position (`magic`
+        // starts at column 9 in both).
+        assert!(
+            with_provenance
+                .expanded
+                .contains("// @ magic(runIt) src:10:9"),
+            "expected the root-site comment for `a`: {}",
+            with_provenance.expanded
+        );
+        assert!(
+            with_provenance
+                .expanded
+                .contains("// @ magic(runIt) src:14:9"),
+            "expected the root-site comment for `b`: {}",
+            with_provenance.expanded
+        );
+
+        // Default output is byte-deterministic and carries no annotations.
+        let plain = expand_source(source).expect("expands");
+        let stripped = with_provenance
+            .expanded
+            .replace("// @ magic(runIt) src:10:9\n", "")
+            .replace("// @ magic(runIt) src:14:9\n", "");
+        assert_eq!(plain.expanded, stripped);
+        assert!(!plain.expanded.contains("// @ magic("));
+    }
+
+    #[test]
+    fn provenance_covers_only_the_roots_not_nested_sites() {
+        // The inner `magic(b)` is plain foreign text (no island): only the
+        // outer invocation is a site, so exactly one comment appears and the
+        // region text is never polluted.
+        let source = r#"
+grammar js {
+    skip [ ' ', '\t' ]
+
+    rule run { $text body }
+}
+
+magic a(js.run as r) {
+    "A"
+}
+
+str s = magic(a) {
+    magic(b) { 1 }
+}
+"#;
+        let with_provenance =
+            expand_source_with(source, ExpandOptions { provenance: true }).expect("expands");
+        assert_eq!(
+            with_provenance.expanded.matches("// @ magic(").count(),
+            1,
+            "only the root site is annotated: {}",
+            with_provenance.expanded
+        );
+        // The generated code itself still expanded around the comment.
+        assert!(with_provenance.expanded.contains("\"A\""));
+    }
+
+    #[test]
+    fn require_failures_anchor_at_the_referenced_capture() {
+        let source = r#"
+grammar test {
+    rule thing { $word w }
+}
+
+magic runIt(test.thing as t) {
+    require($t.w == "nope", "wrong word")
+    "ok"
+}
+
+str s = magic(runIt) {
+    hello
+}
+"#;
+        let errors = expand_source(source).expect_err("require must fail");
+        let require_error = errors
+            .iter()
+            .find(|error| error.message().contains("require failed"))
+            .expect("a require diagnostic");
+        // The anchor is the matched word `hello` inside the region — the
+        // user's source — not the template or the invocation header.
+        let anchor = source.find("hello").expect("region text in source");
+        assert_eq!(require_error.span().start, anchor);
     }
 }

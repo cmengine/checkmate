@@ -484,13 +484,13 @@ pub enum CaptureValue {
       `` `Hello, ${ … }` ``).
 - [x] Commit: `feat(compiler): nested magic invocations, islands, heredoc regions`.
 
-### Task 10 — Diagnostics & provenance polish  `[ ]`
-- [ ] Region-scan hint ("an inner `}` invisible to every composed profile …
+### Task 10 — Diagnostics & provenance polish  `[x]`
+- [x] Region-scan hint ("an inner `}` invisible to every composed profile …
       the heredoc form is exact"), pattern-failure rendering with the
       embedded-source caret (§8.3.9 shape), `require` anchored at capture spans.
-- [ ] `cme expand`: optional provenance comments (`// @ magic(name) src:line:col`)
+- [x] `cme expand`: optional provenance comments (`// @ magic(name) src:line:col`)
       — keep default output byte-deterministic.
-- [ ] Commit: `feat(compiler): megaprogram diagnostics polish`.
+- [x] Commit: `feat(compiler): megaprogram diagnostics polish`.
 
 ### Task 11 — Grammar extension + profile validation  `[ ]`
 - [ ] `grammar ts extends js { … }` (override/add rules; lexical profile

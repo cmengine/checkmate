@@ -9,7 +9,9 @@ use cme_interp::{InterpError, Interpreter, Value};
 #[cfg(feature = "cli")]
 use std::process::ExitCode;
 #[cfg(feature = "cli")]
-const USAGE: &str = "Usage: cme <lex|ast|check|run|expand> <file.cm>";
+const USAGE: &str = "Usage: cme <lex|ast|check|run|expand> <file.cm> [--provenance]\
+     \n  (--provenance is an `expand` option: it annotates each root magic site \
+       with `// @ magic(name) src:line:col)`";
 
 #[cfg(feature = "cli")]
 enum CliError {
@@ -22,12 +24,19 @@ enum CliError {
 #[cfg(feature = "cli")]
 fn run() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 2 {
-        return Err(CliError::Usage(format!(
-            "expected exactly two arguments\n{USAGE}"
-        )));
-    }
-    let (command, path) = (&args[0], &args[1]);
+    // `expand` accepts an optional `--provenance` flag; other commands take
+    // exactly one file argument.
+    let (command, path, provenance) = match args.as_slice() {
+        [command, path] => (command.as_str(), path.as_str(), false),
+        [command, path, flag] if command == "expand" && flag == "--provenance" => {
+            (command.as_str(), path.as_str(), true)
+        }
+        _ => {
+            return Err(CliError::Usage(format!(
+                "expected a command, a file, and (for expand) an optional --provenance\n{USAGE}"
+            )));
+        }
+    };
 
     let source = std::fs::read_to_string(path)
         .map_err(|error| CliError::Io(format!("failed to read {path}: {error}")))?;
@@ -35,13 +44,12 @@ fn run() -> Result<(), CliError> {
     // Files that mention megaprogram constructs are expanded first; every
     // later stage works on the expanded (pure Checkmate) text. Expansion
     // diagnostics render against the ORIGINAL file (plan §2).
-    let source = match command.as_str() {
-        "lex" => source,
-        "expand" => source,
+    let source = match command {
+        "lex" | "expand" => source,
         _ => maybe_expand(&source)?,
     };
 
-    match command.as_str() {
+    match command {
         "lex" => {
             let (tokens, errors) = cme_compiler::lexer::lex_with_errors(&source);
             let errors = errors.into_iter().map(Diagnostic::lex).collect::<Vec<_>>();
@@ -65,7 +73,7 @@ fn run() -> Result<(), CliError> {
             render_diagnostics(errors, &source)
         }
         "run" => run_program(&source, path),
-        "expand" => expand_command(&source, path),
+        "expand" => expand_command(&source, path, provenance),
         _ => Err(CliError::Usage(format!(
             "unknown command: {command}\n{USAGE}"
         ))),
@@ -106,11 +114,16 @@ fn maybe_expand(source: &str) -> Result<String, CliError> {
 /// `cme expand <file.cm>`: expands megaprograms in the places they were
 /// called and writes the pure-Checkmate result to a labeled file side by
 /// side with the original (`magic.cm` → `magic_expanded.cm`), then parses
-/// and checks that file, reporting against it.
+/// and checks that file, reporting against it. With `--provenance`, each
+/// root invocation site is annotated with a `// @ magic(name) src:L:C`
+/// comment; without it, the output stays byte-deterministic.
 #[cfg(feature = "cli")]
-fn expand_command(source: &str, path: &str) -> Result<(), CliError> {
-    let outcome = cme_compiler::mega::expand::expand_source(source)
-        .map_err(|errors| CliError::Compiler(errors, source.to_string()))?;
+fn expand_command(source: &str, path: &str, provenance: bool) -> Result<(), CliError> {
+    let outcome = cme_compiler::mega::expand::expand_source_with(
+        source,
+        cme_compiler::mega::expand::ExpandOptions { provenance },
+    )
+    .map_err(|errors| CliError::Compiler(errors, source.to_string()))?;
 
     let expanded_path = expanded_path_for(path);
     let mut text = String::new();

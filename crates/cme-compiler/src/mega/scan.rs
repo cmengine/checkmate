@@ -16,6 +16,14 @@ use crate::mega::profile::{
 use cme_core::Span;
 use cme_core::magic::LexProfile;
 
+/// The §8.6 region-scan hint, appended to diagnostics whose most plausible
+/// cause is a brace the composed profile mis-read (swallowed by a string or
+/// comment form, or treated as text inside one). The scanner never guesses a
+/// larger extent; the heredoc form is the zero-approximation escape hatch.
+pub const REGION_SCAN_HINT: &str = "an inner `}` invisible to every composed profile - a brace \
+     inside an embedded regex literal, say - may have confused the region balance; the heredoc \
+     form `magic(name) <<tag ... tag` is exact (§8.6)";
+
 /// One `grammar name { … }` declaration: verbatim body text plus the profile
 /// extracted from its `skip`/`comment`/`string` declarations.
 #[derive(Debug, Clone)]
@@ -411,7 +419,12 @@ fn scan_invocation(
     let region_close = match balance(source, cursor, '{', '}', &profile) {
         Ok(close) => close,
         Err(error) => {
-            errors.push(Diagnostic::parse(error.message, error.span));
+            // §8.6: never guess a larger extent — report the failure with the
+            // scan hint pointing at the heredoc escape hatch.
+            errors.push(Diagnostic::parse(
+                format!("{}, {}", error.message, REGION_SCAN_HINT),
+                error.span,
+            ));
             return None;
         }
     };
@@ -929,6 +942,33 @@ magic reQuantified({\"{\" $int min \"}\"} as q) {
             errors
                 .iter()
                 .any(|error| error.message().contains("unclosed"))
+        );
+    }
+
+    #[test]
+    fn unclosed_region_balance_carries_the_heredoc_hint() {
+        // The balancer hits EOF without finding the region's closing `}`:
+        // the §8.6 hint (heredoc form is exact) must accompany the error.
+        let source = "\
+grammar py {
+    skip    [ ' ' ]
+
+    rule def { $word name eol }
+}
+
+magic def(py.def as d) {
+    $d.name
+}
+
+magic(def) {
+    it's the region that never closes
+";
+        let (_, errors) = scan_magic(source);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message().contains("heredoc")),
+            "expected the §8.6 scan hint on the unclosed region: {errors:?}"
         );
     }
 

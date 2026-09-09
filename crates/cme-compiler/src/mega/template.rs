@@ -1057,7 +1057,12 @@ impl<'e> Elaborator<'e> {
             },
             TmplNode::Require { cond, message, .. } => {
                 if self.eval(cond) != Some(CtxVal::Bool(true)) {
-                    let span = first_capture_span(cond).unwrap_or(self.source_span);
+                    // §8.3.4: the failure anchors at the referenced capture's
+                    // span — the real matched text in the user's region, not
+                    // the template.
+                    let span = self
+                        .first_resolved_capture_span(cond)
+                        .unwrap_or(self.source_span);
                     self.diagnostics.push(Diagnostic::parse(
                         format!("require failed: {message}"),
                         span,
@@ -1198,6 +1203,27 @@ impl<'e> Elaborator<'e> {
             }
         }
         Err(format!("unknown capture `${}`", path.join(".")))
+    }
+
+    /// The span of the first capture in `expression` that RESOLVES in the
+    /// current scopes (§8.3.4: `require` failures anchor at the referenced
+    /// capture's matched text). Candidates are visited in syntactic order;
+    /// unresolvable paths fall through to later ones.
+    fn first_resolved_capture_span(&self, expression: &CtxExpr) -> Option<Span> {
+        match expression {
+            CtxExpr::Capture { path, .. } => self.lookup(path).ok().map(|capture| capture.span),
+            CtxExpr::Bin(_, lhs, rhs) => self
+                .first_resolved_capture_span(lhs)
+                .or_else(|| self.first_resolved_capture_span(rhs)),
+            CtxExpr::Not(inner) => self.first_resolved_capture_span(inner),
+            CtxExpr::SomeIn { list, cond, .. } | CtxExpr::AllIn { list, cond, .. } => self
+                .first_resolved_capture_span(list)
+                .or_else(|| self.first_resolved_capture_span(cond)),
+            CtxExpr::Call { args, .. } => args
+                .iter()
+                .find_map(|arg| self.first_resolved_capture_span(arg)),
+            _ => None,
+        }
     }
 
     fn splice_capture(&self, capture: &Capture) -> Result<String, String> {
@@ -1422,18 +1448,6 @@ pub(crate) fn escape_checkmate(text: &str) -> String {
         }
     }
     out
-}
-
-fn first_capture_span(expression: &CtxExpr) -> Option<Span> {
-    match expression {
-        CtxExpr::Capture { .. } => None,
-        CtxExpr::Bin(_, lhs, rhs) => first_capture_span(lhs).or_else(|| first_capture_span(rhs)),
-        CtxExpr::Not(inner) => first_capture_span(inner),
-        CtxExpr::SomeIn { list, cond, .. } | CtxExpr::AllIn { list, cond, .. } => {
-            first_capture_span(list).or_else(|| first_capture_span(cond))
-        }
-        _ => None,
-    }
 }
 
 /// A capture in a scalar position: its number, or its trimmed matched text.

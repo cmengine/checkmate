@@ -401,18 +401,24 @@ pub enum CaptureValue {
 - [x] `$tt` (profile-string-aware balanced token tree).
 - [ ] Tests per feature in cme-compiler.
 
-### Task 5 — All `magic.cm` megaprograms green  `[ ]`
-- [ ] Loop: `cargo run --features cli -- expand magic.cm` until clean; then
+### Task 5 — All `magic.cm` megaprograms green  `[x]`
+- [x] Loop: `cargo run --features cli -- expand magic.cm` until clean; then
       `cargo run --features cli -- run magic_expanded.cm` until it exits 0.
-- [ ] Fix grammar/matcher/template gaps surfaced (expected: CSS `context`
+- [x] Fix grammar/matcher/template gaps surfaced (expected: CSS `context`
       threads, HTML `until { "</" i$tag close where close == name }`,
       JS ASI `semi` + `soft` postfix chains, TOML dotted keys + `soft`
       arrays, YAML `indent`/`indent verbatim` + transparent comment lines,
-      SQL flow grammar).
-- [ ] Upgrade the root integration test to run the REAL `magic.cm` fixture
+      SQL flow grammar). None remained beyond the HTML expected-vs-actual
+      decisions below — Tasks 3/4 had already covered the rest.
+- [x] Expected-vs-actual decisions for the two HTML child-count checks
+      (pinned in the fixture with comments): no zero-width text node at an
+      element's stop position (a zero-progress iteration ends the
+      repetition; empty text nodes carry no content), and `1 < 2` is ONE
+      text node (text stops only at tag starts, §8.8). div children=2,
+      p children=1.
+- [x] Upgrade the root integration test to run the REAL `magic.cm` fixture
       end to end (expand → check → run expanded → `main` returns 0).
-- [ ] Commit(s): `feat(compiler): …` per subsystem gap fixed, then
-      `test: pin magic.cm megaprograms end to end`.
+- [x] Commit(s): `test: pin magic.cm megaprograms end to end`.
 
 ### Task 6 — Parse-integrated extents  `[ ]`
 - [ ] Public sub-parser helpers in cme-compiler (`parse_expr_text`,
@@ -485,6 +491,21 @@ pub enum CaptureValue {
 
 ## 5. Session log / handoff notes
 
+- Session 2: Tasks 4, 5, 6 completed, committed on top of base `387818a`
+  (Session 1's last commit). Per-commit patches exported for delivery.
+- Task 4 notes: the packrat memo keys include the caller continuation
+  identity (tail-bounded fragments extend to the caller's boundary), with
+  empty continuation links folded away so equal continuations compare
+  equal. LineMap.line_end was fixed to search strictly greater — stored
+  ends are after-terminator positions, and a `>=` search broke last-line
+  handling. `.line`/`.col` accessors report real one-based positions;
+  `col_of` already stores one-based columns for content characters.
+- Task 5 notes: the two HTML child-count checks were the only fails;
+  both decisions (no zero-width text node; `1 < 2` is one text node) are
+  whitepaper-consistent and pinned with comments in `magic.cm`. The real
+  fixture now runs end to end in tests/megaprogram.rs (10 invocations,
+  main returns 0). cme-core joined the root dev-dependencies so the test
+  can see `cme_core::ast::StmtKind` and run the interpreter directly.
 - Session 1: Tasks 1–3 completed, committed on top of base `1af9f94`.
   Per-commit patches exported (see delivery note below).
 - The megaprogram subsystem lives in `crates/cme-compiler/src/mega/`
@@ -506,4 +527,5 @@ pub enum CaptureValue {
   `cme run magic.cm` exits 0 with `fails = 2` remaining, both from the
   HTML child-counting semantics (zero-width text node at the element's
   stop position, and `1 < 2` not splitting into two text nodes) — the
-  expected-vs-actual decisions are the first order of Task 5.
+  expected-vs-actual decisions are the first order of Task 5. (Resolved
+  in Session 2: see the Task 5 notes above.)

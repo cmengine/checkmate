@@ -857,11 +857,18 @@ int checkHtml() {
         <p>1 < 2</p>
     }
     int fails = 0
-    // div children: <span>, the "\n    " text before </div>, and the empty
-    // text node where the stop condition matches at the cursor.
+    // Expected-vs-actual decision (Task 5, first order):
+    // 1. div has TWO children: the <span> element and the whitespace text
+    //    node before </div>. The zero-width text node where the stop
+    //    condition matches at the cursor is NOT a child: an iteration that
+    //    consumes nothing ends the repetition, and an empty text node
+    //    carries no content (HTML5 tokenization never emits one either).
+    // 2. `1 < 2` is ONE text node: text stops only at tag starts
+    //    (`until { "<" [a-zA-Z!/] }`), and the `<` here is followed by a
+    //    space — not a tag start — per §8.8's conformance notes.
     if (htmlLines.length != 2) { fails += 1 }
-    if (htmlLines[0] != "element <div> children=3") { fails += 1 }
-    if (htmlLines[1] != "element <p> children=2") { fails += 1 }
+    if (htmlLines[0] != "element <div> children=2") { fails += 1 }
+    if (htmlLines[1] != "element <p> children=1") { fails += 1 }
     return fails
 }
 

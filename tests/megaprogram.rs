@@ -218,6 +218,52 @@ fn expansion_passthrough_without_magic() {
     assert!(outcome.records.is_empty());
 }
 
+/// The REAL `magic.cm` fixture end to end (Task 5): expand → parse → check →
+/// run on the tree walker → `main` returns 0, meaning every megaprogram
+/// (JSON, TOML, YAML, CSS, HTML, RE, JS, Python, SQL) expanded and verified.
+#[test]
+fn magic_cm_expands_checks_and_runs_clean() {
+    let source = include_str!("../magic.cm");
+    let outcome = cme_compiler::mega::expand::expand_source(source).unwrap();
+
+    // Every macro in the fixture was invoked exactly once, and no
+    // invocation or declaration sites survive (comments do, so a raw
+    // substring test would false-positive; re-scan instead).
+    assert_eq!(outcome.records.len(), 10, "expected 10 invocations");
+    let rescan = cme_compiler::mega::scan::scan_magic(&outcome.expanded).0;
+    assert!(rescan.invocations.is_empty(), "invocations remain");
+    assert!(rescan.magics.is_empty(), "magic declarations remain");
+    assert!(rescan.grammars.is_empty(), "grammar declarations remain");
+
+    // The expanded program is pure Checkmate: clean parse and type-check.
+    let parsed = parse_clean(&outcome.expanded);
+    let type_errors = cme_compiler::check::check(&parsed.statements);
+    assert!(
+        type_errors.is_empty(),
+        "expanded magic.cm failed to check: {:?}",
+        type_errors
+            .iter()
+            .map(|error| error.message().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // And it runs: main() aggregates every check's failure count.
+    let has_main = parsed
+        .statements
+        .iter()
+        .any(|stmt| matches!(&stmt.kind, cme_core::ast::StmtKind::FuncDecl { name, .. } if name == "main"));
+    assert!(has_main, "magic.cm must declare main");
+    let interpreter = cme_interp::Interpreter::new(&parsed.statements);
+    let result = interpreter
+        .invoke("main", &[])
+        .expect("magic.cm must run without interpreter errors");
+    assert_eq!(
+        result,
+        cme_interp::Value::Int(0),
+        "every megaprogram check must pass"
+    );
+}
+
 /// `cme expand magic.cm` writes a labeled sidecar file next to the original
 /// whose parse+check is clean; `cme run magic.cm` runs the expansion.
 #[cfg(feature = "cli")]

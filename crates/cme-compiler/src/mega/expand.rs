@@ -57,6 +57,7 @@ pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> 
     let mut diagnostics = Vec::new();
     let set = compile_grammars(&scan, &mut diagnostics);
     let macros = compile_macros(&scan, &set, &mut diagnostics);
+    reject_left_recursion(&set, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
@@ -256,6 +257,279 @@ fn compile_grammars(scan: &MagicScan, diagnostics: &mut Vec<Diagnostic>) -> Gram
         rules: Vec::new(),
     });
     set
+}
+
+// ---------------------------------------------------------------------------
+// Static left-recursion rejection (§8.7)
+// ---------------------------------------------------------------------------
+
+/// Rejects left recursion — including nullable-prefix cycles: a rule
+/// reaching itself while consuming nothing through `optional`, empty
+/// iterations, `peek`/`not`, `where`, or `label` — with a rewrite hint
+/// (§8.7). The runtime memo cycle cut stays as the backstop; this static
+/// pass catches the common shapes before any region is matched.
+fn reject_left_recursion(set: &GrammarSet, diagnostics: &mut Vec<Diagnostic>) {
+    // Nullability fixpoint: nullable[gi][ri] — can the rule match zero
+    // characters? Monotone (false → true only), so the loop terminates.
+    let mut nullable: Vec<Vec<bool>> = set
+        .grammars
+        .iter()
+        .map(|grammar| vec![false; grammar.rules.len()])
+        .collect();
+    loop {
+        let mut changed = false;
+        for (gi, grammar) in set.grammars.iter().enumerate() {
+            for (ri, rule) in grammar.rules.iter().enumerate() {
+                let value = pattern_nullable(&rule.pattern, &nullable, gi);
+                if value != nullable[gi][ri] {
+                    nullable[gi][ri] = value;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Prefix-edge DFS: rule R can start with rule S at zero consumed input.
+    // A cycle in that graph is left recursion.
+    let mut color: Vec<Vec<u8>> = set
+        .grammars
+        .iter()
+        .map(|grammar| vec![0u8; grammar.rules.len()])
+        .collect();
+    let mut chain: Vec<String> = Vec::new();
+
+    for gi in 0..set.grammars.len() {
+        for ri in 0..set.grammars[gi].rules.len() {
+            if color[gi][ri] == 0 {
+                visit_rule(set, gi, ri, &nullable, &mut color, &mut chain, diagnostics);
+            }
+        }
+    }
+}
+
+/// DFS over prefix edges, reporting the first cycle found with the full
+/// chain and a rewrite hint.
+fn visit_rule(
+    set: &GrammarSet,
+    gi: usize,
+    ri: usize,
+    nullable: &[Vec<bool>],
+    color: &mut [Vec<u8>],
+    chain: &mut Vec<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if color[gi][ri] == 2 {
+        return;
+    }
+    if color[gi][ri] == 1 {
+        // Cycle: render the chain from the first occurrence of this rule.
+        let head = format!(
+            "{}.{}",
+            set.grammars[gi].name, set.grammars[gi].rules[ri].name
+        );
+        let start = chain.iter().position(|step| *step == head).unwrap_or(0);
+        let cycle = chain[start..].join(" -> ");
+        let rule = &set.grammars[gi].rules[ri];
+        let span = rule
+            .pattern
+            .elems
+            .first()
+            .map(|element| element.span)
+            .unwrap_or(cme_core::Span::missing(0));
+        diagnostics.push(Diagnostic::parse(
+            format!(
+                "left recursion: rule `{}` can reach itself without consuming input (cycle: {}); \
+                 rewrite the rule so the recursion consumes input first - match a literal or \
+                 fragment before the recursive reference, or make the recursive alternative \
+                 reachable only after input is consumed (§8.7)",
+                rule.name, cycle
+            ),
+            span,
+        ));
+        color[gi][ri] = 2;
+        return;
+    }
+    color[gi][ri] = 1;
+    chain.push(set.grammars[gi].rules[ri].name.clone());
+    let pattern = set.grammars[gi].rules[ri].pattern.clone();
+    prefix_edges(
+        set,
+        &pattern,
+        gi,
+        ri,
+        nullable,
+        &mut |target_gi, target_ri| {
+            visit_rule(
+                set,
+                target_gi,
+                target_ri,
+                nullable,
+                color,
+                chain,
+                diagnostics,
+            );
+        },
+    );
+    chain.pop();
+    color[gi][ri] = 2;
+}
+
+/// Collects the rule references reachable from `pattern` at zero consumed
+/// input, invoking `emit` for each. The walk continues past an element only
+/// when that element can consume nothing (§8.3.7's statelessness makes this
+/// a pure function of the pattern and the nullability table).
+fn prefix_edges(
+    set: &GrammarSet,
+    pattern: &Pattern,
+    gi: usize,
+    ri: usize,
+    nullable: &[Vec<bool>],
+    emit: &mut dyn FnMut(usize, usize),
+) {
+    for elem in &pattern.elems {
+        if prefix_elem(set, &elem.kind, gi, ri, nullable, emit) {
+            // The element may consume input: anything after it is no longer
+            // a zero-input prefix.
+            return;
+        }
+    }
+}
+
+/// Handles one element in the zero-input prefix walk. Returns true when the
+/// element may consume input (the walk stops), false when the walk continues
+/// to the next element at the same position.
+fn prefix_elem(
+    set: &GrammarSet,
+    kind: &PatKind,
+    gi: usize,
+    ri: usize,
+    nullable: &[Vec<bool>],
+    emit: &mut dyn FnMut(usize, usize),
+) -> bool {
+    match kind {
+        // Zero-width elements: no input, no refs — the walk continues.
+        PatKind::Where { .. } | PatKind::Line | PatKind::Peek { .. } => false,
+        PatKind::Label { body, .. } => {
+            prefix_edges(set, body, gi, ri, nullable, emit);
+            false
+        }
+        // Always-nullable wrappers whose bodies still contribute prefix refs.
+        PatKind::Optional { body, .. } => {
+            prefix_edges(set, body, gi, ri, nullable, emit);
+            false
+        }
+        PatKind::Indent { body, .. } => {
+            // An indent block can match empty (no lines), so the walk
+            // continues; the body's refs are reached through iterations,
+            // which still begin at zero consumed input for the rule.
+            if let Some(body) = body {
+                prefix_edges(set, body, gi, ri, nullable, emit);
+            }
+            false
+        }
+        PatKind::Soft(body) | PatKind::Raw(body) | PatKind::Group { body, .. } => {
+            prefix_edges(set, body, gi, ri, nullable, emit);
+            pattern_nullable(body, nullable, gi)
+        }
+        PatKind::Each { body, .. } => {
+            // The first iteration begins at zero consumed input.
+            prefix_edges(set, body, gi, ri, nullable, emit);
+            pattern_nullable(body, nullable, gi)
+        }
+        PatKind::OneOf { branches, .. } => {
+            let mut any_nullable = false;
+            for (_, branch) in branches {
+                prefix_edges(set, branch, gi, ri, nullable, emit);
+                any_nullable |= pattern_nullable(branch, nullable, gi);
+            }
+            any_nullable
+        }
+        PatKind::RuleRef { path, .. } => match resolve_in_set(set, path, gi) {
+            Some((target_gi, target_ri)) => {
+                let target_nullable = nullable[target_gi][target_ri];
+                emit(target_gi, target_ri);
+                target_nullable
+            }
+            // Unresolvable refs fail at match time; assume consuming.
+            None => true,
+        },
+        PatKind::Recur => {
+            // `recur` re-enters the enclosing rule; the walk continues past
+            // it only when that rule itself is nullable.
+            emit(gi, ri);
+            nullable[gi][ri]
+        }
+        // Everything else consumes at least one character in practice
+        // (`until`/`lineRest` can match empty only at degenerate positions;
+        // the runtime cycle cut covers those).
+        _ => true,
+    }
+}
+
+/// Resolves a rule path for the static walk (bare names resolve inside their
+/// own grammar; qualified names across grammars) — the same discipline as
+/// the matcher's `resolve`.
+fn resolve_in_set(set: &GrammarSet, path: &[String], gi: usize) -> Option<(usize, usize)> {
+    let (grammar_index, rule_name) = match path.len() {
+        1 => (gi, path[0].as_str()),
+        2 => {
+            let index = set
+                .grammars
+                .iter()
+                .position(|grammar| grammar.name == path[0])?;
+            (index, path[1].as_str())
+        }
+        _ => return None,
+    };
+    let rule_index = set.grammars[grammar_index]
+        .rules
+        .iter()
+        .position(|rule| rule.name == rule_name)?;
+    Some((grammar_index, rule_index))
+}
+
+/// Whether a pattern can match zero characters (nullability fixpoint step).
+fn pattern_nullable(pattern: &Pattern, nullable: &[Vec<bool>], gi: usize) -> bool {
+    pattern
+        .elems
+        .iter()
+        .all(|elem| elem_nullable(&elem.kind, nullable, gi))
+}
+
+fn elem_nullable(kind: &PatKind, nullable: &[Vec<bool>], gi: usize) -> bool {
+    match kind {
+        PatKind::Lit { .. }
+        | PatKind::Class { .. }
+        | PatKind::Any { .. }
+        | PatKind::Scan { .. }
+        | PatKind::Eol
+        | PatKind::Eof
+        | PatKind::Fragment { .. }
+        | PatKind::RuleRef { .. }
+        | PatKind::Recur => false,
+        PatKind::LineRest { .. } | PatKind::Until { .. } => true,
+        PatKind::Line | PatKind::Peek { .. } | PatKind::Where { .. } => true,
+        PatKind::Optional { .. } | PatKind::Indent { .. } => true,
+        PatKind::Soft(body) | PatKind::Raw(body) | PatKind::Label { body, .. } => {
+            pattern_nullable(body, nullable, gi)
+        }
+        PatKind::Group { body, .. } => pattern_nullable(body, nullable, gi),
+        PatKind::Each {
+            body, bounds, plus, ..
+        } => {
+            let min = match bounds {
+                Some((min, _)) => *min,
+                None => 0,
+            };
+            min == 0 && !*plus || pattern_nullable(body, nullable, gi)
+        }
+        PatKind::OneOf { branches, .. } => branches
+            .iter()
+            .any(|(_, branch)| pattern_nullable(branch, nullable, gi)),
+    }
 }
 
 /// Parses every magic declaration into a compiled macro.
@@ -525,5 +799,112 @@ magic(def) {
         let outcome = expand_source(source).expect("passthrough");
         assert_eq!(outcome.expanded, source);
         assert!(outcome.records.is_empty());
+    }
+
+    // -- Task 4: static left-recursion rejection (§8.7) ----------------------
+
+    fn expansion_errors(source: &str) -> Vec<String> {
+        expand_source(source)
+            .expect_err("expected expansion diagnostics")
+            .iter()
+            .map(|error| error.message().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn direct_left_recursion_is_rejected_with_a_hint() {
+        let source = r#"
+grammar bad {
+    rule value {
+        oneof { word => $word w, loop => value }
+    }
+}
+
+magic runIt(bad.value as v) {
+    "x"
+}
+
+magic(runIt) {
+    hello
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("left recursion")),
+            "expected a left-recursion diagnostic: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("rewrite the rule")),
+            "expected a rewrite hint: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nullable_prefix_cycle_is_rejected() {
+        // p can start with q at zero input (optional), q can start with p
+        // the same way: a nullable-prefix cycle through two rules.
+        let source = r#"
+grammar bad {
+    rule p {
+        optional { q } "!"
+    }
+
+    rule q {
+        optional { p } "?"
+    }
+}
+
+magic runIt(bad.p as v) {
+    "x"
+}
+
+magic(runIt) {
+    !
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("left recursion") && message.contains("p")),
+            "expected a left-recursion diagnostic naming p: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn legitimate_recursion_still_expands() {
+        // The JSON value grammar is recursive but every recursive path
+        // consumes a bracket first: it must pass the static check.
+        let source = r#"
+grammar json {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule value {
+        oneof {
+            null   => "null"
+            string => $str text
+            array  => ( "[" each sep "," { value } as items "]" )
+        }
+    }
+}
+
+magic jsonValue(json.value as v) {
+    match ($v) {
+        null   => "null"
+        string => $v.text
+        array  => "[]"
+    }
+}
+
+str config = magic(jsonValue) {
+    "db.local"
+}
+"#;
+        let outcome = expand_source(source).expect("legitimate recursion must expand");
+        assert!(outcome.expanded.contains("\"db.local\""));
     }
 }

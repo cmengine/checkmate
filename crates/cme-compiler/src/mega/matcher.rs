@@ -213,11 +213,14 @@ impl LineMap {
         self.line_of.get(pos).copied().unwrap_or(0)
     }
 
-    /// The char index of the terminator ending the line containing `pos`
-    /// (or the region length for the final line).
+    /// The char index just past the terminator ending the line containing
+    /// `pos` (or the region length for the final line). The map stores
+    /// after-terminator positions, so the search is strictly greater — a
+    /// `pos` that exactly equals a stored end (a line start) belongs to the
+    /// NEXT line, whose end comes later.
     fn line_end(&self, pos: usize) -> usize {
         for end in &self.line_ends {
-            if *end >= pos {
+            if *end > pos {
                 return *end;
             }
         }
@@ -539,6 +542,17 @@ impl<'a> Matcher<'a> {
 
     fn note_failure(&mut self, position: usize, message: impl Into<String>) {
         self.failures.push(FailureRecord {
+            position,
+            message: message.into(),
+            labels: self.labels.clone(),
+            rule: self.rule_stack.last().cloned(),
+        });
+    }
+
+    /// Records a committed-block failure (§8.3.5, §8.3.9): backtrackable like
+    /// any element failure, but preferred at report time.
+    fn note_committed(&mut self, position: usize, message: impl Into<String>) {
+        self.committed.push(FailureRecord {
             position,
             message: message.into(),
             labels: self.labels.clone(),
@@ -1486,6 +1500,63 @@ impl<'a> Matcher<'a> {
 
     // -- indent blocks (§8.3.5) ---------------------------------------------
 
+    /// True when the line containing `pos` has an indentation prefix mixing
+    /// tabs and spaces (§8.3.5): a committed-block failure wherever the
+    /// indent protocol measures the line's column.
+    fn indentation_mixed(&self, pos: usize) -> bool {
+        let mut start = pos;
+        while start > 0 && !matches!(self.region.chars.get(start - 1), Some('\n') | Some('\r')) {
+            start -= 1;
+        }
+        let mut saw_space = false;
+        let mut saw_tab = false;
+        let mut cursor = start;
+        loop {
+            match self.region.chars.get(cursor) {
+                Some(' ') => {
+                    saw_space = true;
+                    cursor += 1;
+                }
+                Some('\t') => {
+                    saw_tab = true;
+                    cursor += 1;
+                }
+                _ => break,
+            }
+        }
+        saw_space && saw_tab
+    }
+
+    /// True when the line containing `pos` is transparent (§8.2): only
+    /// skip-set characters, or skip-set characters plus comment forms.
+    fn line_is_transparent(&self, pos: usize, env: &Env) -> bool {
+        let mut start = pos;
+        while start > 0 && !matches!(self.region.chars.get(start - 1), Some('\n') | Some('\r')) {
+            start -= 1;
+        }
+        let end = self.lines.line_end(start);
+        let mut cursor = start;
+        loop {
+            while cursor < end {
+                match self.region.chars.get(cursor) {
+                    // The line's terminator reached: nothing but skip-set
+                    // characters and comment forms came before it.
+                    Some('\n') | Some('\r') => return true,
+                    Some(c) if self.profile(env).skip.matches(*c) => cursor += 1,
+                    _ => break,
+                }
+            }
+            if cursor >= end {
+                return true;
+            }
+            if let Some(len) = comment_len_at(self.region, cursor, self.profile(env)) {
+                cursor += len;
+                continue;
+            }
+            return false;
+        }
+    }
+
     fn indent(
         &mut self,
         body: Option<&Pattern>,
@@ -1498,7 +1569,17 @@ impl<'a> Matcher<'a> {
         let base_column;
         if self.line_has_content(cursor, env) {
             // Mid-line start: B is the current column, matching begins here.
+            // `indent verbatim` is restricted to end-of-line starts (§8.3.5);
+            // a mid-line cursor with content remaining fails outright.
+            if verbatim.is_some() {
+                self.note_failure(cursor, "indent verbatim requires an end-of-line start");
+                return None;
+            }
             base_column = self.lines.col(cursor);
+            if self.indentation_mixed(cursor) {
+                self.note_committed(cursor, "mixed tabs and spaces in indentation");
+                return None;
+            }
         } else {
             // End-of-line start: advance through transparent lines; B is the
             // next content line's column. A cursor whose remaining line is
@@ -1522,6 +1603,10 @@ impl<'a> Matcher<'a> {
                 Some(after) => {
                     cursor = after;
                     base_column = self.lines.col(after);
+                    if self.indentation_mixed(after) {
+                        self.note_committed(after, "mixed tabs and spaces in indentation");
+                        return None;
+                    }
                 }
                 None => return None,
             }
@@ -1553,6 +1638,10 @@ impl<'a> Matcher<'a> {
                 if next >= self.region.chars.len() {
                     break;
                 }
+                if self.indentation_mixed(next) {
+                    self.note_committed(next, "mixed tabs and spaces in indentation");
+                    return None;
+                }
                 if self.lines.col(next) != base_column {
                     cursor = next;
                     break;
@@ -1576,17 +1665,31 @@ impl<'a> Matcher<'a> {
                     if iterations == 0 {
                         return None;
                     }
-                    self.note_failure(cursor, "a line belonging to this block could not be parsed");
+                    // Committed: the line sits at the block's column, so it
+                    // belonged to this block and could not be parsed
+                    // (§8.3.5, backtrackable but preferred at report time).
+                    self.note_committed(
+                        cursor,
+                        format!(
+                            "a line at column {} belonged to this block and could not be parsed",
+                            self.lines.col(cursor)
+                        ),
+                    );
                     return None;
                 }
             }
         }
-        // Termination: a following line at a column > B must belong to an
-        // open block; otherwise it is a committed-block failure.
+        // Termination: a following line deeper than B belongs to no open
+        // block (their bases are all ≤ B): a committed No-Man's-Land failure
+        // (§8.3.5).
         if let Some(next) = self.peek_content(cursor, &inner) {
             let column = self.lines.col(next);
+            if self.indentation_mixed(next) {
+                self.note_committed(next, "mixed tabs and spaces in indentation");
+                return None;
+            }
             if column > base_column && !inner.open_blocks.contains(&column) {
-                self.note_failure(next, "indentation level does not match any open block");
+                self.note_committed(next, "indentation level does not match any open block");
                 return None;
             }
         }
@@ -1604,12 +1707,21 @@ impl<'a> Matcher<'a> {
         start: usize,
         env: &Env,
     ) -> Option<Out> {
+        // Captures verbatim every line with column ≥ B, ending at the first
+        // NON-TRANSPARENT line with column < B (§8.3.5). Blank lines and
+        // comment lines are content inside a verbatim block — they can
+        // neither end it nor be skipped over (YAML block scalars).
         let mut cursor = start;
         let mut end;
         loop {
             if cursor >= self.region.chars.len() {
                 end = self.region.chars.len();
                 break;
+            }
+            if self.line_is_transparent(cursor, env) {
+                // A transparent line never ends the block; include it.
+                cursor = self.lines.next_line_start(cursor);
+                continue;
             }
             let content = self.skip(cursor, env);
             if content >= self.region.chars.len() {
@@ -1625,13 +1737,25 @@ impl<'a> Matcher<'a> {
                 cursor = self.lines.next_line_start(content);
                 continue;
             }
-            end = cursor;
+            // First non-transparent line below the base column: the block
+            // ends at its line start (all trailing transparent lines above
+            // it were already included).
+            end = self.line_start(content);
             break;
         }
         let capture = self.text_capture(start, end, TextKind::Raw);
         let mut out = Out::empty(end);
         out.binds.push((name, capture));
         Some(out)
+    }
+
+    /// The char index of the first character of the line containing `pos`.
+    fn line_start(&self, pos: usize) -> usize {
+        let mut start = pos.min(self.region.chars.len());
+        while start > 0 && !matches!(self.region.chars.get(start - 1), Some('\n') | Some('\r')) {
+            start -= 1;
+        }
+        start
     }
 
     fn peek_content(&self, pos: usize, env: &Env) -> Option<usize> {
@@ -2647,9 +2771,7 @@ mod tests {
         });
 
         let region = "aa\n\n  xyz\n";
-        if let Err(message) = match_rule(&set, "doc", region) {
-            panic!("debug failure: {message}");
-        }
+        assert!(match_rule(&set, "doc", region).is_ok());
         // One row up, the same constraint must fail.
         let source2 = "rule doc { \"aa\" eol scan [a-z] as w where w.line == 2 && w.col == 3 eol }";
         let (name, context, pattern, _) =
@@ -2660,5 +2782,79 @@ mod tests {
             pattern,
         };
         assert!(match_rule(&set, "doc", region).is_err());
+    }
+
+    // -- Task 4: full indent protocol (§8.3.5) --------------------------------
+
+    /// Compiles rules into a LINE-oriented grammar (skip set without `\n`),
+    /// which is the only mode where `indent`/`eol` operate.
+    fn compile_line_rules(rules: &[&str]) -> GrammarSet {
+        let mut compiled = CompiledGrammar {
+            name: "test".to_string(),
+            profile: LexProfile {
+                skip: CharSet::of(&[' ', '\t']),
+                comments: Vec::new(),
+                strings: Vec::new(),
+            },
+            rules: Vec::new(),
+        };
+        for rule in rules {
+            let (name, context, pattern, _) =
+                parse_rule_declaration(rule, 0, Span::new(0, rule.len())).unwrap();
+            compiled.rules.push(CompiledRule {
+                name,
+                context,
+                pattern,
+            });
+        }
+        let mut set = GrammarSet::default();
+        set.grammars.push(compiled);
+        set.grammars.push(CompiledGrammar {
+            name: "\u{0}default".to_string(),
+            profile: crate::mega::profile::default_profile(),
+            rules: Vec::new(),
+        });
+        set
+    }
+
+    #[test]
+    fn mixed_tabs_and_spaces_are_a_committed_failure() {
+        let set =
+            compile_line_rules(&["rule doc { \"h\" indent { each { $word w eol } as lines } }"]);
+        let failure = match_rule(&set, "doc", "h\n \tword\n").expect_err("mixed indentation");
+        assert!(
+            failure.contains("mixed tabs and spaces"),
+            "unexpected failure message: {failure}"
+        );
+        // The same shape with a clean prefix matches.
+        assert!(match_rule(&set, "doc", "h\n    word\n").is_ok());
+    }
+
+    #[test]
+    fn indent_termination_reports_committed_block_failures() {
+        // A line deeper than the block's base, matching no open block: the
+        // committed diagnosis must outrank the ordinary furthest failure.
+        let set =
+            compile_line_rules(&["rule doc { \"h\" indent { each { $word w eol } as lines } }"]);
+        let failure =
+            match_rule(&set, "doc", "h\n  word\n    deeper\n").expect_err("no-man's land");
+        assert!(
+            failure.contains("indentation level does not match any open block"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn verbatim_blocks_include_blank_lines_and_need_eol_starts() {
+        let set = compile_line_rules(&["rule doc { \"h\" indent verbatim as body \"T\" }"]);
+        // Blank lines are content: the block survives them. The single bind
+        // IS the entry capture (match_entry §2.2).
+        let capture = match_rule(&set, "doc", "h\n  a\n\n  b\nT").unwrap();
+        assert_eq!(capture.matched(), "a\n\n  b");
+
+        // A mid-line start with content remaining fails: verbatim is
+        // restricted to end-of-line starts (§8.3.5).
+        let set2 = compile_line_rules(&["rule doc { \"h\" \"rest\" indent verbatim as body }"]);
+        assert!(match_rule(&set2, "doc", "h rest x\n  a\nT").is_err());
     }
 }

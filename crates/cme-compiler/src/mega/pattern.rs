@@ -39,6 +39,7 @@ pub fn parse_pattern(text: &str, span: Span) -> Result<Pattern, Diagnostic> {
             parser.rest().chars().next().unwrap()
         )));
     }
+    reject_indent_after_eol(&pattern)?;
     Ok(pattern)
 }
 
@@ -87,7 +88,53 @@ pub fn parse_rule_declaration(
         return Err(parser.error("expected `}` to close the rule body"));
     }
     parser.cursor += 1;
+    reject_indent_after_eol(&pattern)?;
     Ok((name, context, pattern, parser.cursor))
+}
+
+/// Static check (§8.3.5): `indent` may not directly follow `eol` in a
+/// sequence — `indent` performs its own line advancement, so the pair would
+/// double-advance. Checked over every nested sequence of the pattern.
+fn reject_indent_after_eol(pattern: &Pattern) -> Result<(), Diagnostic> {
+    for window in pattern.elems.windows(2) {
+        if matches!(window[0].kind, PatKind::Eol)
+            && matches!(window[1].kind, PatKind::Indent { .. })
+        {
+            return Err(Diagnostic::parse(
+                "`indent` may not directly follow `eol`: indent performs its own line advancement (§8.3.5)",
+                window[1].span,
+            ));
+        }
+    }
+    for elem in &pattern.elems {
+        match &elem.kind {
+            PatKind::Soft(body)
+            | PatKind::Raw(body)
+            | PatKind::Label { body, .. }
+            | PatKind::Group { body, .. } => reject_indent_after_eol(body)?,
+            PatKind::Optional { body, .. } => reject_indent_after_eol(body)?,
+            PatKind::Each { sep, body, .. } => {
+                if let Some(sep) = sep {
+                    reject_indent_after_eol(sep)?;
+                }
+                reject_indent_after_eol(body)?;
+            }
+            PatKind::OneOf { branches, .. } => {
+                for (_, branch) in branches {
+                    reject_indent_after_eol(branch)?;
+                }
+            }
+            PatKind::Peek { body, .. } => reject_indent_after_eol(body)?,
+            PatKind::Until { stop, .. } => reject_indent_after_eol(stop)?,
+            PatKind::Indent {
+                body: Some(body), ..
+            } => {
+                reject_indent_after_eol(body)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A parsed fragment: kind, case-insensitive flag, validator path, bind.
@@ -962,5 +1009,34 @@ mod tests {
         assert_eq!(name, "pick");
         assert_eq!(context.len(), 1);
         assert_eq!(context[0].name, "parent");
+    }
+
+    #[test]
+    fn indent_directly_after_eol_is_rejected() {
+        // §8.3.5's static check: indent performs its own line advancement,
+        // so the pair would double-advance.
+        let error = parse_pattern("eol indent { \"x\" }", Span::new(0, 20))
+            .expect_err("indent after eol must be rejected");
+        assert!(
+            error
+                .message()
+                .contains("`indent` may not directly follow `eol`"),
+            "unexpected message: {}",
+            error.message()
+        );
+
+        // Nested sequences are checked too.
+        let error = parse_pattern("( eol indent { \"x\" } )", Span::new(0, 24))
+            .expect_err("nested indent after eol must be rejected");
+        assert!(
+            error
+                .message()
+                .contains("`indent` may not directly follow `eol`"),
+            "unexpected message: {}",
+            error.message()
+        );
+
+        // An element between them makes it legal.
+        assert!(parse_pattern("eol \"x\" indent { \"y\" }", Span::new(0, 24)).is_ok());
     }
 }

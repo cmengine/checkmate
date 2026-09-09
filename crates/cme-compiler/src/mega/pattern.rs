@@ -15,8 +15,9 @@ use cme_core::magic::{
 };
 
 /// Words that can never be implicit capture names because they head pattern
-/// constructs or bind syntax.
-const RESERVED: &[&str] = &[
+/// constructs or bind syntax. Also the word set of the `notReserved`
+/// fragment validator (§8.3.3).
+pub(crate) const RESERVED: &[&str] = &[
     "each", "sep", "trailing", "optional", "oneof", "peek", "not", "until", "lineRest", "eol",
     "line", "eof", "soft", "indent", "raw", "where", "label", "as", "with", "context", "recur",
     "verbatim", "in",

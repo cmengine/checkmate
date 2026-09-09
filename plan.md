@@ -393,9 +393,12 @@ pub enum CaptureValue {
       diagnostics; `where` failures recorded like element failures.
 - [x] `indent` full §8.3.5 protocol incl. the four termination cases and
       mixed-tabs check; `indent`-after-`eol` static rejection.
-- [ ] Fragment validators (`$tag<rule>` / `$ident<fn>` where fn = pure
-      CtxExpr-callable) — parser + matcher.
-- [ ] `$tt` (profile-string-aware balanced token tree).
+- [x] Fragment validators (`$tag<rule>` / `$ident<fn>` where fn = pure
+      CtxExpr-callable) — parser + matcher. Rule paths match as a whole;
+      the §8.3.3 built-in `notReserved` is implemented directly (user
+      pure functions arrive with §8.5 / Task 7); unknown names are clear
+      diagnostics.
+- [x] `$tt` (profile-string-aware balanced token tree).
 - [ ] Tests per feature in cme-compiler.
 
 ### Task 5 — All `magic.cm` megaprograms green  `[ ]`

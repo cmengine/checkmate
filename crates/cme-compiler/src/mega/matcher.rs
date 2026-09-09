@@ -1853,20 +1853,36 @@ impl<'a> Matcher<'a> {
                 return Some(out);
             }
             FragKind::Tt => {
-                // Minimal Task-3 form: one whitespace-delimited token. The
-                // profile-string-aware balanced form lands in Task 6.
+                // A single token or balanced delimiter tree, honoring the
+                // grammar's profile string forms (§8.3.3): at a string form
+                // the whole string is the token; at a bracket opener the
+                // balanced tree is; otherwise a maximal run of
+                // non-whitespace, non-delimiter characters.
                 let start = self.skip(pos, env);
-                let mut end = start;
-                while matches!(
-                    self.region.chars.get(end),
-                    Some(c) if !c.is_whitespace() && !matches!(c, '{' | '}' | ',' | ';')
-                ) {
-                    end += 1;
-                }
-                if end == start {
-                    self.note_failure(start, "expected a token");
-                    return None;
-                }
+                let end = if self.profile_string_len_at(start, env).is_some()
+                    || self.balanced_tree_len_at(start, env).is_some()
+                {
+                    start
+                        + self
+                            .profile_string_len_at(start, env)
+                            .or_else(|| self.balanced_tree_len_at(start, env))
+                            .unwrap()
+                } else {
+                    let mut end = start;
+                    while matches!(
+                        self.region.chars.get(end),
+                        Some(c)
+                            if !c.is_whitespace()
+                                && !matches!(c, '(' | ')' | '[' | ']' | '{' | '}')
+                    ) {
+                        end += 1;
+                    }
+                    if end == start {
+                        self.note_failure(start, "expected a token");
+                        return None;
+                    }
+                    end
+                };
                 (start, end, false)
             }
             FragKind::Text | FragKind::Template => {
@@ -1882,9 +1898,9 @@ impl<'a> Matcher<'a> {
         };
 
         if let Some(path) = validator
-            && !self.validator_matches(path, start, end, env)
+            && let Err(message) = self.apply_validator(path, start, end, env)
         {
-            self.note_failure(start, "fragment validator rejected the match");
+            self.note_failure(start, message);
             return None;
         }
 
@@ -1929,6 +1945,73 @@ impl<'a> Matcher<'a> {
             None => out.primary = Some(capture),
         }
         Some(out)
+    }
+
+    /// The length of the profile string form starting at `pos`, if any
+    /// (backslash escapes honored; single-line forms must close before the
+    /// line terminator).
+    fn profile_string_len_at(&self, pos: usize, env: &Env) -> Option<usize> {
+        let first = *self.region.chars.get(pos)?;
+        let form = self
+            .profile(env)
+            .strings
+            .iter()
+            .find(|form| form.quote == first)?;
+        let mut cursor = pos + 1;
+        while let Some(&ch) = self.region.chars.get(cursor) {
+            match ch {
+                '\\' => {
+                    self.region.chars.get(cursor + 1)?;
+                    cursor += 2;
+                }
+                '\n' | '\r' if !form.multiline => return None,
+                _ if ch == form.quote => return Some(cursor + 1 - pos),
+                _ => cursor += 1,
+            }
+        }
+        if form.multiline {
+            Some(self.region.chars.len() - pos)
+        } else {
+            None
+        }
+    }
+
+    /// The length of the balanced delimiter tree starting at `pos`, if any
+    /// (`(…)`, `[…]`, `{…}`), honoring profile strings and comment forms
+    /// inside so their delimiters never count.
+    fn balanced_tree_len_at(&self, pos: usize, env: &Env) -> Option<usize> {
+        let open = *self.region.chars.get(pos)?;
+        let close = match open {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            _ => return None,
+        };
+        let profile = self.profile(env);
+        let mut depth = 0usize;
+        let mut cursor = pos;
+        while let Some(&ch) = self.region.chars.get(cursor) {
+            if let Some(len) = self.profile_string_len_at(cursor, env) {
+                cursor += len;
+                continue;
+            }
+            if let Some(len) = comment_len_at(self.region, cursor, profile) {
+                cursor += len;
+                continue;
+            }
+            if ch == open {
+                depth += 1;
+            } else if ch == close {
+                depth -= 1;
+                cursor += 1;
+                if depth == 0 {
+                    return Some(cursor - pos);
+                }
+                continue;
+            }
+            cursor += 1;
+        }
+        None
     }
 
     fn ident_at(&mut self, start: usize) -> Option<usize> {
@@ -2106,14 +2189,51 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    fn validator_matches(&mut self, path: &[String], start: usize, end: usize, env: &Env) -> bool {
-        let Some((grammar_index, rule_index)) = self.resolve(path, env) else {
-            return false;
+    /// Applies a fragment validator (§8.3.3): the matched text must match
+    /// the referenced grammar rule as a whole, or satisfy a pure built-in
+    /// function. User-defined compile-time functions arrive with §8.5
+    /// (Task 7); unknown names are clear diagnostics, never silent no-ops.
+    fn apply_validator(
+        &mut self,
+        path: &[String],
+        start: usize,
+        end: usize,
+        env: &Env,
+    ) -> Result<(), String> {
+        // `self.x` refers to the current grammar's namespace.
+        let effective: Vec<String> = if path.first().map(String::as_str) == Some("self") {
+            path[1..].to_vec()
+        } else {
+            path.to_vec()
         };
-        let rule = self.set.grammars[grammar_index].rules[rule_index].clone();
         let text = self.text(start, end);
-        let sub_region = MatchRegion::new(self.region.source, self.absolute(start), &text);
-        match_entry(self.set, grammar_index, &rule.pattern, &sub_region).is_ok()
+        if let Some((grammar_index, rule_index)) = self.resolve(&effective, env) {
+            let rule = self.set.grammars[grammar_index].rules[rule_index].clone();
+            let sub_region = MatchRegion::new(self.region.source, self.absolute(start), &text);
+            return match match_entry(self.set, grammar_index, &rule.pattern, &sub_region) {
+                Ok(_) => Ok(()),
+                Err(_) => Err(format!(
+                    "validator `{}` rejected `{}` (the text does not match the rule)",
+                    path.join("."),
+                    text
+                )),
+            };
+        }
+        // The §8.3.3 built-in: the matched text must not be a reserved word
+        // of the pattern language.
+        if effective.len() == 1 && effective[0] == "notReserved" {
+            return if crate::mega::pattern::RESERVED.contains(&text.as_str()) {
+                Err(format!(
+                    "validator `notReserved` rejected `{text}` (a reserved word)"
+                ))
+            } else {
+                Ok(())
+            };
+        }
+        Err(format!(
+            "unknown fragment validator `{}` (expected a rule path or a pure compile-time function)",
+            path.join(".")
+        ))
     }
 
     // -- captures and values ------------------------------------------------
@@ -2856,5 +2976,65 @@ mod tests {
         // restricted to end-of-line starts (§8.3.5).
         let set2 = compile_line_rules(&["rule doc { \"h\" \"rest\" indent verbatim as body }"]);
         assert!(match_rule(&set2, "doc", "h rest x\n  a\nT").is_err());
+    }
+
+    // -- Task 4: fragment validators and $tt (§8.3.3) -------------------------
+
+    #[test]
+    fn rule_validators_accept_only_matching_text() {
+        let set = compile_rules(&[
+            "rule doc { $tag<ok> t }",
+            "rule ok { oneof { a => \"a\", b => \"b\" } }",
+        ]);
+        assert!(match_rule(&set, "doc", "a").is_ok());
+        assert!(match_rule(&set, "doc", "b").is_ok());
+        let failure = match_rule(&set, "doc", "c").expect_err("c is not an ok name");
+        assert!(
+            failure.contains("validator") && failure.contains("rejected"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn not_reserved_validator_rejects_pattern_keywords() {
+        let set = compile_rules(&["rule doc { $word<notReserved> w }"]);
+        assert!(match_rule(&set, "doc", "foo").is_ok());
+        let failure = match_rule(&set, "doc", "each").expect_err("each is reserved");
+        assert!(
+            failure.contains("reserved word"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn unknown_validators_are_clear_diagnostics() {
+        let set = compile_rules(&["rule doc { $word<nope> w }"]);
+        let failure = match_rule(&set, "doc", "foo").expect_err("unknown validator");
+        assert!(
+            failure.contains("unknown fragment validator"),
+            "unexpected failure message: {failure}"
+        );
+    }
+
+    #[test]
+    fn tt_matches_plain_tokens_balanced_trees_and_strings() {
+        let set = compile_rules(&["rule doc { $tt t eof }"]);
+        // Plain token.
+        assert_eq!(match_rule(&set, "doc", "hello").unwrap().matched(), "hello");
+        // A balanced delimiter tree is one token; the string inside never
+        // breaks the balance.
+        assert_eq!(
+            match_rule(&set, "doc", "(a, \"})\" )").unwrap().matched(),
+            "(a, \"})\" )"
+        );
+        // A profile string form is one token even when it holds delimiters.
+        assert_eq!(
+            match_rule(&set, "doc", "\"{ not a tree }\"")
+                .unwrap()
+                .matched(),
+            "\"{ not a tree }\""
+        );
+        // An unbalanced tree fails.
+        assert!(match_rule(&set, "doc", "(oops").is_err());
     }
 }

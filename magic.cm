@@ -1,0 +1,919 @@
+// ============================================================================
+// magic.cm — the megaprogramming (WHITEPAPER §8) TDD fixture
+// ============================================================================
+//
+// This file is the acceptance test for the megaprogramming subsystem. It is
+// a COMPLETE Checkmate program after expansion:
+//
+//   cme expand magic.cm      →  writes magic_expanded.cm (pure Checkmate)
+//   cme check magic.cm       →  expands, then checks the expanded program
+//   cme run magic.cm         →  expands, then runs; main() returns 0 when
+//                               every megaprogram expanded and verified
+//
+// Layout:
+//   Part 1 — `grammar` declarations ("parsers"): json, toml, yaml, css, html,
+//            re, js, py, sql — the §8.8/§8.4 whitepaper shapes (see errata).
+//   Part 2 — `magic` declarations (the macros): one entry point per grammar.
+//   Part 3 — the consumer program: ordinary Checkmate code whose declarations
+//            and expressions call the macros with `magic(name) { region }`.
+//
+// The regions are real foreign-language source (JSON, TOML, YAML, CSS, HTML,
+// ECMAScript regex, JavaScript, Python, SQL). The templates deliberately
+// avoid §8.5 `@`-functions for now (they arrive in a later task); until then
+// the templates build their outputs from capture structure, `.matched` raw
+// text, string interpolation, `[each]` repetition, `[when]` selection and
+// template `match` over `oneof` tags.
+//
+// Template output shapes (pinned by tests/megaprogram.rs):
+//   jsonValue   → map<str, str>   one entry per top-level JSON object field
+//   tomlValue   → str[]           "key = value" / "[table]" per document item
+//   yamlValue   → str[]           "key = value" per top-level mapping field
+//   cssSheet    → str[]           "selector :: prop = value" per declaration
+//   htmlFragment→ str[]           "element <tag>" / "text …" per top-level child
+//   reCompile   → str             "re( <pattern text> )"
+//   jsRun       → str[]           "decl <name>" / "expr" per statement
+//   def         → a real Checkmate function (Python-flavored syntax in,
+//                 Checkmate function declaration out)
+//   sqlQuery    → SqlQuery        struct value built from the SELECT pieces
+//
+// Deviations from the whitepaper text (each forced by the whitepaper's own
+// worked examples — see plan.md §1.4):
+//   * json.number wraps the digit run in `optional { … }` (bare `scan` needs
+//     ≥ 1 char, so the single-digit `3` would fail the verbatim rule).
+//   * py.def's body is `each { stmt }` — the verbatim `recur` would re-enter
+//     `def` itself, contradicting §8.4's clamp example.
+//   * keyval/value binds use the `as` form where the template needs a name.
+//   * The HTML void/raw-tag `where @isVoid(name)` checks are spelled as
+//     `||` chains until §8.5 compile-time functions exist.
+// ============================================================================
+
+// ============================================================================
+// PART 1 — GRAMMARS
+// ============================================================================
+
+// ---------------------------------------------------------------- json (§8.8)
+grammar json {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule value {
+        oneof {
+            null   => "null"
+            bool   => oneof { t => "true", f => "false" }
+            number => number
+            string => $str text
+            array  => ( "[" each sep "," { value } as items "]" )
+            object => ( "{" each sep "," { member } as fields "}" )
+        }
+    }
+
+    rule member {
+        $str key ":" value as val
+    }
+
+    rule number {
+        ( optional { "-" }
+          oneof { zero => "0", pos => ( [1-9] as first optional { scan [0-9] as rest } ) }
+          optional { "." scan [0-9] as frac } ) as num
+    }
+}
+
+// ---------------------------------------------------------------- toml (§8.8)
+grammar toml {
+    skip    [ ' ', '\t' ]                 // line-oriented: tables are lines
+    comment ( "#" )
+
+    rule document {
+        each { oneof { table => tableHeader, kv => keyval } } as items
+    }
+
+    rule tableHeader {
+        oneof {
+            arrayTable => ( "[[" dottedKey path "]]" eol )
+            table      => ( "[" dottedKey path "]" eol )
+        }
+    }
+
+    rule keyval {
+        dottedKey key "=" value as val eol        // trailing comments: eol's job
+    }
+
+    rule dottedKey {
+        each sep "." {
+            oneof { bare => scan [A-Za-z0-9_-] as part, quoted => $str part }
+        } as parts
+    }
+
+    rule value {
+        oneof {
+            string   => string
+            integer  => integer
+            float    => floatV
+            bool     => oneof { t => "true", f => "false" }
+            array    => ( "[" soft { each sep "," trailing { value } as items "]" } )
+            inline   => ( "{" soft { each sep "," { dottedKey k "=" value as v } as fields "}" } )
+        }
+    }
+
+    rule string {
+        oneof {
+            basic      => $str text
+            literal    => ( "'" until "'" as text "'" )
+            multilineB => ( "\"\"\"" until "\"\"\"" as text "\"\"\"" )
+            multilineL => ( "'''" until "'''" as text "'''" )
+        }
+    }
+
+    rule integer {
+        ( optional { "-" } scan [0-9] as digits ) as num
+    }
+
+    rule floatV {
+        ( optional { "-" } scan [0-9] as intPart "." scan [0-9] as fracPart ) as num
+    }
+}
+
+// ---------------------------------------------------------------- yaml (§8.8)
+grammar yaml {
+    skip    [ ' ' ]
+    comment ( "#" )
+
+    rule document {
+        optional { "---" }
+        oneof { blockDoc => blockNode as root, flowDoc => flowNode as root }
+        optional { "..." }
+    }
+
+    rule node {
+        oneof {
+            anchor => ( "&" $word name node as value )
+            alias  => ( "*" $word name )
+            flow   => ( peek { line } flowNode )
+            block  => ( peek { not { line } } blockNode )
+        }
+    }
+
+    rule blockNode {
+        oneof {
+            seq => indent { each+ { "-" node } as items }
+            map => indent { each+ { field } as fields }
+        }
+    }
+
+    rule field {
+        key key ":"
+        oneof {
+            blockScalar => (
+                oneof { literal => "|", folded => ">" }
+                optional { $tag header }
+                indent verbatim as text
+            )
+            sameLine => ( peek { line } node as value )
+            block    => node as value
+            empty    => peek { not { line } }
+        }
+    }
+
+    rule flowNode {
+        oneof {
+            seq    => ( "[" soft { each sep "," { node } as items "]" } )
+            map    => ( "{" soft { each sep "," { key k ":" node as v } as fields "}" } )
+            scalar => flowScalar
+        }
+    }
+
+    // Inside flow collections a plain scalar stops at `,`, `]`, `}` —
+    // the block-scalar `lineRest` form would swallow the rest of the line.
+    rule flowScalar {
+        oneof {
+            quoted => $str text
+            plain  => until { oneof { comma => ",", seqEnd => "]", mapEnd => "}" } } as text
+        }
+    }
+
+    rule key {
+        oneof { plain => scan [A-Za-z0-9_.-] as k, quoted => $str k }
+    }
+
+    rule scalar {
+        oneof {
+            quoted => $str text
+            plain  => lineRest as text
+        }
+    }
+}
+
+// ------------------------------------------------------------- css (§8.2/§8.8)
+grammar css {
+    skip    [ ' ', '\t', '\r', '\n' ]
+    comment ( "/*" until "*/" )
+    string  ( '"' )
+    string  ( "'" )
+
+    rule sheet {
+        each { oneof { atRule => atRule, styleRule => styleRule } } as rules
+    }
+
+    rule atRule {
+        "@" $word name
+        optional { ( until "{" as preamble ) }
+        "{"
+        each { oneof { atRule => atRule, styleRule => styleRule } } as rules
+        "}"
+    }
+
+    rule styleRule(context { selector parent = none }) {
+        selector sel "{"
+        each { declaration } as decls
+        each { styleRule with context { parent: sel } } as nested
+        "}"
+    }
+
+    // Selectors run to the end of the line (fixture CSS is line-disciplined;
+    // the skipper re-joins the `{` across the newline).
+    rule selector {
+        scan [^{}\n] as text
+    }
+
+    rule declaration {
+        $word name ":"
+        ( until { oneof { semi => ";", blockEnd => "}", lineEnd => "\n" } } as rest )
+        optional { ";" }
+    }
+}
+
+// ------------------------------------------------------------- html (§8.8)
+grammar html {
+    skip    [ ' ', '\t', '\r', '\n' ]
+    comment ( "<!--" until "-->" )
+    string  ( '"' )
+    string  ( "'" )
+
+    rule document {
+        optional { "<!" i"doctype" $tag name ">" }
+        each { content } as children
+    }
+
+    rule content {
+        oneof {
+            element => element
+            text    => until { "<" [a-zA-Z!/] } as text
+        }
+    }
+
+    rule element {
+        "<" i$tag name
+        each { attribute } as attrs
+        oneof {
+            scriptEl => (
+                where name == "script" ">"
+                until { "</" i$tag close where close == name } as body
+                "</" i$tag close ">"
+            )
+            styleEl => (
+                where name == "style" ">"
+                until { "</" i$tag close where close == name } as body
+                "</" i$tag close ">"
+            )
+            selfClose => (
+                where name == "area" || name == "base" || name == "br"
+                || name == "col" || name == "embed" || name == "hr"
+                || name == "img" || name == "input" || name == "link"
+                || name == "meta" || name == "param" || name == "source"
+                || name == "track" || name == "wbr"
+                "/>"
+            )
+            voidEl => (
+                where name == "area" || name == "base" || name == "br"
+                || name == "col" || name == "embed" || name == "hr"
+                || name == "img" || name == "input" || name == "link"
+                || name == "meta" || name == "param" || name == "source"
+                || name == "track" || name == "wbr"
+                ">"
+            )
+            rawEl => (
+                where name == "textarea" ">"
+                until { "</" i$tag close where close == name } as body
+                "</" i$tag close ">"
+            )
+            normal => (
+                ">"
+                each { content } as children
+                "</" i$tag close
+                where close == name
+                ">"
+            )
+        }
+    }
+
+    rule attribute {
+        i$tag name
+        optional {
+            "="
+            oneof {
+                quoted => $str value
+                single => ( "'" until "'" as value "'" )
+                bare   => scan [^ \t\r\n>] as value
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------- re (§8.8) + literal
+grammar re {
+    skip [ ]
+
+    rule pattern {
+        each sep "|" { alternative } as alts
+    }
+
+    rule alternative {
+        each { quantified } as terms
+    }
+
+    rule quantified {
+        atom
+        optional {
+            oneof {
+                star  => ( "*"  quantSuffix )
+                plus  => ( "+"  quantSuffix )
+                opt   => ( "?"  quantSuffix )
+                bound => ( "{" $int min optional { "," optional { $int max } } "}" quantSuffix )
+            }
+        }
+    }
+
+    rule quantSuffix {
+        optional { oneof { lazy => "?", possessive => "+" } }
+    }
+
+    rule atom {
+        oneof {
+            anyChar  => "."
+            anchor   => oneof { start => "^", end => "$" }
+            class    => class
+            escape   => escape
+            group    => group
+            literal  => [^.^$*+?(){}|/\[\]] as ch       // exactly one character
+        }
+    }
+
+    rule class {
+        "[" optional { "^" }
+        each { classItem } as items
+        "]"
+    }
+
+    rule classItem {
+        oneof {
+            posix   => ( "[:" $tag name ":]" )
+            escape  => escape
+            range   => ( any lo "-" peek { not { "]" } } any hi )
+            single  => ( peek { not { "]" } } any as ch )
+        }
+    }
+
+    rule escape {
+        "\\"
+        oneof {
+            classEscape  => scan [dDwWsS] as kind
+            anchorEscape => oneof { b => "b", B => "B", A => "A", z => "z", Z => "Z", G => "G" }
+            ctrl         => oneof { n => "n", r => "r", t => "t", f => "f", zero => "0" }
+            backref      => oneof { num => scan [1-9] as index,
+                                    named => ( "k" "<" $word name ">" ) }
+            unicodeClass => ( "p" "{" $tag category "}" )
+            char         => [^A-Za-z0-9] as ch           // escaped punctuation only
+        }
+    }
+
+    rule group {
+        "("
+        oneof {
+            lookBehindNeg => ( "?<!" pattern )
+            lookBehind    => ( "?<=" pattern )
+            named         => ( "?<" $word name ">" pattern )
+            lookAheadNeg  => ( "?!"  pattern )
+            lookAhead     => ( "?="  pattern )
+            atomic        => ( "?>"  pattern )
+            inlineFlags   => ( "?" optional { scan [-imsxu] as flags } ":" pattern )
+            nonCapturing  => ( "?:"  pattern )
+            capturing     => pattern
+        }
+        ")"
+    }
+
+    // js delegates here for regex literals (§8.3.8 grammar-local termination).
+    rule literal {
+        "/"
+        pattern
+        "/"
+        optional { scan [a-z] as flags }
+    }
+}
+
+// ---------------------------------------------------------------- js (§8.8)
+grammar js {
+    skip    [ ' ', '\t' ]                  // line-oriented: ASI is defined over lines
+    comment ( "//" )                       // to end of line
+    comment ( "/*" until "*/" )
+    string  ( '"' )
+    string  ( "'" )
+    string  ( '`' multiline island ( "${" "}" ) )
+
+    rule program {
+        each { statement } as stmts
+    }
+
+    rule statement {
+        oneof {
+            block  => ( "{" optional { eol } each { statement } as body "}" optional { eol } )
+            if     => ( "if" soft { "(" expression cond ")" } optional { eol } statement then
+                        optional { "else" optional { eol } statement otherwise } )
+            while  => ( "while" soft { "(" expression cond ")" } optional { eol } statement body )
+            ret    => ( "return" optional { expression value } semi )
+            decl   => ( oneof { let => "let", const => "const" } $word name
+                        optional { soft { "=" expression init } } semi )
+            expr   => ( expression value semi )
+        }
+    }
+
+    // ASI: a statement ends at ";" (consuming any following line ends) or at
+    // end of line. `ret` is the restricted production: its value is NOT
+    // wrapped in soft, so `return` followed by a line end returns undefined
+    // and the next line starts a new statement — JavaScript's actual rule.
+    rule semi {
+        oneof { explicit => ( ";" optional { eol } ), inserted => eol }
+    }
+
+    rule expression { logicOr }
+
+    rule logicOr {
+        logicAnd each { soft { ( "||" logicAnd ) } }
+    }
+
+    rule logicAnd {
+        equality each { soft { ( "&&" equality ) } }
+    }
+
+    rule equality {
+        additive each { soft { oneof { eq => "==", ne => "!=" } additive } }
+    }
+
+    rule additive {
+        postfix each { soft { oneof { plus => "+", minus => "-" } postfix } }
+    }
+
+    rule unary {
+        oneof {
+            neg     => ( "-" soft { unary } )
+            not     => ( "!" soft { unary } )
+            postfix => postfix
+        }
+    }
+
+    // no left recursion: member/call chains are a postfix repetition
+    rule postfix {
+        primary first
+        each {
+            soft {
+                oneof {
+                    call   => ( "(" soft { each sep "," { expression arg } as args ")" } )
+                    member => ( "." $word field )
+                    index  => ( "[" soft { expression idx } "]" )
+                }
+            }
+        } as ops
+    }
+
+    rule primary {
+        oneof {
+            number   => oneof { frac => $float literal, whole => $int literal }
+            string   => $str literal
+            ident    => $word name
+            regex    => re.literal            // grammar reuse
+            paren    => ( "(" soft { expression inner ")" } )
+        }
+    }
+}
+
+// ---------------------------------------------------------------- py (§8.4)
+grammar py {
+    skip    [ ' ' ]
+    comment ( "#" )
+
+    rule def {
+        "def" $word fname
+        "(" soft { each sep "," { $word param optional { ":" $type ptype } } as params ")" }
+        "->" $type ret ":"
+        indent { each { stmt } as body }      // §8.4 errata: the verbatim `recur`
+                                              // would re-enter `def` itself
+    }
+
+    rule stmt {
+        oneof {
+            ifStmt => (
+                "if" $expr cond ":"
+                indent { each { recur } as body }
+            )
+            return => ( "return" optional { $expr value } eol )
+            call   => ( $word callee "(" soft { each sep "," { $expr arg } as args ")" } eol )
+        }
+    }
+}
+
+// ---------------------------------------------------------------- sql (authored
+// for this fixture; same pattern language, flow-oriented like JSON/CSS)
+grammar sql {
+    skip    [ ' ', '\t', '\r', '\n' ]
+    comment ( "--" )
+
+    rule select {
+        i"select"
+        each sep "," { selectItem } as items
+        i"from" $word table
+        optional { i"where" orExpr as filter }
+        optional { i"order" i"by" each sep "," { orderItem } as ordering }
+        optional { i"limit" $int limit }
+    }
+
+    rule selectItem {
+        oneof {
+            star   => ( $word qualifier "." "*" )
+            column => ( $word name optional { i"as" $word alias } )
+        }
+    }
+
+    rule orderItem {
+        $word col optional { oneof { asc => i"asc", desc => i"desc" } }
+    }
+
+    rule orExpr {
+        andExpr
+        each { ( i"or" andExpr ) }
+    }
+
+    rule andExpr {
+        cmpExpr
+        each { ( i"and" cmpExpr ) }
+    }
+
+    rule cmpExpr {
+        $word lhs
+        oneof { eq => "=", ne => "!=", lt => "<", le => "<=", gt => ">", ge => ">=" } as op
+        sqlValue rhs
+    }
+
+    rule sqlValue {
+        oneof {
+            wordv  => $word
+            intv   => $int
+            floatv => $float
+            strv   => $str
+            squoted => ( "'" until "'" as text "'" )
+        }
+    }
+}
+
+// ============================================================================
+// PART 2 — MAGIC DECLARATIONS (the macros)
+// ============================================================================
+// Each `magic name(pattern) { template }` binds an entry pattern to an
+// expansion template. Invocations are `magic(name) { region }`. Until §8.5
+// compile-time functions land, templates avoid `@` and build everything from
+// captures, `.matched`, interpolation, `[each]`, `[when]` and template match.
+//
+// Join conventions (plan.md §1.4.7): `[each]` elements are comma-joined
+// inside template `(`/`[` (lists and array literals), newline-joined
+// otherwise (statements, map entries).
+
+// JSON → map<str, str>: one entry per top-level object field; leaves are
+// stringified, non-object leaves map to fixed markers.
+magic jsonValue(json.value as v) {
+    match ($v) {
+        null   => "null"
+        bool   => $"{$v.matched}"
+        number => $"{$v.matched}"
+        string => $v.text
+        array  => "[]"
+        object => (
+            {
+                [each in $v.fields {
+                    $item.key: match ($item.val) {
+                        null   => "null"
+                        bool   => $"{$item.val.matched}"
+                        number => $"{$item.val.matched}"
+                        string => $item.val.text
+                        array  => "[]"
+                        object => "{}"
+                    }
+                }]
+            }
+        )
+    }
+}
+
+// TOML → str[]: one line per document item ("key = value" or "[table]").
+magic tomlValue(toml.document as doc) {
+    [
+        [each in $doc.items {
+            match ($item) {
+                table => $"[{$item.path.matched}]"
+                kv    => $"{$item.key.matched} = {$item.val.matched}"
+            }
+        }]
+    ]
+}
+
+// YAML → str[]: one line per top-level mapping field; block values keep
+// their whole (escaped) text.
+magic yamlValue(yaml.document as doc) {
+    match ($doc.root) {
+        map => [
+            [each in $doc.root.fields {
+                $"{$item.key.matched} = {$item.value.matched}"
+            }]
+        ]
+        seq => [
+            [each in $doc.root.items {
+                $"- {$item.matched}"
+            }]
+        ]
+    }
+}
+
+// CSS → str[]: one line per declaration, prefixed with its rule's selector.
+magic cssSheet(css.sheet as s) {
+    [
+        [each in $s.rules {
+            match ($item) {
+                atRule => $"@{$item.name}{$item.preamble}"
+                styleRule => [each d in $item.decls {
+                    $"{$item.sel.matched} :: {$d.name} = {$d.rest}"
+                }]
+            }
+        }]
+    ]
+}
+
+// HTML → str[]: one line per top-level child (element tag or text).
+magic htmlFragment(html.document as doc) {
+    [
+        [each in $doc.children {
+            match ($item) {
+                element => $"element <{$item.name}> children={$item.children.length}"
+                text    => $"text {$item.text}"
+            }
+        }]
+    ]
+}
+
+// ECMAScript regex → str: a descriptor carrying the pattern text verbatim.
+magic reCompile(re.pattern as p) {
+    $"re( {$p.matched} )"
+}
+
+// JavaScript → str[]: one line per top-level statement.
+magic jsRun(js.program as p) {
+    [
+        [each in $p.stmts {
+            match ($item) {
+                block => "block"
+                if    => "if"
+                while => "while"
+                ret   => "return"
+                decl  => $"decl {$item.name}"
+                expr  => "expr"
+            }
+        }]
+    ]
+}
+
+// Python def → a real Checkmate function (§8.4's flagship example; the
+// nested `if` arm handles one nesting level without §8.5 recursion).
+magic def(py.def as d) {
+    $d.ret $d.fname(each in d.params {
+        [when present($ptype) { $ptype $param } else { infer $param }]
+    }) {
+        each in d.body {
+            match ($item) {
+                ifStmt => if ($item.cond) {
+                    [each in $item.body {
+                        match ($item) {
+                            return => return $item.value
+                            call   => $item.callee(each in $item.args { $item })
+                        }
+                    }]
+                }
+                return => return $item.value
+                call   => $item.callee(each in $item.args { $item })
+            }
+        }
+    }
+}
+
+// SQL SELECT → SqlQuery struct value (struct declared in Part 3).
+magic sqlQuery(sql.select as q) {
+    SqlQuery(
+        table: $"{$q.table}"
+        columns: [
+            [each in $q.items {
+                match ($item) {
+                    star   => $"{$item.qualifier}.*"
+                    column => $"{$item.name}"
+                }
+            }]
+        ]
+        hasWhere: [when present($q.filter) { true } else { false }]
+        whereText: [when present($q.filter) { $"{$q.filter.matched}" } else { "" }]
+        limit: [when present($q.limit) { $q.limit } else { 0 }]
+    )
+}
+
+// ============================================================================
+// PART 3 — CONSUMER PROGRAM
+// ============================================================================
+// Ordinary Checkmate code. Every `magic(name) { region }` below is expanded
+// in place by the megaprogram pass; the expanded program must type-check and
+// run on the tree walker, with main() returning 0 (all checks pass).
+
+struct SqlQuery {
+    str table
+    str[] columns
+    bool hasWhere
+    str whereText
+    int limit
+}
+
+void usePy(int x) {
+    return
+}
+
+// Python-flavored functions expand to real Checkmate function declarations.
+magic(def) {
+    def pyClampFn(v: int, lo: int, hi: int) -> int:
+        usePy(lo)
+        return v
+}
+
+magic(def) {
+    def pySign(v: int) -> str:
+        if v < 0:
+            return "neg"
+        return "pos"
+}
+
+int checkJson() {
+    map<str, str> config = magic(jsonValue) {
+        {
+            "host": "db.local",
+            "ports": [5432, 6432],
+            "retries": 3,
+            "debug": true,
+            "name": null
+        }
+    }
+    int fails = 0
+    if (config["host"] != "db.local") { fails += 1 }
+    if (config["ports"] != "[]") { fails += 1 }
+    if (config["retries"] != "3") { fails += 1 }
+    if (config["debug"] != "true") { fails += 1 }
+    if (config["name"] != "null") { fails += 1 }
+    return fails
+}
+
+int checkToml() {
+    str[] tomlLines = magic(tomlValue) {
+        title = "checkmate"
+
+        # a transparent comment line
+        [owner]
+        name = "matin"
+        id = 7
+
+        [db]
+        port = 5432
+        enabled = true
+    }
+    int fails = 0
+    if (tomlLines.length != 7) { fails += 1 }
+    if (tomlLines[0] != "title = \"checkmate\"") { fails += 1 }
+    if (tomlLines[1] != "[owner]") { fails += 1 }
+    if (tomlLines[2] != "name = \"matin\"") { fails += 1 }
+    if (tomlLines[3] != "id = 7") { fails += 1 }
+    if (tomlLines[4] != "[db]") { fails += 1 }
+    if (tomlLines[5] != "port = 5432") { fails += 1 }
+    if (tomlLines[6] != "enabled = true") { fails += 1 }
+    return fails
+}
+
+int checkYaml() {
+    str[] yamlLines = magic(yamlValue) {
+        title: Checkmate
+        limits:
+            fuel: 1000000
+            deadlineMs: 50
+        tags: [embeddable, aot, arc]
+    }
+    int fails = 0
+    if (yamlLines.length != 3) { fails += 1 }
+    if (yamlLines[0] != "title = Checkmate") { fails += 1 }
+    if (yamlLines[1] != "limits = fuel: 1000000\n    deadlineMs: 50") { fails += 1 }
+    if (yamlLines[2] != "tags = [embeddable, aot, arc]") { fails += 1 }
+    return fails
+}
+
+int checkCss() {
+    str[] cssLines = magic(cssSheet) {
+        body {
+            margin: 0
+            font: 14px system-ui
+        }
+        .hud > .bar {
+            width: 100%
+        }
+    }
+    int fails = 0
+    if (cssLines.length != 3) { fails += 1 }
+    if (cssLines[0] != "body :: margin = 0") { fails += 1 }
+    if (cssLines[1] != "body :: font = 14px system-ui") { fails += 1 }
+    if (cssLines[2] != ".hud > .bar :: width = 100%") { fails += 1 }
+    return fails
+}
+
+int checkHtml() {
+    str[] htmlLines = magic(htmlFragment) {
+        <div class="hud">
+            <span class="bar">HP</span>
+        </div>
+        <p>1 < 2</p>
+    }
+    int fails = 0
+    // div children: <span>, the "\n    " text before </div>, and the empty
+    // text node where the stop condition matches at the cursor.
+    if (htmlLines.length != 2) { fails += 1 }
+    if (htmlLines[0] != "element <div> children=3") { fails += 1 }
+    if (htmlLines[1] != "element <p> children=2") { fails += 1 }
+    return fails
+}
+
+int checkRe() {
+    str emailPattern = magic(reCompile) {
+        ^[\w.+-]+@[\w-]+(\.[\w-]+)+$
+    }
+    int fails = 0
+    if (emailPattern != "re( ^[\\w.+-]+@[\\w-]+(\\.[\\w-]+)+$ )") { fails += 1 }
+    return fails
+}
+
+int checkJs() {
+    str[] jsLines = magic(jsRun) {
+        const greeting = "hello"
+        console.log(greeting)
+    }
+    int fails = 0
+    if (jsLines.length != 2) { fails += 1 }
+    if (jsLines[0] != "decl greeting") { fails += 1 }
+    if (jsLines[1] != "expr") { fails += 1 }
+    return fails
+}
+
+int checkPy() {
+    int fails = 0
+    int clamped = pyClampFn(2, 1, 5)
+    if (clamped != 2) { fails += 1 }
+    if (pySign(-5) != "neg") { fails += 1 }
+    if (pySign(7) != "pos") { fails += 1 }
+    return fails
+}
+
+int checkSql() {
+    SqlQuery q = magic(sqlQuery) {
+        SELECT id, name AS n
+        FROM users
+        WHERE age > 21 AND name != 'bob'  -- fetch the adults
+        ORDER BY id DESC, name
+        LIMIT 10
+    }
+    int fails = 0
+    if (q.table != "users") { fails += 1 }
+    if (q.columns.length != 2) { fails += 1 }
+    if (q.columns[0] != "id") { fails += 1 }
+    if (q.columns[1] != "name") { fails += 1 }
+    if (q.hasWhere != true) { fails += 1 }
+    if (q.whereText != "age > 21 AND name != 'bob'") { fails += 1 }
+    if (q.limit != 10) { fails += 1 }
+    return fails
+}
+
+int main() {
+    int fails = 0
+    fails += checkJson()
+    fails += checkToml()
+    fails += checkYaml()
+    fails += checkCss()
+    fails += checkHtml()
+    fails += checkRe()
+    fails += checkJs()
+    fails += checkPy()
+    fails += checkSql()
+    return fails
+}

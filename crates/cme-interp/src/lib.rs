@@ -238,6 +238,16 @@ impl InterpError {
     }
 }
 
+/// A host-provided compile-time builtin surface (§8.5): the megaprogram
+/// evaluator answers `cm.*` calls issued from compile-time Checkmate code
+/// (`cm.parseExpr`, `cm.parseStmts`, `cm.parse`, `cm.code.*`). The hook
+/// fires only for paths the interpreter itself cannot resolve, so ordinary
+/// programs never touch it. Returns `None` when the path is not a host
+/// builtin; `Some(Err)` reports a clean compile-time error.
+pub trait CtHost {
+    fn ct_call(&self, path: &str, args: &[Value]) -> Option<Result<Value, String>>;
+}
+
 /// A program ready to invoke: the function, struct, and enum declarations
 /// of a parsed (and, in the host's pipeline, checked) statement list,
 /// collected into name maps. The first registration of a name wins,
@@ -249,6 +259,9 @@ pub struct Interpreter<'a> {
     /// Impl member declarations (§10.4), keyed by the joined target path
     /// then by member name — the runtime mirror of the checker's registry.
     impls: HashMap<String, HashMap<String, &'a Stmt>>,
+    /// The §8.5 host builtin surface, if this interpreter runs under the
+    /// megaprogram evaluator.
+    host: Option<&'a dyn CtHost>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -288,7 +301,15 @@ impl<'a> Interpreter<'a> {
             structs,
             enums,
             impls,
+            host: None,
         }
+    }
+
+    /// Attaches the §8.5 host builtin surface (used by the megaprogram
+    /// evaluator; ordinary execution leaves it unset).
+    pub fn with_host(mut self, host: &'a dyn CtHost) -> Self {
+        self.host = Some(host);
+        self
     }
 
     /// Invokes `name` with `args` (bound by value, cloned). Errors on an
@@ -336,6 +357,7 @@ impl<'a> Interpreter<'a> {
             structs: &self.structs,
             enums: &self.enums,
             impls: &self.impls,
+            host: self.host,
             scopes: Vec::new(),
             depth: 0,
         }
@@ -365,6 +387,7 @@ struct Runner<'env, 'a> {
     structs: &'env HashMap<&'a str, &'a Stmt>,
     enums: &'env HashMap<&'a str, &'a Stmt>,
     impls: &'env HashMap<String, HashMap<String, &'a Stmt>>,
+    host: Option<&'env dyn CtHost>,
     scopes: Vec<HashMap<String, Value>>,
     depth: usize,
 }
@@ -543,13 +566,20 @@ impl<'env, 'a> Runner<'env, 'a> {
                 ..
             } => {
                 let collection = self.eval(iterable)?;
-                let Value::Array(elements) = collection else {
-                    return Err(InterpError::new(
-                        format!("cannot iterate `{}`", collection.kind_name()),
-                        iterable.span,
-                    ));
+                // §1.4.10 (plan): iterating a map yields its KEYS in
+                // insertion order — the compile-time helpers walk capture
+                // record fields this way.
+                let keys_or_elements: Vec<Value> = match &collection {
+                    Value::Array(elements) => elements.clone(),
+                    Value::Map(entries) => entries.iter().map(|(key, _)| key.clone()).collect(),
+                    other => {
+                        return Err(InterpError::new(
+                            format!("cannot iterate `{}`", other.kind_name()),
+                            iterable.span,
+                        ));
+                    }
                 };
-                for element in elements {
+                for element in keys_or_elements {
                     let mut scope = HashMap::new();
                     scope.insert(elem_name.clone(), element);
                     self.scopes.push(scope);
@@ -1108,6 +1138,31 @@ impl<'env, 'a> Runner<'env, 'a> {
             let values = self.eval_args_for(declaration, args, span)?;
             return self.call_function(declaration, &display, values, span);
         }
+        // §8.5: `cm.*` calls from compile-time Checkmate code fall through
+        // to the host builtin surface (only when one is attached).
+        if enum_name == "cm"
+            && let Some(host) = self.host
+        {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                values.push(self.eval(expr)?);
+            }
+            let joined = format!("{enum_name}.{variant}");
+            return match host.ct_call(&joined, &values) {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(message)) => Err(InterpError::new(
+                    format!("compile-time builtin `{joined}`: {message}"),
+                    span,
+                )),
+                None => Err(InterpError::new(
+                    format!("unknown compile-time builtin `{joined}`"),
+                    span,
+                )),
+            };
+        }
         // Error shapes mirror the checker's diagnostics.
         if self.enums.contains_key(enum_name) {
             Err(InterpError::new(
@@ -1148,6 +1203,31 @@ impl<'env, 'a> Runner<'env, 'a> {
                 let values = self.eval_args_for(declaration, args, span)?;
                 return self.call_function(declaration, &display, values, span);
             }
+        }
+        // §8.5: `cm.*` calls from compile-time Checkmate code fall through
+        // to the host builtin surface (only when one is attached).
+        if path.first().map(String::as_str) == Some("cm")
+            && let Some(host) = self.host
+        {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                values.push(self.eval(expr)?);
+            }
+            let joined = path.join(".");
+            return match host.ct_call(&joined, &values) {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(message)) => Err(InterpError::new(
+                    format!("compile-time builtin `{joined}`: {message}"),
+                    span,
+                )),
+                None => Err(InterpError::new(
+                    format!("unknown compile-time builtin `{joined}`"),
+                    span,
+                )),
+            };
         }
         Err(InterpError::new(
             format!("unknown function `{}`", path.join(".")),

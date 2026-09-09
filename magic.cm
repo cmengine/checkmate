@@ -11,40 +11,63 @@
 //                               every megaprogram expanded and verified
 //
 // Layout:
-//   Part 1 — `grammar` declarations ("parsers"): json, toml, yaml, css, html,
-//            re, js, py, sql — the §8.8/§8.4 whitepaper shapes (see errata).
-//   Part 2 — `magic` declarations (the macros): one entry point per grammar.
-//   Part 3 — the consumer program: ordinary Checkmate code whose declarations
-//            and expressions call the macros with `magic(name) { region }`.
+//   Part 1   — `grammar` declarations ("parsers"): json, toml, yaml, css,
+//              html, re, js, py, sql — the §8.8/§8.4 whitepaper shapes.
+//   Part 2   — `magic` declarations (the macros): one entry point per
+//              grammar. Templates are whitepaper-shaped: `@toValue`-style
+//              codegen, `where @isVoid` / `@isRawText` guards, late
+//              `cm.parse(css.sheet / js.program, body)` delegation inside
+//              `@emitElement`, `@emitBody` recursion for Python, and
+//              `@emitMatcher` for regexes (§8.5).
+//   Part 2.5 — the compile-time helper program: the `Capture` bridge enum,
+//              the generated-value enums (JsonTree, HtmlNode, ReNode), and
+//              the pure Checkmate functions the templates call with `@`.
+//              These run in the compile-time evaluator during expansion and
+//              remain (as dead code) in the expanded file.
+//   Part 3   — the consumer program: ordinary Checkmate code whose
+//              declarations and expressions call the macros with
+//              `magic(name) { region }`.
 //
 // The regions are real foreign-language source (JSON, TOML, YAML, CSS, HTML,
-// ECMAScript regex, JavaScript, Python, SQL). The templates deliberately
-// avoid §8.5 `@`-functions for now (they arrive in a later task); until then
-// the templates build their outputs from capture structure, `.matched` raw
-// text, string interpolation, `[each]` repetition, `[when]` selection and
-// template `match` over `oneof` tags.
+// ECMAScript regex, JavaScript, Python, SQL).
 //
 // Template output shapes (pinned by tests/megaprogram.rs):
-//   jsonValue   → map<str, str>   one entry per top-level JSON object field
-//   tomlValue   → str[]           "key = value" / "[table]" per document item
-//   yamlValue   → str[]           "key = value" per top-level mapping field
-//   cssSheet    → str[]           "selector :: prop = value" per declaration
-//   htmlFragment→ str[]           "element <tag>" / "text …" per top-level child
-//   reCompile   → str             "re( <pattern text> )"
-//   jsRun       → str[]           "decl <name>" / "expr" per statement
-//   def         → a real Checkmate function (Python-flavored syntax in,
-//                 Checkmate function declaration out)
-//   sqlQuery    → SqlQuery        struct value built from the SELECT pieces
+//   jsonValue   → JsonTree          typed tree value built by @toValue
+//   tomlValue   → JsonTree          flat Obj: "dotted.key"/"[table]" entries
+//   yamlValue   → JsonTree          typed tree (require @anchorsResolve)
+//   cssSheet    → str[]             "selector :: prop = value" per declaration
+//   htmlFragment→ HtmlNode[]        @emitElement per top-level child (with
+//                                   late js/css parsing of script/style bodies)
+//   reCompile   → ReNode            @emitMatcher: a structured matcher value
+//   jsRun       → str[]             "decl <name>" / "expr" per statement
+//   def         → a real Checkmate function (@emitBody recursion: nested
+//                 Python `if`s of any depth expand correctly)
+//   sqlQuery    → SqlQuery          struct value built from the SELECT pieces
 //
-// Deviations from the whitepaper text (each forced by the whitepaper's own
-// worked examples — see plan.md §1.4):
+// Capture-shape notes for the @-helpers (Part 2.5):
+//   * json `value` splits bool into `trueV`/`falseV` branches so the oneof
+//     tag alone distinguishes true from false (branch literals bind nothing,
+//     and the bridge carries tags, not matched text).
+//   * toml `value` inlines the string forms as flat branches for the same
+//     reason; `integer`/`floatV` keep digit-run binds so @toValue can splice
+//     the numeric text into `JsonTree.Num("…")` verbatim.
+//   * yaml `node`'s flow/block branches bind their inner node (`as value`)
+//     so the tree is reachable; anchors/aliases keep `name` binds for
+//     @anchorsResolve.
+//   * re rules bind every subtree the codegen needs (`atom as a`, the
+//     quantifier `as q`, `class as c`, `escape as e`, `group as g`, and the
+//     group's inner `pattern as p`); escape branches are FLAT (one branch
+//     per escape spelling) so an escape is a tag + backslash-free payload —
+//     generated `ClassItem.Esc("d")` never embeds a raw backslash that
+//     Checkmate string escapes would mangle.
+//   * html script/style/textarea merge into `rawEl` behind
+//     `where @isRawText(name)` (§8.8's shape).
+//
+// Deviations from the whitepaper text (plan.md §1.4 — each forced by the
+// whitepaper's own worked examples):
 //   * json.number wraps the digit run in `optional { … }` (bare `scan` needs
 //     ≥ 1 char, so the single-digit `3` would fail the verbatim rule).
-//   * py.def's body is `each { stmt }` — the verbatim `recur` would re-enter
-//     `def` itself, contradicting §8.4's clamp example.
 //   * keyval/value binds use the `as` form where the template needs a name.
-//   * The HTML void/raw-tag `where @isVoid(name)` checks are spelled as
-//     `||` chains until §8.5 compile-time functions exist.
 // ============================================================================
 
 // ============================================================================
@@ -58,7 +81,8 @@ grammar json {
     rule value {
         oneof {
             null   => "null"
-            bool   => oneof { t => "true", f => "false" }
+            trueV  => "true"
+            falseV => "false"
             number => number
             string => $str text
             array  => ( "[" each sep "," { value } as items "]" )
@@ -103,32 +127,21 @@ grammar toml {
         } as parts
     }
 
+    // Flat branches: every form binds what @toValue needs at THIS level
+    // (nested branch tags would be unreachable through the bridge).
     rule value {
         oneof {
-            string   => string
-            integer  => integer
-            float    => floatV
-            bool     => oneof { t => "true", f => "false" }
+            basicStr => $str text
+            litStr   => ( "'" until "'" as text "'" )
+            mStrB    => ( "\"\"\"" until "\"\"\"" as text "\"\"\"" )
+            mStrL    => ( "'''" until "'''" as text "'''" )
+            integer  => ( optional { "-" } scan [0-9] as digits )
+            floatV   => ( optional { "-" } scan [0-9] as intPart "." scan [0-9] as fracPart )
+            trueV    => "true"
+            falseV   => "false"
             array    => ( "[" soft { each sep "," trailing { value } as items "]" } )
             inline   => ( "{" soft { each sep "," { dottedKey k "=" value as v } as fields "}" } )
         }
-    }
-
-    rule string {
-        oneof {
-            basic      => $str text
-            literal    => ( "'" until "'" as text "'" )
-            multilineB => ( "\"\"\"" until "\"\"\"" as text "\"\"\"" )
-            multilineL => ( "'''" until "'''" as text "'''" )
-        }
-    }
-
-    rule integer {
-        ( optional { "-" } scan [0-9] as digits ) as num
-    }
-
-    rule floatV {
-        ( optional { "-" } scan [0-9] as intPart "." scan [0-9] as fracPart ) as num
     }
 }
 
@@ -147,8 +160,8 @@ grammar yaml {
         oneof {
             anchor => ( "&" $word name node as value )
             alias  => ( "*" $word name )
-            flow   => ( peek { line } flowNode )
-            block  => ( peek { not { line } } blockNode )
+            flow   => ( peek { line } flowNode as value )
+            block  => ( peek { not { line } } blockNode as value )
             // A bare same-line scalar (`title: Checkmate`); the whitepaper
             // elides plain scalars from `node` (§8.8 comment) — restored
             // here so scalar-valued fields parse.
@@ -270,37 +283,16 @@ grammar html {
         "<" i$tag name
         each { attribute } as attrs
         oneof {
-            scriptEl => (
-                where name == "script" ">"
-                until { "</" i$tag close where close == name } as body
-                "</" i$tag close ">"
-            )
-            styleEl => (
-                where name == "style" ">"
-                until { "</" i$tag close where close == name } as body
-                "</" i$tag close ">"
-            )
-            selfClose => (
-                where name == "area" || name == "base" || name == "br"
-                || name == "col" || name == "embed" || name == "hr"
-                || name == "img" || name == "input" || name == "link"
-                || name == "meta" || name == "param" || name == "source"
-                || name == "track" || name == "wbr"
-                "/>"
-            )
-            voidEl => (
-                where name == "area" || name == "base" || name == "br"
-                || name == "col" || name == "embed" || name == "hr"
-                || name == "img" || name == "input" || name == "link"
-                || name == "meta" || name == "param" || name == "source"
-                || name == "track" || name == "wbr"
-                ">"
-            )
+            // script/style/textarea: raw-text elements (§8.8's shape — the
+            // three former branches behind one @isRawText guard).
             rawEl => (
-                where name == "textarea" ">"
+                where @isRawText(name)
+                ">"
                 until { "</" i$tag close where close == name } as body
                 "</" i$tag close ">"
             )
+            selfClose => ( where @isVoid(name) "/>" )
+            voidEl    => ( where @isVoid(name) ">" )
             normal => (
                 ">"
                 each { content } as children
@@ -336,35 +328,35 @@ grammar re {
         each { quantified } as terms
     }
 
+    // Every subtree the codegen needs is bound: `a` (the atom), `q` (the
+    // quantifier branch, whose own tag selects star/plus/opt/bound).
     rule quantified {
-        atom
+        atom as a
         optional {
             oneof {
-                star  => ( "*"  quantSuffix )
-                plus  => ( "+"  quantSuffix )
-                opt   => ( "?"  quantSuffix )
-                bound => ( "{" $int min optional { "," optional { $int max } } "}" quantSuffix )
-            }
+                star  => "*"
+                plus  => "+"
+                opt   => "?"
+                bound => ( "{" $int min optional { "," optional { $int max } } "}" )
+            } as q
         }
-    }
-
-    rule quantSuffix {
-        optional { oneof { lazy => "?", possessive => "+" } }
     }
 
     rule atom {
         oneof {
-            anyChar  => "."
-            anchor   => oneof { start => "^", end => "$" }
-            class    => class
-            escape   => escape
-            group    => group
-            literal  => [^.^$*+?(){}|/\[\]] as ch       // exactly one character
+            anyChar     => "."
+            anchorStart => "^"
+            anchorEnd   => "$"
+            class       => ( class as c )
+            escape      => ( escape as e )
+            group       => ( group as g )
+            literal     => [^.^$*+?(){}|/\[\]] as ch       // exactly one character
         }
     }
 
     rule class {
-        "[" optional { "^" }
+        "["
+        optional { ( "^" ) as neg }
         each { classItem } as items
         "]"
     }
@@ -372,20 +364,31 @@ grammar re {
     rule classItem {
         oneof {
             posix   => ( "[:" $tag name ":]" )
-            escape  => escape
+            escape  => ( escape as e )
             range   => ( any lo "-" peek { not { "]" } } any hi )
             single  => ( peek { not { "]" } } any as ch )
         }
     }
 
+    // FLAT escape branches: one tag per spelling, each binding a
+    // backslash-free payload, so generated code never re-escapes.
     rule escape {
         "\\"
         oneof {
             classEscape  => scan [dDwWsS] as kind
-            anchorEscape => oneof { b => "b", B => "B", A => "A", z => "z", Z => "Z", G => "G" }
-            ctrl         => oneof { n => "n", r => "r", t => "t", f => "f", zero => "0" }
-            backref      => oneof { num => scan [1-9] as index,
-                                    named => ( "k" "<" $word name ">" ) }
+            anchorB      => scan [b] as ch
+            anchorBigB   => scan [B] as ch
+            anchorA      => scan [A] as ch
+            anchorz      => scan [z] as ch
+            anchorBigZ   => scan [Z] as ch
+            anchorG      => scan [G] as ch
+            ctrlN        => scan [n] as ch
+            ctrlR        => scan [r] as ch
+            ctrlT        => scan [t] as ch
+            ctrlF        => scan [f] as ch
+            ctrlZero     => scan [0] as ch
+            backrefNum   => scan [1-9] as index
+            backrefNamed => ( "k" "<" $word name ">" )
             unicodeClass => ( "p" "{" $tag category "}" )
             char         => [^A-Za-z0-9] as ch           // escaped punctuation only
         }
@@ -394,15 +397,15 @@ grammar re {
     rule group {
         "("
         oneof {
-            lookBehindNeg => ( "?<!" pattern )
-            lookBehind    => ( "?<=" pattern )
-            named         => ( "?<" $word name ">" pattern )
-            lookAheadNeg  => ( "?!"  pattern )
-            lookAhead     => ( "?="  pattern )
-            atomic        => ( "?>"  pattern )
-            inlineFlags   => ( "?" optional { scan [-imsxu] as flags } ":" pattern )
-            nonCapturing  => ( "?:"  pattern )
-            capturing     => pattern
+            lookBehindNeg => ( "?<!" ( pattern as p ) )
+            lookBehind    => ( "?<=" ( pattern as p ) )
+            named         => ( "?<" $word name ">" ( pattern as p ) )
+            lookAheadNeg  => ( "?!"  ( pattern as p ) )
+            lookAhead     => ( "?="  ( pattern as p ) )
+            atomic        => ( "??>"  ( pattern as p ) )
+            inlineFlags   => ( "?" optional { scan [-imsxu] as flags } ":" ( pattern as p ) )
+            nonCapturing  => ( "?:"  ( pattern as p ) )
+            capturing     => ( pattern as p )
         }
         ")"
     }
@@ -583,70 +586,37 @@ grammar sql {
 // PART 2 — MAGIC DECLARATIONS (the macros)
 // ============================================================================
 // Each `magic name(pattern) { template }` binds an entry pattern to an
-// expansion template. Invocations are `magic(name) { region }`. Until §8.5
-// compile-time functions land, templates avoid `@` and build everything from
-// captures, `.matched`, interpolation, `[each]`, `[when]` and template match.
+// expansion template. Invocations are `magic(name) { region }`. Templates are
+// now whitepaper-shaped (§8.4/§8.5): the tree-producing macros delegate to
+// compile-time functions with `@`, the pattern guards use `where @isVoid` /
+// `@isRawText`, and `require(@anchorsResolve($doc), …)` validates YAML.
 //
 // Join conventions (plan.md §1.4.7): `[each]` elements are comma-joined
 // inside template `(`/`[` (lists and array literals), newline-joined
 // otherwise (statements, map entries).
 
-// JSON → map<str, str>: one entry per top-level object field; leaves are
-// stringified, non-object leaves map to fixed markers.
+// JSON → JsonTree: @toValue turns the capture tree into typed code
+// constructing the JsonTree enum (§8.5's own example shape).
 magic jsonValue(json.value as v) {
-    match ($v) {
-        null   => "null"
-        bool   => $"{$v.matched}"
-        number => $"{$v.matched}"
-        string => $v.text
-        array  => "[]"
-        object => (
-            {
-                [each in $v.fields {
-                    $item.key: match ($item.val) {
-                        null   => "null"
-                        bool   => $"{$item.val.matched}"
-                        number => $"{$item.val.matched}"
-                        string => $item.val.text
-                        array  => "[]"
-                        object => "{}"
-                    }
-                }]
-            }
-        )
-    }
+    @toValue($v)
 }
 
-// TOML → str[]: one line per document item ("key = value" or "[table]").
+// TOML → JsonTree: a flat Obj with one entry per document item —
+// "dotted.key": <value tree> for keyvals, "[table.path]": Obj({}) for headers.
 magic tomlValue(toml.document as doc) {
-    [
-        [each in $doc.items {
-            match ($item) {
-                table => $"[{$item.path.matched}]"
-                kv    => $"{$item.key.matched} = {$item.val.matched}"
-            }
-        }]
-    ]
+    @toValue($doc)
 }
 
-// YAML → str[]: one line per top-level mapping field; block values keep
-// their whole (escaped) text.
+// YAML → JsonTree: the require reports an undefined anchor reference at the
+// capture's span before codegen runs (§8.3.4 + §8.5).
 magic yamlValue(yaml.document as doc) {
-    match ($doc.root) {
-        map => [
-            [each in $doc.root.fields {
-                $"{$item.key.matched} = {$item.value.matched}"
-            }]
-        ]
-        seq => [
-            [each in $doc.root.items {
-                $"- {$item.matched}"
-            }]
-        ]
-    }
+    require(@anchorsResolve($doc), "alias references an undefined anchor")
+    @toValue($doc)
 }
 
 // CSS → str[]: one line per declaration, prefixed with its rule's selector.
+// (CSS stays template-level; @emitElement late-parses <style> bodies with
+// cm.parse(css.sheet, …) instead.)
 magic cssSheet(css.sheet as s) {
     [
         [each in $s.rules {
@@ -660,21 +630,24 @@ magic cssSheet(css.sheet as s) {
     ]
 }
 
-// HTML → str[]: one line per top-level child (element tag or text).
+// HTML → HtmlNode[]: @emitElement walks each top-level child (elements
+// recursively, text nodes verbatim); script/style bodies are parsed LATE —
+// cm.parse(js.program / css.sheet, body) inside the helper — because inline
+// delegation is string-aware and would diverge from HTML's actual raw-text
+// rule (§8.8 conformance notes).
 magic htmlFragment(html.document as doc) {
     [
         [each in $doc.children {
-            match ($item) {
-                element => $"element <{$item.name}> children={$item.children.length}"
-                text    => $"text {$item.text}"
-            }
+            @emitElement($item)
         }]
     ]
 }
 
-// ECMAScript regex → str: a descriptor carrying the pattern text verbatim.
+// ECMAScript regex → ReNode: @emitMatcher inspects the capture tree and
+// generates a structured matcher value (§8.5: "the dispatch is ordinary
+// compile-time Checkmate").
 magic reCompile(re.pattern as p) {
-    $"re( {$p.matched} )"
+    @emitMatcher($p)
 }
 
 // JavaScript → str[]: one line per top-level statement.
@@ -693,26 +666,14 @@ magic jsRun(js.program as p) {
     ]
 }
 
-// Python def → a real Checkmate function (§8.4's flagship example; the
-// nested `if` arm handles one nesting level without §8.5 recursion).
+// Python def → a real Checkmate function. The signature stays template-level
+// (params need Checkmate types); the body is @emitBody recursion, which
+// handles nested `if` statements of ANY depth (§8.4's @py.emitBody).
 magic def(py.def as d) {
     $d.ret $d.fname(each in d.params {
         [when present($ptype) { $ptype $param } else { infer $param }]
     }) {
-        each in d.body {
-            match ($item) {
-                ifStmt => if ($item.cond) {
-                    [each in $item.body {
-                        match ($item) {
-                            return => return $item.value
-                            call   => $item.callee(each in $item.args { $item.arg })
-                        }
-                    }]
-                }
-                return => return $item.value
-                call   => $item.callee(each in $item.args { $item.arg })
-            }
-        }
+        @emitBody($d.body)
     }
 }
 
@@ -735,6 +696,707 @@ magic sqlQuery(sql.select as q) {
 }
 
 // ============================================================================
+// PART 2.5 — COMPILE-TIME HELPERS (§8.5)
+// ============================================================================
+// Pure Checkmate functions the templates call with `@`, plus the value enums
+// they build. They run in the compile-time evaluator during expansion (with
+// the cm.* builtins provided by the host); afterwards they remain in the
+// expanded file as dead code, which is why they must type-check.
+//
+// The bridge materializes capture trees as `Capture` values:
+//   Rec(tag, fields)   a oneof branch / rule record (fields: name → Capture)
+//   Text/Int/Float     leaf captures (a string capture's content is unquoted)
+//   List(items)        each/… repetitions
+//   Absent()           an absent optional
+// Field presence is tested by ITERATING the field map (`for k in fields`)
+// because an optional bind that did not match simply has no entry.
+
+enum Capture {
+    Text(str content)
+    Int(int value)
+    Float(float value)
+    List(Capture[] items)
+    Rec(str tag, map<str, Capture> fields)
+    Absent()
+}
+
+// The tree the JSON/TOML/YAML magics produce. Numbers keep their source text
+// (`Num("5432")`) — source-faithful, and the compile-time side never needs
+// arithmetic on them.
+enum JsonTree {
+    Null()
+    Bool(bool value)
+    Num(str text)
+    Str(str text)
+    Arr(JsonTree[] items)
+    Obj(map<str, JsonTree> fields)
+}
+
+// The HTML DOM shape @emitElement generates.
+enum HtmlNode {
+    Element(str tag, Attr[] attrs, HtmlNode[] children)
+    Text(str text)
+}
+
+struct Attr {
+    str name
+    str value
+}
+
+// The regex matcher shape @emitMatcher generates.
+enum ReNode {
+    Char(str ch)
+    AnyChar()
+    AnchorStart()
+    AnchorEnd()
+    Class(bool negated, ClassItem[] items)
+    Esc(str kind)
+    Group(str kind, ReNode inner)
+    Repeat(str kind, ReNode inner, int min, int max)
+    Seq(ReNode[] terms)
+    Alt(ReNode[] alts)
+}
+
+enum ClassItem {
+    Ch(str ch)
+    Esc(str kind)
+    Range(str lo, str hi)
+    Posix(str name)
+}
+
+// -- scalar access -----------------------------------------------------------
+
+// A capture's text: leaf payloads stringify (§A.6 concat canonical form).
+str strOf(Capture c) {
+    match (c) {
+        Text(str s) => { return s }
+        Int(int v) => { return "" + v }
+        Float(float v) => { return "" + v }
+        _ => { return "" }
+    }
+}
+
+// A capture's int payload (bound `$int` fragments).
+int intOf(Capture c) {
+    match (c) {
+        Int(int v) => { return v }
+        _ => { return 0 }
+    }
+}
+
+// -- §8.5 trees: JSON / TOML / YAML ------------------------------------------
+
+// The @toValue-style dispatcher: one function per the whitepaper's own
+// example (`@toValue($v)` for JSON, `@toValue($doc)` for TOML/YAML), mapping
+// each grammar's branch tags onto JsonTree constructors.
+code toValue(Capture v) {
+    match (v) {
+        Rec(str tag, map<str, Capture> fields) => {
+            // -- json ------------------------------------------------------
+            if (tag == "null") { return "JsonTree.Null()" }
+            if (tag == "trueV") { return "JsonTree.Bool(true)" }
+            if (tag == "falseV") { return "JsonTree.Bool(false)" }
+            if (tag == "number") {
+                return "JsonTree.Num(\"" + strOf(fields["num"]) + "\")"
+            }
+            if (tag == "string") {
+                return "JsonTree.Str(\"" + strOf(fields["text"]) + "\")"
+            }
+            if (tag == "array") {
+                return "JsonTree.Arr([" + joinValue(fields["items"]) + "])"
+            }
+            if (tag == "object") {
+                str entries = ""
+                match (fields["fields"]) {
+                    List(Capture[] members) => {
+                        for (Capture m in members) {
+                            match (m) {
+                                Rec(str mtag, map<str, Capture> mf) => {
+                                    if (entries != "") { entries = entries + ", " }
+                                    entries = entries + "\"" + strOf(mf["key"]) + "\": " + toValue(mf["val"])
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return "JsonTree.Obj({" + entries + "})"
+            }
+            // -- toml / yaml documents (same tag, dispatch by fields) ------
+            if (tag == "document") {
+                str isYaml = ""
+                for (str k in fields) {
+                    if (k == "root") { isYaml = "yes" }
+                }
+                if (isYaml == "yes") { return toValue(fields["root"]) }
+                str entries = ""
+                match (fields["items"]) {
+                    List(Capture[] items) => {
+                        for (Capture item in items) {
+                            match (item) {
+                                Rec(str itag, map<str, Capture> f) => {
+                                    if (entries != "") { entries = entries + ", " }
+                                    if (itag == "kv") {
+                                        entries = entries + "\"" + dottedJoin(f["key"]) + "\": " + toValue(f["val"])
+                                    }
+                                    if (itag == "table") {
+                                        entries = entries + "\"[" + dottedJoin(f["path"]) + "]\": JsonTree.Obj({})"
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return "JsonTree.Obj({" + entries + "})"
+            }
+            if (tag == "basicStr" || tag == "litStr" || tag == "mStrB" || tag == "mStrL") {
+                return "JsonTree.Str(\"" + strOf(fields["text"]) + "\")"
+            }
+            if (tag == "integer") {
+                return "JsonTree.Num(\"" + strOf(fields["digits"]) + "\")"
+            }
+            if (tag == "floatV") {
+                return "JsonTree.Num(\"" + strOf(fields["intPart"]) + "." + strOf(fields["fracPart"]) + "\")"
+            }
+            if (tag == "array") {
+                return "JsonTree.Arr([" + joinValue(fields["items"]) + "])"
+            }
+            if (tag == "inline") {
+                str entries = ""
+                match (fields["fields"]) {
+                    List(Capture[] members) => {
+                        for (Capture m in members) {
+                            match (m) {
+                                Rec(str mtag, map<str, Capture> mf) => {
+                                    if (entries != "") { entries = entries + ", " }
+                                    entries = entries + "\"" + dottedJoin(mf["k"]) + "\": " + toValue(mf["v"])
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return "JsonTree.Obj({" + entries + "})"
+            }
+            // -- yaml ------------------------------------------------------
+            if (tag == "document") {
+                return toValue(fields["root"])
+            }
+            if (tag == "map") {
+                str entries = ""
+                match (fields["fields"]) {
+                    List(Capture[] entriesList) => {
+                        for (Capture f in entriesList) {
+                            match (f) {
+                                Rec(str ftag, map<str, Capture> ff) => {
+                                    if (entries != "") { entries = entries + ", " }
+                                    // Block fields bind the key rule as `key`
+                                    // (a nested record whose `k` holds the
+                                    // text); flow fields bind it as `k`.
+                                    // Values arrive as `value` (block/same
+                                    // line), `v` (flow), or `text` (verbatim
+                                    // block scalars); absent optionals have
+                                    // no field entry at all.
+                                    str keyText = ""
+                                    str valText = "JsonTree.Null()"
+                                    for (str fk in ff) {
+                                        if (fk == "key") {
+                                            match (ff["key"]) {
+                                                Rec(str ktag, map<str, Capture> kf) => {
+                                                    for (str kk in kf) {
+                                                        if (kk == "k") { keyText = strOf(kf["k"]) }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        if (fk == "k") {
+                                            match (ff["k"]) {
+                                                Rec(str ktag, map<str, Capture> kf) => {
+                                                    for (str kk in kf) {
+                                                        if (kk == "k") { keyText = strOf(kf["k"]) }
+                                                    }
+                                                }
+                                                Text(str t) => { keyText = t }
+                                                _ => {}
+                                            }
+                                        }
+                                        if (fk == "value") { valText = toValue(ff["value"]) }
+                                        if (fk == "v") { valText = toValue(ff["v"]) }
+                                        if (fk == "text") {
+                                            valText = "JsonTree.Str(\"" + strOf(ff["text"]) + "\")"
+                                        }
+                                    }
+                                    entries = entries + "\"" + keyText + "\": " + valText
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return "JsonTree.Obj({" + entries + "})"
+            }
+            // A node's flow/block branches wrap the inner node as `value`.
+            if (tag == "flow" || tag == "block") {
+                return toValue(fields["value"])
+            }
+            if (tag == "seq") {
+                return "JsonTree.Arr([" + joinValue(fields["items"]) + "])"
+            }
+            if (tag == "anchor") {
+                return toValue(fields["value"])
+            }
+            if (tag == "alias") {
+                return "JsonTree.Str(\"*" + strOf(fields["name"]) + "\")"
+            }
+            if (tag == "scalar" || tag == "flowScalar" || tag == "blockScalar"
+                || tag == "quoted" || tag == "plain" || tag == "basic") {
+                return "JsonTree.Str(\"" + strOf(fields["text"]) + "\")"
+            }
+            if (tag == "key") {
+                return "JsonTree.Str(\"" + strOf(fields["k"]) + "\")"
+            }
+            // Fallback: pass an unknown branch through as a bare scalar.
+            return "JsonTree.Null()"
+        }
+        Text(str s) => { return "JsonTree.Str(\"" + s + "\")" }
+        _ => { return "JsonTree.Null()" }
+    }
+}
+
+// Joins a list of value captures into generated-argument text.
+code joinValue(Capture list) {
+    str parts = ""
+    match (list) {
+        List(Capture[] items) => {
+            for (Capture item in items) {
+                if (parts != "") { parts = parts + ", " }
+                parts = parts + toValue(item)
+            }
+        }
+        _ => {}
+    }
+    return parts
+}
+
+// Joins a dotted key's parts with "." (toml dottedKey capture). Each part
+// is the key branch's record (rec:bare[part=…] / rec:quoted[part=…]), so the
+// text sits one level down.
+str dottedJoin(Capture key) {
+    str out = ""
+    match (key) {
+        Rec(str tag, map<str, Capture> fields) => {
+            match (fields["parts"]) {
+                List(Capture[] parts) => {
+                    for (Capture p in parts) {
+                        if (out != "") { out = out + "." }
+                        match (p) {
+                            Rec(str ptag, map<str, Capture> pf) => {
+                                for (str pk in pf) {
+                                    if (pk == "part") { out = out + strOf(pf["part"]) }
+                                }
+                            }
+                            Text(str t) => { out = out + t }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Text(str s) => { return s }
+        _ => {}
+    }
+    return out
+}
+
+// -- YAML anchors (§8.3.4 require + §8.5) -------------------------------------
+
+// True when every `*alias` in the tree names an `&anchor` defined anywhere in
+// the same document. Pure recursion — no accumulation needed.
+bool anchorsResolve(Capture doc) {
+    return noUndefinedAlias(doc, doc)
+}
+
+bool noUndefinedAlias(Capture v, Capture doc) {
+    match (v) {
+        Rec(str tag, map<str, Capture> fields) => {
+            if (tag == "alias") {
+                str name = ""
+                for (str k in fields) {
+                    if (k == "name") { name = strOf(fields["name"]) }
+                }
+                if (!anchorDefined(doc, name)) { return false }
+            }
+            for (str k in fields) {
+                if (k != "name" && !noUndefinedAlias(fields[k], doc)) { return false }
+            }
+            return true
+        }
+        List(Capture[] items) => {
+            for (Capture item in items) {
+                if (!noUndefinedAlias(item, doc)) { return false }
+            }
+            return true
+        }
+        _ => { return true }
+    }
+}
+
+bool anchorDefined(Capture v, str want) {
+    match (v) {
+        Rec(str tag, map<str, Capture> fields) => {
+            if (tag == "anchor") {
+                for (str k in fields) {
+                    if (k == "name") {
+                        match (fields["name"]) {
+                            Text(str n) => { if (n == want) { return true } }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            for (str k in fields) {
+                if (k != "name" && anchorDefined(fields[k], want)) { return true }
+            }
+            return false
+        }
+        List(Capture[] items) => {
+            for (Capture item in items) {
+                if (anchorDefined(item, want)) { return true }
+            }
+            return false
+        }
+        _ => { return false }
+    }
+}
+
+// -- HTML (§8.8's @std.html.emitElement shape) --------------------------------
+
+// The whitepaper's void-element set, replacing the `||` chains in the
+// pattern's `where` guards.
+bool isVoid(str name) {
+    return name == "area" || name == "base" || name == "br" || name == "col" || name == "embed" || name == "hr" || name == "img" || name == "input" || name == "link" || name == "meta" || name == "param" || name == "source" || name == "track" || name == "wbr"
+}
+
+// Raw-text elements: their bodies are captured lexically and parsed late.
+bool isRawText(str name) {
+    return name == "script" || name == "style" || name == "textarea"
+}
+
+// One top-level child (an element or a text node) → a HtmlNode constructor.
+code emitElement(Capture el) {
+    match (el) {
+        Rec(str tag, map<str, Capture> fields) => {
+            if (tag == "text") {
+                return "HtmlNode.Text(\"" + strOf(fields["text"]) + "\")"
+            }
+            if (tag == "element") {
+                str name = strOf(fields["name"])
+                str attrs = ""
+                str kids = ""
+                str body = ""
+                // Optional binds that did not match have NO field entry, so
+                // every field is reached through the key iteration.
+                for (str k in fields) {
+                    if (k == "attrs") {
+                        match (fields["attrs"]) {
+                            List(Capture[] items) => {
+                                for (Capture a in items) {
+                                    if (attrs != "") { attrs = attrs + ", " }
+                                    attrs = attrs + emitAttr(a)
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if (k == "children") {
+                        match (fields["children"]) {
+                            List(Capture[] items) => {
+                                for (Capture c in items) {
+                                    if (kids != "") { kids = kids + ", " }
+                                    kids = kids + emitElement(c)
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Raw-text bodies: validate late (§8.3.8 "late delegation")
+                    // — a broken script/style body is a compile-time error
+                    // pointing into the embedded language — then carry the
+                    // text verbatim.
+                    if (k == "body") {
+                        body = strOf(fields["body"])
+                        if (name == "script") {
+                            str jsOk = cm.parse("js.program", body)
+                        }
+                        if (name == "style") {
+                            str cssOk = cm.parse("css.sheet", body)
+                        }
+                    }
+                }
+                if (body != "") {
+                    kids = "HtmlNode.Text(\"" + body + "\")"
+                }
+                return "HtmlNode.Element(\"" + name + "\", [" + attrs + "], [" + kids + "])"
+            }
+            return "HtmlNode.Text(\"\")"
+        }
+        _ => { return "HtmlNode.Text(\"\")" }
+    }
+}
+
+code emitAttr(Capture a) {
+    match (a) {
+        Rec(str tag, map<str, Capture> fields) => {
+            str out = "Attr(name: \"" + strOf(fields["name"]) + "\", value: \""
+            for (str k in fields) {
+                if (k == "value") { out = out + strOf(fields["value"]) }
+            }
+            return out + "\")"
+        }
+        _ => { return "Attr(\"\", \"\")" }
+    }
+}
+
+// -- Python (§8.4's @py.emitBody shape) ---------------------------------------
+
+// A Python statement list → Checkmate statements. Nested `if` bodies recurse
+// through emitBody; no indentation is emitted because Checkmate is
+// brace-delimited (statements are newline-separated, never indented).
+code emitBody(Capture body) {
+    str out = ""
+    match (body) {
+        List(Capture[] stmts) => {
+            for (Capture s in stmts) {
+                out = out + emitStmt(s)
+            }
+        }
+        _ => {}
+    }
+    return out
+}
+
+code emitStmt(Capture s) {
+    match (s) {
+        Rec(str tag, map<str, Capture> fields) => {
+            if (tag == "return") {
+                str out = "return"
+                for (str k in fields) {
+                    if (k == "value") { out = out + " " + strOf(fields["value"]) }
+                }
+                return out + "\n"
+            }
+            if (tag == "call") {
+                str args = ""
+                match (fields["args"]) {
+                    List(Capture[] items) => {
+                        for (Capture a in items) {
+                            // Each items wrap their body binds: rec:item[arg].
+                            match (a) {
+                                Rec(str atag, map<str, Capture> af) => {
+                                    for (str ak in af) {
+                                        if (ak == "arg") {
+                                            if (args != "") { args = args + ", " }
+                                            args = args + strOf(af["arg"])
+                                        }
+                                    }
+                                }
+                                Text(str t) => {
+                                    if (args != "") { args = args + ", " }
+                                    args = args + t
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return strOf(fields["callee"]) + "(" + args + ")" + "\n"
+            }
+            if (tag == "ifStmt") {
+                return "if (" + strOf(fields["cond"]) + ") {\n" + emitBody(fields["body"]) + "}\n"
+            }
+            return ""
+        }
+        _ => { return "" }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regex (§8.5's @std.re.emitMatcher shape)
+// ----------------------------------------------------------------------------
+
+// The entry: a re.pattern capture → a ReNode constructor expression. The
+// whitepaper's Thompson-vs-backtracking dispatch is elided — the fixture
+// always generates the structured value.
+code emitMatcher(Capture p) {
+    return emitRe(p)
+}
+
+code emitRe(Capture v) {
+    match (v) {
+        Rec(str tag, map<str, Capture> fields) => {
+            if (tag == "pattern") {
+                return "ReNode.Alt([" + joinRe(fields["alts"]) + "])"
+            }
+            if (tag == "alternative") {
+                return "ReNode.Seq([" + joinRe(fields["terms"]) + "])"
+            }
+            if (tag == "quantified") {
+                str inner = emitRe(fields["a"])
+                str out = inner
+                for (str k in fields) {
+                    if (k == "q") {
+                        match (fields["q"]) {
+                            Rec(str qtag, map<str, Capture> qf) => {
+                                if (qtag == "star") {
+                                    out = "ReNode.Repeat(\"*\", " + inner + ", 0, -1)"
+                                }
+                                if (qtag == "plus") {
+                                    out = "ReNode.Repeat(\"+\", " + inner + ", 1, -1)"
+                                }
+                                if (qtag == "opt") {
+                                    out = "ReNode.Repeat(\"?\", " + inner + ", 0, 1)"
+                                }
+                                if (qtag == "bound") {
+                                    str maxText = "-1"
+                                    for (str qk in qf) {
+                                        if (qk == "max") { maxText = strOf(qf["max"]) }
+                                    }
+                                    out = "ReNode.Repeat(\"{" + strOf(qf["min"]) + "," + maxText + "}\", " + inner + ", " + strOf(qf["min"]) + ", " + maxText + ")"
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                return out
+            }
+            if (tag == "anyChar") { return "ReNode.AnyChar()" }
+            if (tag == "anchorStart") { return "ReNode.AnchorStart()" }
+            if (tag == "anchorEnd") { return "ReNode.AnchorEnd()" }
+            if (tag == "literal") {
+                return "ReNode.Char(\"" + strOf(fields["ch"]) + "\")"
+            }
+            if (tag == "class") { return emitClass(fields["c"]) }
+            if (tag == "escape") { return emitEsc(fields["e"], "ReNode") }
+            if (tag == "group") {
+                // The atom branch binds the group rule as `g`; its record
+                // carries the inner pattern as `p` (the fixture's groups
+                // are capturing).
+                str out = "ReNode.Group(\"capturing\", ReNode.AnyChar())"
+                for (str k in fields) {
+                    if (k == "g") {
+                        match (fields["g"]) {
+                            Rec(str kind, map<str, Capture> gf) => {
+                                for (str gk in gf) {
+                                    if (gk == "p") {
+                                        out = "ReNode.Group(\"" + kind + "\", " + emitRe(gf["p"]) + ")"
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                return out
+            }
+            return "ReNode.AnyChar()"
+        }
+        _ => { return "ReNode.AnyChar()" }
+    }
+}
+
+code joinRe(Capture list) {
+    str parts = ""
+    match (list) {
+        List(Capture[] items) => {
+            for (Capture item in items) {
+                if (parts != "") { parts = parts + ", " }
+                parts = parts + emitRe(item)
+            }
+        }
+        _ => {}
+    }
+    return parts
+}
+
+code emitClass(Capture c) {
+    match (c) {
+        Rec(str tag, map<str, Capture> fields) => {
+            str negText = "false"
+            str items = ""
+            for (str k in fields) {
+                if (k == "neg") { negText = "true" }
+                if (k == "items") {
+                    match (fields["items"]) {
+                        List(Capture[] raw) => {
+                            for (Capture item in raw) {
+                                if (items != "") { items = items + ", " }
+                                items = items + emitClassItem(item)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return "ReNode.Class(" + negText + ", [" + items + "])"
+        }
+        _ => { return "ReNode.Class(false, [])" }
+    }
+}
+
+code emitClassItem(Capture item) {
+    match (item) {
+        Rec(str tag, map<str, Capture> fields) => {
+            if (tag == "posix") {
+                return "ClassItem.Posix(\"" + strOf(fields["name"]) + "\")"
+            }
+            if (tag == "single") {
+                return "ClassItem.Ch(\"" + strOf(fields["ch"]) + "\")"
+            }
+            if (tag == "range") {
+                return "ClassItem.Range(\"" + strOf(fields["lo"]) + "\", \"" + strOf(fields["hi"]) + "\")"
+            }
+            if (tag == "escape") { return emitEsc(fields["e"], "ClassItem") }
+            return "ClassItem.Ch(\"\")"
+        }
+        _ => { return "ClassItem.Ch(\"\")" }
+    }
+}
+
+// One escape spelling → an Esc payload. The `prefix` selects ReNode vs
+// ClassItem (a class escape and a top-level escape share the grammar rule).
+code emitEsc(Capture e, str prefix) {
+    match (e) {
+        Rec(str tag, map<str, Capture> fields) => {
+            // The escape record carries whichever bind its branch matched:
+            // kind (class escapes), ch (anchor/control/punctuation
+            // escapes), index (numeric backrefs), name (named), category
+            // (Unicode classes).
+            str kind = ""
+            for (str k in fields) {
+                if (k == "kind") { kind = strOf(fields["kind"]) }
+                if (k == "ch") { kind = strOf(fields["ch"]) }
+                if (k == "index") { kind = strOf(fields["index"]) }
+                if (k == "name") { kind = "k<" + strOf(fields["name"]) + ">" }
+                if (k == "category") {
+                    kind = "p{" + strOf(fields["category"]) + "}"
+                }
+            }
+            return prefix + ".Esc(\"" + kind + "\")"
+        }
+        _ => { return prefix + ".Esc(\"\")" }
+    }
+}
+
+// ============================================================================
 // PART 3 — CONSUMER PROGRAM
 // ============================================================================
 // Ordinary Checkmate code. Every `magic(name) { region }` below is expanded
@@ -753,7 +1415,8 @@ void usePy(int x) {
     return
 }
 
-// Python-flavored functions expand to real Checkmate function declarations.
+// Python-flavored functions expand to real Checkmate function declarations;
+// @emitBody handles the nested `if` recursion.
 magic(def) {
     def pyClampFn(v: int, lo: int, hi: int) -> int:
         usePy(lo)
@@ -767,8 +1430,17 @@ magic(def) {
         return "pos"
 }
 
+magic(def) {
+    def pyDeep(v: int) -> int:
+        if v < 0:
+            if v > -100:
+                return -1
+            return -2
+        return 1
+}
+
 int checkJson() {
-    map<str, str> config = magic(jsonValue) {
+    JsonTree config = magic(jsonValue) {
         {
             "host": "db.local",
             "ports": [5432, 6432],
@@ -778,16 +1450,36 @@ int checkJson() {
         }
     }
     int fails = 0
-    if (config["host"] != "db.local") { fails += 1 }
-    if (config["ports"] != "[]") { fails += 1 }
-    if (config["retries"] != "3") { fails += 1 }
-    if (config["debug"] != "true") { fails += 1 }
-    if (config["name"] != "null") { fails += 1 }
+    match (config) {
+        Obj(map<str, JsonTree> fields) => {
+            match (fields["host"]) {
+                Str(str s) => { if (s != "db.local") { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["ports"]) {
+                Arr(JsonTree[] items) => { if (items.length != 2) { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["retries"]) {
+                Num(str n) => { if (n != "3") { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["debug"]) {
+                Bool(bool b) => { if (!b) { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["name"]) {
+                Null() => {}
+                _ => { fails += 1 }
+            }
+        }
+        _ => { fails += 1 }
+    }
     return fails
 }
 
 int checkToml() {
-    str[] tomlLines = magic(tomlValue) {
+    JsonTree doc = magic(tomlValue) {
         title = "checkmate"
 
         # a transparent comment line
@@ -800,14 +1492,35 @@ int checkToml() {
         enabled = true
     }
     int fails = 0
-    if (tomlLines.length != 7) { fails += 1 }
-    if (tomlLines[0] != "title = \"checkmate\"") { fails += 1 }
-    if (tomlLines[1] != "[owner]") { fails += 1 }
-    if (tomlLines[2] != "name = \"matin\"") { fails += 1 }
-    if (tomlLines[3] != "id = 7") { fails += 1 }
-    if (tomlLines[4] != "[db]") { fails += 1 }
-    if (tomlLines[5] != "port = 5432") { fails += 1 }
-    if (tomlLines[6] != "enabled = true") { fails += 1 }
+    match (doc) {
+        Obj(map<str, JsonTree> fields) => {
+            match (fields["title"]) {
+                Str(str s) => { if (s != "checkmate") { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["id"]) {
+                Num(str n) => { if (n != "7") { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["[owner]"]) {
+                Obj(map<str, JsonTree> inner) => {
+                    str keys = ""
+                    for (str k in inner) { keys = keys + k }
+                    if (keys != "") { fails += 1 }
+                }
+                _ => { fails += 1 }
+            }
+            match (fields["port"]) {
+                Num(str n) => { if (n != "5432") { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["enabled"]) {
+                Bool(bool b) => { if (!b) { fails += 1 } }
+                _ => { fails += 1 }
+            }
+        }
+        _ => { fails += 1 }
+    }
     return fails
 }
 
@@ -816,7 +1529,7 @@ int checkYaml() {
     // line-oriented region must be authored with its interior lines
     // indented relative to the first line's (trimmed) column — here the
     // mapping entries are flush with it.
-    str[] yamlLines = magic(yamlValue) {
+    JsonTree doc = magic(yamlValue) {
     title: Checkmate
 limits:
     fuel: 1000000
@@ -824,10 +1537,30 @@ limits:
 tags: [embeddable, aot, arc]
     }
     int fails = 0
-    if (yamlLines.length != 3) { fails += 1 }
-    if (yamlLines[0] != "title = Checkmate") { fails += 1 }
-    if (yamlLines[1] != "limits = fuel: 1000000\n    deadlineMs: 50") { fails += 1 }
-    if (yamlLines[2] != "tags = [embeddable, aot, arc]") { fails += 1 }
+    match (doc) {
+        Obj(map<str, JsonTree> fields) => {
+            match (fields["title"]) {
+                Str(str s) => { if (s != "Checkmate") { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["limits"]) {
+                Obj(map<str, JsonTree> inner) => {
+                    // YAML scalars are text (the grammar has no number
+                    // type), so plain scalars arrive as Str.
+                    match (inner["fuel"]) {
+                        Str(str n) => { if (n != "1000000") { fails += 1 } }
+                        _ => { fails += 1 }
+                    }
+                }
+                _ => { fails += 1 }
+            }
+            match (fields["tags"]) {
+                Arr(JsonTree[] items) => { if (items.length != 3) { fails += 1 } }
+                _ => { fails += 1 }
+            }
+        }
+        _ => { fails += 1 }
+    }
     return fails
 }
 
@@ -850,13 +1583,14 @@ int checkCss() {
 }
 
 int checkHtml() {
-    str[] htmlLines = magic(htmlFragment) {
+    HtmlNode[] nodes = magic(htmlFragment) {
         <div class="hud">
             <span class="bar">HP</span>
         </div>
         <p>1 < 2</p>
     }
     int fails = 0
+    if (nodes.length != 2) { fails += 1 }
     // Expected-vs-actual decision (Task 5, first order):
     // 1. div has TWO children: the <span> element and the whitespace text
     //    node before </div>. The zero-width text node where the stop
@@ -866,18 +1600,62 @@ int checkHtml() {
     // 2. `1 < 2` is ONE text node: text stops only at tag starts
     //    (`until { "<" [a-zA-Z!/] }`), and the `<` here is followed by a
     //    space — not a tag start — per §8.8's conformance notes.
-    if (htmlLines.length != 2) { fails += 1 }
-    if (htmlLines[0] != "element <div> children=2") { fails += 1 }
-    if (htmlLines[1] != "element <p> children=1") { fails += 1 }
+    match (nodes[0]) {
+        Element(str tag, Attr[] attrs, HtmlNode[] children) => {
+            if (tag != "div") { fails += 1 }
+            if (attrs.length != 1) { fails += 1 }
+            if (children.length != 2) { fails += 1 }
+        }
+        _ => { fails += 1 }
+    }
+    match (nodes[1]) {
+        Element(str tag, Attr[] attrs, HtmlNode[] children) => {
+            if (tag != "p") { fails += 1 }
+            if (children.length != 1) { fails += 1 }
+        }
+        _ => { fails += 1 }
+    }
+    return fails
+}
+
+// A <script> body must parse as a js program (late cm.parse inside
+// @emitElement); this region exists to prove the happy path.
+int checkHtmlScript() {
+    HtmlNode[] nodes = magic(htmlFragment) {
+        <script>
+            let x = 1
+        </script>
+    }
+    int fails = 0
+    if (nodes.length != 1) { fails += 1 }
+    match (nodes[0]) {
+        Element(str tag, Attr[] attrs, HtmlNode[] children) => {
+            if (tag != "script") { fails += 1 }
+            if (children.length != 1) { fails += 1 }
+        }
+        _ => { fails += 1 }
+    }
     return fails
 }
 
 int checkRe() {
-    str emailPattern = magic(reCompile) {
+    ReNode matcher = magic(reCompile) {
         ^[\w.+-]+@[\w-]+(\.[\w-]+)+$
     }
     int fails = 0
-    if (emailPattern != "re( ^[\\w.+-]+@[\\w-]+(\\.[\\w-]+)+$ )") { fails += 1 }
+    match (matcher) {
+        Alt(ReNode[] alts) => {
+            if (alts.length != 1) { fails += 1 }
+            match (alts[0]) {
+                Seq(ReNode[] terms) => {
+                    // ^, [\w.+-]+, @, [\w-]+, (\.[\w-]+)+, $
+                    if (terms.length != 6) { fails += 1 }
+                }
+                _ => { fails += 1 }
+            }
+        }
+        _ => { fails += 1 }
+    }
     return fails
 }
 
@@ -899,6 +1677,9 @@ int checkPy() {
     if (clamped != 2) { fails += 1 }
     if (pySign(-5) != "neg") { fails += 1 }
     if (pySign(7) != "pos") { fails += 1 }
+    if (pyDeep(-5) != -1) { fails += 1 }
+    if (pyDeep(-200) != -2) { fails += 1 }
+    if (pyDeep(3) != 1) { fails += 1 }
     return fails
 }
 
@@ -928,6 +1709,7 @@ int main() {
     fails += checkYaml()
     fails += checkCss()
     fails += checkHtml()
+    fails += checkHtmlScript()
     fails += checkRe()
     fails += checkJs()
     fails += checkPy()

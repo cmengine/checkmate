@@ -124,6 +124,11 @@ fn parse_primary(text: &str, cursor: &mut usize, span: Span) -> Result<CtxExpr, 
     if rest.starts_with('@') {
         *cursor += 1;
     }
+    // `$cap` — the `$` of a capture path is optional in condition positions
+    // (plan §1.4.5), but it must not look like "no expression" here.
+    if rest.starts_with('$') {
+        *cursor += 1;
+    }
 
     if rest.starts_with('(') {
         *cursor += 1;

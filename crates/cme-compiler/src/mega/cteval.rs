@@ -39,7 +39,7 @@ use std::collections::{HashMap, HashSet};
 use cme_core::Span;
 use cme_core::ast::{PrimitiveType, Stmt, StmtKind, Type};
 use cme_core::magic::{Capture, CaptureKind, PatKind, Pattern, TextKind};
-use cme_interp::{Interpreter, Value};
+use cme_interp::{CtHost, Interpreter, Value};
 
 use crate::mega::matcher::{GrammarSet, MatchRegion, match_entry};
 use crate::mega::scan::MagicScan;
@@ -199,7 +199,7 @@ impl<'g> CtEngine<'g> {
                 )
             })?);
         }
-        let interpreter = Interpreter::new(&self.program);
+        let interpreter = Interpreter::new(&self.program).with_host(self);
         let value = interpreter.invoke(name, &values).map_err(|error| {
             format!(
                 "compile-time call `{}` failed: {}",
@@ -339,6 +339,68 @@ impl<'g> CtEngine<'g> {
         }
         self.fuel.set(remaining - 1);
         Ok(())
+    }
+}
+
+/// The §8.5 host surface for compile-time Checkmate code: `cm.parseExpr`,
+/// `cm.parseStmts`, `cm.parse` (rule path as a quoted string in this
+/// position — a bare `grammar.rule` is not a Checkmate expression) and the
+/// `cm.code.*` builders, answered while the interpreter runs the file's own
+/// `@`-functions during expansion.
+impl CtHost for CtEngine<'_> {
+    fn ct_call(&self, path: &str, args: &[Value]) -> Option<Result<Value, String>> {
+        if let Err(message) = self.spend_fuel(&[path.to_string()]) {
+            return Some(Err(message));
+        }
+        let segments: Vec<&str> = path.split('.').collect();
+        let text = |index: usize| -> Option<&str> {
+            match args.get(index) {
+                Some(Value::Str(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        };
+        let result = match segments.as_slice() {
+            ["cm", "parseExpr"] => match text(0) {
+                Some(text) => crate::parser::parse_expr_text(text)
+                    .map(|_| Value::Str(text.to_string()))
+                    .map_err(|message| format!("cm.parseExpr: {message}")),
+                None => Err("cm.parseExpr argument 1 must be text".to_string()),
+            },
+            ["cm", "parseStmts"] => match text(0) {
+                Some(text) => crate::parser::parse_stmts_text(text)
+                    .map(|_| Value::Str(text.to_string()))
+                    .map_err(|message| format!("cm.parseStmts: {message}")),
+                None => Err("cm.parseStmts argument 1 must be text".to_string()),
+            },
+            ["cm", "parse"] => match (text(0), text(1)) {
+                (Some(rule), Some(body)) => {
+                    self.parse_by_rule(rule, body).map(|result| result.value)
+                }
+                _ => Err("cm.parse arguments must be (\"grammar.rule\", text)".to_string()),
+            },
+            ["cm", "code", "str"] => match text(0) {
+                Some(text) => Ok(Value::Str(format!("\"{}\"", escape_checkmate(text)))),
+                None => Err("cm.code.str argument 1 must be text".to_string()),
+            },
+            ["cm", "code", "call"] => {
+                let Some(name) = text(0) else {
+                    return Some(Err("cm.code.call argument 1 must be text".to_string()));
+                };
+                let mut parts = Vec::new();
+                for arg in &args[1..] {
+                    match arg {
+                        Value::Str(text) => parts.push(text.clone()),
+                        other => match render_value(other) {
+                            Ok(rendered) => parts.push(rendered),
+                            Err(message) => return Some(Err(message)),
+                        },
+                    }
+                }
+                Ok(Value::Str(format!("{}({})", name, parts.join(", "))))
+            }
+            _ => return None,
+        };
+        Some(result)
     }
 }
 

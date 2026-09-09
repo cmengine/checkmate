@@ -1042,6 +1042,8 @@ impl Checker {
     ) {
         let declared = self.resolve_type(elem_ty, span);
         let iter_ty = self.type_expr(iterable, None);
+        // §1.4.10 (plan): iterating a map yields its keys — the compile-time
+        // helpers walk capture record fields this way.
         let element = match iter_ty {
             Ty::Array(elem) => {
                 if !declared.is_poison() && declared != *elem {
@@ -1056,6 +1058,7 @@ impl Checker {
                 }
                 *elem
             }
+            Ty::Map(key, _) => *key,
             Ty::Poison | Ty::Ambiguous => Ty::Poison,
             other => {
                 self.report(
@@ -1874,6 +1877,20 @@ impl Checker {
         // impl member on the same target — `Type.name(args)` is a
         // construction when `Type` is an enum with a variant `name`, and a
         // member call otherwise.
+        // §8.5 (text-level deviation): the compile-time builtin namespace —
+        // `cm.parseExpr` / `cm.parseStmts` / `cm.parse` return `code` (the
+        // checked alias of `str`); `cm.code.*` builders likewise. The
+        // megaprogram evaluator answers these calls during expansion; at
+        // runtime the helpers are dead code.
+        if enum_name == "cm" {
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            return Ty::Str;
+        }
         if let Some(&idx) = self.type_index.get(enum_name) {
             if self.types[idx].is_struct() {
                 // A struct target: structs construct by bare name (§2.6), so
@@ -1958,6 +1975,20 @@ impl Checker {
         span: Span,
     ) -> Ty {
         let _ = expected; // Member signatures are concrete; nothing crystallizes.
+        // §8.5 (text-level deviation): the compile-time builtin namespace —
+        // `cm.parseExpr` / `cm.parseStmts` / `cm.parse` return `code` (the
+        // checked alias of `str`); `cm.code.*` builders likewise. Arguments
+        // are still type-checked. The megaprogram evaluator answers these
+        // calls during expansion; at runtime the helpers are dead code.
+        if path.first().map(String::as_str) == Some("cm") {
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            return Ty::Str;
+        }
         if path.len() >= 2 {
             let member = &path[path.len() - 1];
             let target = path[..path.len() - 1].join(".");

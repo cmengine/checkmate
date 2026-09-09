@@ -229,7 +229,7 @@ fn magic_cm_expands_checks_and_runs_clean() {
     // Every macro in the fixture was invoked exactly once, and no
     // invocation or declaration sites survive (comments do, so a raw
     // substring test would false-positive; re-scan instead).
-    assert_eq!(outcome.records.len(), 10, "expected 10 invocations");
+    assert_eq!(outcome.records.len(), 12, "expected 12 invocations");
     let rescan = cme_compiler::mega::scan::scan_magic(&outcome.expanded).0;
     assert!(rescan.invocations.is_empty(), "invocations remain");
     assert!(rescan.magics.is_empty(), "magic declarations remain");

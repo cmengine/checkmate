@@ -466,14 +466,14 @@ pub enum CaptureValue {
 - [x] Purity enforcement: only core/self imports (single-file: trivially true).
 - [x] Commit: `feat(compiler): compile-time function evaluation for megaprograms`.
 
-### Task 8 — `magic.cm` upgraded to whitepaper templates  `[ ]`
-- [ ] `@toValue`-style codegen: JSON/TOML/YAML → a `jsonTree`-style enum value
+### Task 8 — `magic.cm` upgraded to whitepaper templates  `[x]`
+- [x] `@toValue`-style codegen: JSON/TOML/YAML → a `jsonTree`-style enum value
       (declared in magic.cm) instead of summary maps.
-- [ ] `where @isVoid(name)` / `@isRawText(name)` replace the `||` chains;
+- [x] `where @isVoid(name)` / `@isRawText(name)` replace the `||` chains;
       `@emitElement` for HTML (late `cm.parse(css.sheet/js.program, body)`);
       `@py.emitBody` recursion; `@emitMatcher` for RE; `@anchorsResolve`
       YAML `require`.
-- [ ] Re-pin magic.cm; commit: `test: upgrade magic.cm templates to §8.5 codegen`.
+- [x] Re-pin magic.cm; commit: `test: upgrade magic.cm templates to §8.5 codegen`.
 
 ### Task 9 — Nested invocations, islands, heredocs, fixpoint  `[ ]`
 - [ ] Region scanning with islands (piercing `"${ … }"`), nested

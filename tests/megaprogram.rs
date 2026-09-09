@@ -264,6 +264,161 @@ fn magic_cm_expands_checks_and_runs_clean() {
     );
 }
 
+/// §8.6 island piercing + the §8.8 JS-template-literal example: a
+/// `magic(jsonValue)` invocation inside a template-literal island is a REAL
+/// nested invocation — discovered by the scanner, expanded innermost-first
+/// (the outer region then re-matches with the expanded island), and gone
+/// from the final output.
+#[test]
+fn nested_invocation_inside_a_template_literal_island_expands() {
+    let source = r#"
+grammar json {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule value {
+        oneof {
+            number => $int n
+            string => $str s
+        }
+    }
+}
+
+grammar js {
+    skip    [ ' ', '\t' ]
+    string  ( '`' multiline island ( "${" "}" ) )
+    rule program { each { statement } as stmts }
+    rule statement {
+        oneof {
+            log => ( "log" "(" primary value ")" semi )
+        }
+    }
+    rule semi { oneof { explicit => ( ";" optional { eol } ), inserted => eol } }
+    rule expression { primary }
+    rule primary {
+        oneof {
+            template => $str literal
+            ident    => $word name
+        }
+    }
+}
+
+enum Capture {
+    Text(str content)
+    Int(int value)
+    Float(float value)
+    List(Capture[] items)
+    Rec(str tag, map<str, Capture> fields)
+    Absent()
+}
+
+int toValue(Capture v) {
+    match (v) {
+        Rec(str tag, map<str, Capture> fields) => {
+            for (str k in fields) {
+                if (k == "n") {
+                    match (fields["n"]) {
+                        Int(int n) => { return n }
+                        _ => {}
+                    }
+                }
+            }
+            return 0
+        }
+        _ => { return 0 }
+    }
+}
+
+magic jsonValue(json.value as v) {
+    @toValue($v)
+}
+
+magic jsEcho(js.program as p) {
+    [
+        [each in $p.stmts {
+            match ($item) {
+                log => $item.value.literal
+            }
+        }]
+    ]
+}
+
+int main() {
+    str[] echoed = magic(jsEcho) {
+        log(`val: ${magic(jsonValue) { 7 }}`)
+    }
+    if (echoed[0] != "val: ${7}") { return 1 }
+    return 0
+}
+"#;
+    let outcome = cme_compiler::mega::expand::expand_source(source).unwrap();
+    // Both the outer jsEcho and the island-nested jsonValue expanded.
+    assert_eq!(outcome.records.len(), 2, "outer + nested invocation");
+    // The nested invocation's result (7) sits inside the island of the
+    // spliced template literal; the raw `magic(...)` text is gone.
+    let normalized: String = outcome
+        .expanded
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized.contains("val: ${7}"),
+        "nested expansion should be inside the island: {}",
+        outcome.expanded
+    );
+    let rescan = cme_compiler::mega::scan::scan_magic(&outcome.expanded).0;
+    assert!(rescan.invocations.is_empty(), "invocations remain");
+
+    let parsed = parse_clean(&outcome.expanded);
+    let type_errors = cme_compiler::check::check(&parsed.statements);
+    assert!(type_errors.is_empty(), "{type_errors:?}");
+    let interpreter = cme_interp::Interpreter::new(&parsed.statements);
+    let result = interpreter.invoke("main", &[]).expect("runs");
+    assert_eq!(result, cme_interp::Value::Int(0));
+}
+
+/// §8.6 heredoc regions: `magic(name) <<tag … tag` extends the region
+/// verbatim to the tag line — braces no composed profile could balance stay
+/// exactly as authored.
+#[test]
+fn heredoc_regions_are_taken_verbatim() {
+    let source = r#"
+grammar freeform {
+    skip [ ]
+    rule text { $text t }
+}
+
+magic rawEcho(freeform.text as t) {
+    $"{$t.t}"
+}
+
+int main() {
+    str echoed = magic(rawEcho) <<END
+  } unbalanced { brace - no profile needs to understand this
+END
+    if (echoed != "} unbalanced { brace - no profile needs to understand this") { return 1 }
+    return 0
+}
+"#;
+    let outcome = cme_compiler::mega::expand::expand_source(source).unwrap();
+    assert_eq!(outcome.records.len(), 1);
+    let normalized: String = outcome
+        .expanded
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized.contains("} unbalanced { brace"),
+        "{}",
+        outcome.expanded
+    );
+
+    let parsed = parse_clean(&outcome.expanded);
+    let type_errors = cme_compiler::check::check(&parsed.statements);
+    assert!(type_errors.is_empty(), "{type_errors:?}");
+    let interpreter = cme_interp::Interpreter::new(&parsed.statements);
+    let result = interpreter.invoke("main", &[]).expect("runs");
+    assert_eq!(result, cme_interp::Value::Int(0));
+}
+
 /// `cme expand magic.cm` writes a labeled sidecar file next to the original
 /// whose parse+check is clean; `cme run magic.cm` runs the expansion.
 #[cfg(feature = "cli")]

@@ -10,7 +10,8 @@
 
 use crate::diagnostics::Diagnostic;
 use crate::mega::profile::{
-    balance, checkmate_scan_profile, comment_len, parse_profile, string_len, with_default_strings,
+    balance, balance_island, checkmate_scan_profile, comment_len, parse_profile, string_len,
+    with_default_strings,
 };
 use cme_core::Span;
 use cme_core::magic::LexProfile;
@@ -368,9 +369,40 @@ fn scan_invocation(
     cursor += 1;
     cursor = skip_ws_and_comments(source, cursor, scanner);
     let header_span = Span::new(header_start, cursor);
+    // Heredoc form (§8.6): `magic(name) <<tag … tag` — the region extends
+    // verbatim to the first line whose content is exactly `tag`; only the
+    // edge trims of normalization apply. The zero-approximation escape
+    // hatch for regions whose braces no composed profile can balance.
+    if source[cursor..].starts_with("<<") {
+        let tag_start = cursor + 2;
+        let tag_end = tag_start
+            + source[tag_start..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .map(char::len_utf8)
+                .sum::<usize>();
+        if tag_end == tag_start {
+            errors.push(Diagnostic::parse(
+                "expected a tag after `<<` in the heredoc form",
+                Span::new(tag_start, tag_start),
+            ));
+            return None;
+        }
+        let tag = source[tag_start..tag_end].to_string();
+        return scan_heredoc_region(
+            source,
+            header_start,
+            header_span,
+            path.join("."),
+            tag,
+            tag_end,
+            scan,
+            errors,
+        );
+    }
     if !source[cursor..].starts_with('{') {
         errors.push(Diagnostic::parse(
-            "expected `{` to open the magic region",
+            "expected `{` or `<<tag` to open the magic region",
             Span::new(cursor, cursor),
         ));
         return None;
@@ -392,7 +424,218 @@ fn scan_invocation(
         region,
     });
     let _ = name_span;
+    // §8.6: nested invocations inside the region's ISLANDS (the Checkmate
+    // holes of template-literal string forms) are discovered recursively —
+    // plain foreign text stays inert.
+    discover_nested_invocations(
+        source,
+        Span::new(cursor, region_close),
+        &profile,
+        scan,
+        errors,
+    );
     Some(region_close + 1)
+}
+
+/// Scans a heredoc region: verbatim text from the line after `<<tag` to the
+/// line whose content is exactly `tag` (§8.6). Only the edge trims of
+/// normalization apply. Heredoc regions never nest discoveries — they are
+/// the zero-approximation form, taken verbatim.
+#[allow(clippy::too_many_arguments)]
+fn scan_heredoc_region(
+    source: &str,
+    header_start: usize,
+    header_span: Span,
+    name: String,
+    tag: String,
+    after_tag: usize,
+    scan: &mut MagicScan,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<usize> {
+    // The region starts after the tag's line terminator.
+    let mut cursor = after_tag;
+    while matches!(source[cursor..].chars().next(), Some(c) if c != '\n' && c != '\r') {
+        cursor += source[cursor..].chars().next().unwrap().len_utf8();
+    }
+    if source[cursor..].starts_with("\r\n") {
+        cursor += 2;
+    } else if source[cursor..].starts_with(['\n', '\r']) {
+        cursor += 1;
+    } else {
+        errors.push(Diagnostic::parse(
+            format!("unclosed heredoc: no `{tag}` line before the end of the file"),
+            Span::new(header_start, header_start),
+        ));
+        return None;
+    }
+    let region_start = cursor;
+    // Walk lines looking for one whose content is exactly `tag`.
+    let mut region_end = source.len();
+    let mut close_line_end = source.len();
+    let mut line = cursor;
+    while line <= source.len() {
+        let line_end = source[line..]
+            .find(['\n', '\r'])
+            .map(|offset| line + offset)
+            .unwrap_or(source.len());
+        let content = source[line..line_end].trim_end_matches(['\r']);
+        if content.trim() == tag {
+            region_end = line;
+            close_line_end = line_end;
+            break;
+        }
+        if line_end >= source.len() {
+            break;
+        }
+        line = line_end + 1;
+    }
+    if region_end == source.len() && source[region_start..].trim() != "".to_string().trim() {
+        // No closer found (or the closer is the last line without a
+        // terminator) — report unless the final line is exactly the tag.
+        let last_line_start = source[..source.len()]
+            .rfind('\n')
+            .map(|offset| offset + 1)
+            .unwrap_or(0);
+        if source[last_line_start..].trim() != tag {
+            errors.push(Diagnostic::parse(
+                format!("unclosed heredoc: no `{tag}` line before the end of the file"),
+                Span::new(header_start, header_start),
+            ));
+            return None;
+        }
+        region_end = last_line_start;
+        close_line_end = source.len();
+    }
+    let (region_span, region) = normalize_region(source, region_start - 1, region_end);
+    scan.invocations.push(InvocationScan {
+        name,
+        span: Span::new(header_start, close_line_end),
+        header_span,
+        region_span,
+        region,
+    });
+    Some(close_line_end)
+}
+
+/// Discovers nested `magic(name) { … }` invocations inside a region's
+/// ISLANDS (§8.6): an island is a Checkmate hole in a template-literal
+/// string form, so a `magic(…)` there is a real invocation — discovered
+/// recursively, with spans anchored in the original source. Foreign text
+/// outside islands (including plain strings) stays inert.
+fn discover_nested_invocations(
+    source: &str,
+    region: Span,
+    profile: &LexProfile,
+    scan: &mut MagicScan,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let mut cursor = region.start;
+    while cursor < region.end {
+        if let Some(len) = comment_len(source, cursor, profile) {
+            cursor += len;
+            continue;
+        }
+        // A string form: walk it, piercing islands (whose content is
+        // Checkmate and may hold nested invocations).
+        if let Some(form) = string_form_at(source, cursor, profile) {
+            cursor = walk_string_for_islands(source, cursor, &form, region.end, scan, errors);
+            continue;
+        }
+        cursor += source[cursor..].chars().next().unwrap().len_utf8();
+    }
+}
+
+fn string_form_at(
+    source: &str,
+    pos: usize,
+    profile: &LexProfile,
+) -> Option<cme_core::magic::StringForm> {
+    let first = source[pos..].chars().next()?;
+    profile
+        .strings
+        .iter()
+        .find(|form| form.quote == first)
+        .cloned()
+}
+
+/// Walks one string literal from its quote, recursing into each island's
+/// content with the Checkmate-level invocation scanner.
+fn walk_string_for_islands(
+    source: &str,
+    string_start: usize,
+    form: &cme_core::magic::StringForm,
+    region_end: usize,
+    scan: &mut MagicScan,
+    errors: &mut Vec<Diagnostic>,
+) -> usize {
+    let Some((open, close)) = &form.island else {
+        // No islands: skip the whole string (string_len's semantics).
+        return string_len(
+            source,
+            string_start,
+            &LexProfile {
+                strings: vec![form.clone()],
+                ..LexProfile::default()
+            },
+        )
+        .map(|len| string_start + len)
+        .unwrap_or_else(|| advance_after_block(source, string_start));
+    };
+    let mut cursor = string_start + form.quote.len_utf8();
+    while cursor < region_end {
+        if source[cursor..].starts_with(open.as_str()) {
+            let Some(close_pos) = balance_island(source, cursor + open.len(), close) else {
+                return region_end;
+            };
+            // The island's content is Checkmate: scan it for invocations.
+            scan_island_checkmate(source, cursor + open.len(), close_pos, scan, errors);
+            cursor = close_pos + close.len();
+            continue;
+        }
+        if source[cursor..].starts_with('\\') {
+            cursor += 2;
+            continue;
+        }
+        if source[cursor..].starts_with(form.quote) {
+            return cursor + form.quote.len_utf8();
+        }
+        cursor += source[cursor..].chars().next().unwrap().len_utf8();
+    }
+    cursor
+}
+
+/// A miniature Checkmate-level scan over one island's content: finds
+/// `magic(name) { … }` invocations (and `<<tag` heredocs) and recurses into
+/// their regions.
+fn scan_island_checkmate(
+    source: &str,
+    start: usize,
+    end: usize,
+    scan: &mut MagicScan,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let scanner = checkmate_scan_profile();
+    let mut cursor = start;
+    while cursor < end {
+        if let Some(len) = comment_len(source, cursor, &scanner) {
+            cursor += len;
+            continue;
+        }
+        if let Some(len) = string_len(source, cursor, &scanner) {
+            cursor += len;
+            continue;
+        }
+        if let Some(word) = keyword_at(source, cursor, "magic") {
+            let next = skip_inline_ws(source, cursor + word);
+            if source[next..].starts_with('(') {
+                cursor = scan_invocation(source, cursor, &scanner, scan, errors).unwrap_or(end);
+                continue;
+            }
+            cursor += word;
+            continue;
+        }
+        cursor += source[cursor..].chars().next().unwrap().len_utf8();
+    }
 }
 
 /// The composed profile for one invocation (§8.6): the entry grammar's

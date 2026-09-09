@@ -475,14 +475,14 @@ pub enum CaptureValue {
       YAML `require`.
 - [x] Re-pin magic.cm; commit: `test: upgrade magic.cm templates to §8.5 codegen`.
 
-### Task 9 — Nested invocations, islands, heredocs, fixpoint  `[ ]`
-- [ ] Region scanning with islands (piercing `"${ … }"`), nested
+### Task 9 — Nested invocations, islands, heredocs, fixpoint  `[x]`
+- [x] Region scanning with islands (piercing `"${ … }"`), nested
       `magic(...)` discovery + expansion inside regions (queue, source order,
       depth cap 64, full expansion-stack diagnostics).
-- [ ] Heredoc `magic(name) <<tag … tag` regions.
-- [ ] Tests: the §8.8 JS-template-literal example (`magic(json.value)` inside
+- [x] Heredoc `magic(name) <<tag … tag` regions.
+- [x] Tests: the §8.8 JS-template-literal example (`magic(json.value)` inside
       `` `Hello, ${ … }` ``).
-- [ ] Commit: `feat(compiler): nested magic invocations, islands, heredoc regions`.
+- [x] Commit: `feat(compiler): nested magic invocations, islands, heredoc regions`.
 
 ### Task 10 — Diagnostics & provenance polish  `[ ]`
 - [ ] Region-scan hint ("an inner `}` invisible to every composed profile …
@@ -517,6 +517,42 @@ pub enum CaptureValue {
 
 ## 5. Session log / handoff notes
 
+- Session 2 (continued): Tasks 7, 8, 9 completed on top of Task 6. Per-commit
+  patches exported for delivery.
+- Task 7 notes: the compile-time evaluator lives in `mega/cteval.rs` and runs
+  the file's own pure functions on the real interpreter (cme-compiler now
+  depends on cme-interp). Captures bridge per the callee's DECLARED parameter
+  types: scalars for `int`/`float`/`str`/`bool`, the file-declared `Capture`
+  enum for tree parameters (Rec(tag, map<str, Capture>), Absent for missing
+  optional binds). `code` is a checker-level alias of `str`; a `code`-typed
+  result splices raw, a plain result renders as a literal (quoted strings,
+  `Name.Variant(…)` enums, named-arg structs). The `cm.*` builtins are
+  callable BOTH from templates (without `@`, per the whitepaper) and from
+  compile-time Checkmate code (as `cm.parse("grammar.rule", text)` — the
+  VariantCall/PathCall forms route to a `CtHost` surface the engine attaches
+  to the interpreter; in-code rule paths are quoted strings). Fuel: one unit
+  per call, 100_000 per expansion (§5.5), deterministic.
+- Task 8 notes: magic.cm's templates are now whitepaper-shaped (`@toValue`
+  trees, `where @isVoid` / `@isRawText`, late `cm.parse` inside
+  `@emitElement`, `@emitBody` recursion, `@emitMatcher`, the YAML
+  `require(@anchorsResolve($doc), …)`). The helpers walk captures with the
+  for-over-keys idiom (`for (str k in fields)`) because an optional bind that
+  did not match has NO field entry. Grammar reshapes for bridge
+  reachability are documented in the fixture header (bool tag split, flat
+  toml value branches, bound re subtrees, flat escape branches).
+- Task 9 notes: the scanner discovers nested invocations inside island
+  content only (`scan_island_checkmate` pierces island spans of the composed
+  profile; plain foreign text stays inert — the pre-Task-9 pin still holds).
+  The expander expands the INNERMOST invocation set per pass (a span
+  containing no other invocation); siblings at one depth share a pass, and
+  the depth cap reports the full containment chain. Two balancer fixes came
+  with the fixture: `balance_island` checks the island closer before
+  counting a `}` as a nested decrement (an island `${magic(x) { 1 }}` used
+  to swallow one `}` too many), and `$str` (`str_at`) is now PROFILE-AWARE —
+  it matches any declared string form (backtick template literals included),
+  decodes escapes, and keeps island content verbatim in the value.
+  Heredoc regions are verbatim to the tag line, normalized only at the
+  edges, and never nest discoveries.
 - Session 2: Tasks 4, 5, 6 completed, committed on top of base `387818a`
   (Session 1's last commit). Per-commit patches exported for delivery.
 - Task 4 notes: the packrat memo keys include the caller continuation

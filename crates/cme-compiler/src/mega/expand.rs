@@ -16,7 +16,7 @@ use crate::diagnostics::Diagnostic;
 use crate::mega::matcher::{CompiledGrammar, CompiledRule, GrammarSet, MatchRegion, match_entry};
 use crate::mega::pattern::{parse_pattern, parse_rule_declaration};
 use crate::mega::profile::default_profile;
-use crate::mega::scan::{MagicScan, scan_magic};
+use crate::mega::scan::{InvocationScan, MagicScan, scan_magic};
 use crate::mega::template::{elaborate, parse_template};
 
 /// One expanded invocation, recorded for tooling and provenance.
@@ -80,14 +80,40 @@ pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> 
         }
         depth += 1;
         if depth > DEPTH_CAP {
-            let span = round_scan.invocations[0].span;
+            let mut message =
+                format!("expansion depth exceeded the cap of {DEPTH_CAP} (§8.6); expansion stack:");
+            let chain = expansion_stack(&round_scan.invocations);
+            for (index, invocation) in chain.iter().enumerate() {
+                message.push_str(&format!(
+                    "\n  {}. magic({}) at {}..{}",
+                    index + 1,
+                    invocation.name,
+                    invocation.span.start,
+                    invocation.span.end
+                ));
+            }
             return Err(vec![Diagnostic::parse(
-                format!("expansion depth exceeded the cap of {DEPTH_CAP}"),
-                span,
+                message,
+                round_scan.invocations[0].header_span,
             )]);
         }
+        // §8.6's depth-first sweep: only the INNERMOST invocations expand in
+        // one pass — an invocation whose span contains no other invocation.
+        // Siblings at the same nesting depth expand in the same pass, so
+        // breadth is unbounded; nesting depth is what the cap counts.
+        let innermost: Vec<&InvocationScan> = round_scan
+            .invocations
+            .iter()
+            .filter(|invocation| {
+                !round_scan.invocations.iter().any(|other| {
+                    !std::ptr::eq(other, *invocation)
+                        && other.span.start >= invocation.span.start
+                        && other.span.end <= invocation.span.end
+                })
+            })
+            .collect();
         let mut edits: Vec<(Span, String)> = Vec::new();
-        for invocation in &round_scan.invocations {
+        for invocation in &innermost {
             let Some(macro_def) = macros
                 .iter()
                 .find(|macro_def| macro_def.name == invocation.name)
@@ -194,6 +220,40 @@ fn count_newlines(text: &str, span: Span) -> usize {
         .count()
 }
 
+/// The containment chain of the deepest invocation: outermost first. This is
+/// the expansion stack the depth-cap diagnostic reports (§8.6: "the full
+/// expansion stack — each macro, span, and pass").
+fn expansion_stack(invocations: &[InvocationScan]) -> Vec<&InvocationScan> {
+    let Some(innermost) = invocations.iter().min_by_key(|invocation| {
+        invocations
+            .iter()
+            .filter(|other| {
+                !std::ptr::eq(*other, *invocation)
+                    && other.span.start >= invocation.span.start
+                    && other.span.end <= invocation.span.end
+            })
+            .count()
+    }) else {
+        return Vec::new();
+    };
+    let mut chain = vec![innermost];
+    while let Some(current) = chain.first() {
+        let Some(container) = invocations.iter().find(|other| {
+            !std::ptr::eq(*other, *current)
+                && other.span.start <= current.span.start
+                && other.span.end >= current.span.end
+                && (other.span.start != current.span.start || other.span.end != current.span.end)
+        }) else {
+            break;
+        };
+        chain.insert(0, container);
+        if chain.len() > DEPTH_CAP + 1 {
+            break;
+        }
+    }
+    chain
+}
+
 /// Applies non-overlapping span edits, highest position first.
 fn apply_edits(text: &str, edits: &[(Span, String)]) -> String {
     let mut edits = edits.to_vec();
@@ -221,7 +281,10 @@ fn compile_grammars(scan: &MagicScan, diagnostics: &mut Vec<Diagnostic>) -> Gram
     for grammar in &scan.grammars {
         let mut compiled = CompiledGrammar {
             name: grammar.name.clone(),
-            profile: grammar.profile.clone(),
+            // §2.4's pragmatic default: a grammar that declares no string
+            // forms still gets the default `"` single-line form, so `$str`
+            // and the region balancer agree (JSON regions need it).
+            profile: crate::mega::profile::with_default_strings(&grammar.profile),
             rules: Vec::new(),
         };
         let body = grammar.body.clone();

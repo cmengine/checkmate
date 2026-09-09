@@ -217,16 +217,22 @@ pub fn string_len(source: &str, pos: usize, profile: &LexProfile) -> Option<usiz
 /// Skips an island's content: from just after the island opener to just
 /// before its closer, counting braces so nested Checkmate blocks (a nested
 /// `magic(…) { … }` inside a template-literal island) stay transparent.
-fn balance_island(source: &str, start: usize, closer: &str) -> Option<usize> {
+/// Public because the scanner pierces islands a second time to DISCOVER the
+/// nested invocations inside them (§8.6).
+pub fn balance_island(source: &str, start: usize, closer: &str) -> Option<usize> {
     let mut cursor = start;
     let mut depth = 1usize;
     while cursor < source.len() {
+        // The island's own closer is the brace matching the opener: check
+        // it BEFORE counting a `}` as a nested-brace decrement, or the
+        // island swallows one `}` too many and never closes (§8.6).
+        if source[cursor..].starts_with(closer) && depth == 1 {
+            return Some(cursor);
+        }
         if source[cursor..].starts_with('{') {
             depth += 1;
         } else if source[cursor..].starts_with('}') {
             depth -= 1;
-        } else if source[cursor..].starts_with(closer) && depth == 1 {
-            return Some(cursor);
         }
         cursor += source[cursor..].chars().next().unwrap().len_utf8();
     }

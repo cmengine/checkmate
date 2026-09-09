@@ -1858,8 +1858,9 @@ impl<'a> Matcher<'a> {
             }
             FragKind::Str => {
                 let start = self.skip(pos, env);
-                let Some((value, end)) = self.str_at(start) else {
-                    self.note_failure(start, "expected a double-quoted string");
+                let profile = &self.set.grammars[env.grammar].profile;
+                let Some((value, end)) = self.str_at(start, profile) else {
+                    self.note_failure(start, "expected a string literal");
                     return None;
                 };
                 let capture = Capture {
@@ -2111,32 +2112,84 @@ impl<'a> Matcher<'a> {
 
     /// A double-quoted string with backslash escapes; returns the decoded
     /// value and the end position (past the closing quote).
-    fn str_at(&self, start: usize) -> Option<(String, usize)> {
-        if self.region.chars.get(start) != Some(&'"') {
-            return None;
-        }
+    /// Scans a string literal per the CURRENT GRAMMAR's string forms (quote,
+    /// multiline, escapes, islands — §8.2): `$str` captures whichever form
+    /// matches, including template literals whose island content stays
+    /// verbatim in the value (it is live Checkmate, §8.6). The decoded
+    /// content excludes the quotes.
+    fn str_at(&self, start: usize, profile: &LexProfile) -> Option<(String, usize)> {
+        let first = *self.region.chars.get(start)?;
+        let form = profile.strings.iter().find(|form| form.quote == first)?;
+        // The source text from a char position to the region's end (for
+        // multi-character prefix checks like the island opener).
+        let slice = |pos: usize| -> Option<&str> {
+            let byte = *self.region.byte_offsets.get(pos)?;
+            Some(&self.region.source[byte..])
+        };
         let mut cursor = start + 1;
         let mut value = String::new();
         loop {
-            match self.region.chars.get(cursor) {
-                Some('"') => return Some((value, cursor + 1)),
-                Some('\\') => {
-                    let escaped = *self.region.chars.get(cursor + 1)?;
-                    value.push(match escaped {
-                        'n' => '\n',
-                        't' => '\t',
-                        'r' => '\r',
-                        '0' => '\0',
-                        other => other,
-                    });
-                    cursor += 2;
-                }
-                Some(_) => {
-                    value.push(*self.region.chars.get(cursor).unwrap());
-                    cursor += 1;
-                }
-                None => return None,
+            let c = *self.region.chars.get(cursor)?;
+            if c == '\\' {
+                let escaped = *self.region.chars.get(cursor + 1)?;
+                value.push(match escaped {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '0' => '\0',
+                    other => other,
+                });
+                cursor += 2;
+                continue;
             }
+            if (c == '\n' || c == '\r') && !form.multiline {
+                return None;
+            }
+            if let Some((open, close)) = &form.island
+                && slice(cursor).map(|text| text.starts_with(open.as_str())) == Some(true)
+            {
+                // Island: the content pushes through verbatim, with brace
+                // counting so nested `{ … }` (a nested invocation) stay
+                // inside the interpolation (§8.6).
+                value.push_str(open);
+                let mut inner = cursor + open.chars().count();
+                let mut depth = 1usize;
+                loop {
+                    let ch = *self.region.chars.get(inner)?;
+                    let rest = slice(inner)?;
+                    if rest.starts_with('{') {
+                        depth += 1;
+                        value.push('{');
+                        inner += 1;
+                        continue;
+                    }
+                    if rest.starts_with('}') {
+                        // The island's own closer is the brace matching the
+                        // opener: check it BEFORE counting a `}` as a nested
+                        // decrement, or the island swallows one `}` too many.
+                        if depth == 1 && close == "}" {
+                            break;
+                        }
+                        depth -= 1;
+                        value.push('}');
+                        inner += 1;
+                        continue;
+                    }
+                    if depth == 1 && rest.starts_with(close.as_str()) {
+                        break;
+                    }
+                    value.push(ch);
+                    inner += 1;
+                }
+                value.push_str(close);
+                cursor = inner + close.chars().count();
+                continue;
+            }
+            if c == form.quote {
+                return Some((value, cursor + 1));
+            }
+            value.push(c);
+            cursor += 1;
         }
     }
 

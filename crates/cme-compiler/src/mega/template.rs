@@ -7,8 +7,9 @@
 //! { … }]` (implicit element `item`; the element's fields resolve bare),
 //! `[when cond { … } else { … }]`, `match ($cap) { label => … }` (exhaustive
 //! over `oneof` tags), `let name = $cap`, `require(cond, "message")`, and
-//! `@fn(…)` (§8.5 — recognized but unsupported until Task 7). The bare
-//! `each in xs { … }` statement form is accepted inside blocks.
+//! `@fn(…)` compile-time calls and the `cm.…( … )` builtin namespace (§8.5,
+//! evaluated by [`super::cteval`]). The bare `each in xs { … }` statement
+//! form is accepted inside blocks.
 //!
 //! Join rule (plan §1.4.7): `[each]` elements are joined with `", "` when
 //! the construct sits inside template `(`/`[` text (argument, parameter, or
@@ -23,8 +24,10 @@ use cme_core::magic::{
     TmplValue,
 };
 
+use super::cteval::{self, CtEngine};
 use super::ctxexpr;
 use super::profile::{parse_string_literal, skip_ws_and_comments};
+use cme_interp::Value;
 
 /// Parses a whole template (the text inside a magic declaration's braces).
 pub fn parse_template(text: &str, span: Span) -> Result<Template, Diagnostic> {
@@ -203,6 +206,12 @@ impl<'a> TmplParser<'a> {
             if c == '@' {
                 self.flush_text(text_start, &mut nodes);
                 nodes.push(self.call()?);
+                text_start = self.cursor;
+                continue;
+            }
+            if self.cm_call_ahead() {
+                self.flush_text(text_start, &mut nodes);
+                nodes.push(self.call_node(false)?);
                 text_start = self.cursor;
                 continue;
             }
@@ -632,14 +641,13 @@ impl<'a> TmplParser<'a> {
             return Err(self.error("expected `=` in a `let` binding"));
         }
         self.cursor += 1;
-        self.skip_trivia();
-        if self.rest().starts_with('$') {
-            self.cursor += 1;
-        }
-        let path = self.dotted_path()?;
+        // The right-hand side is a full template value: a capture path, a
+        // literal, or a compile-time call (§8.5 — `let x = @f(…)` /
+        // `let x = cm.parse(…)`).
+        let value = self.value()?;
         Ok(TmplNode::Let {
             name,
-            value: TmplValue::Capture { path },
+            value,
             span: self.node_span(start),
         })
     }
@@ -672,10 +680,55 @@ impl<'a> TmplParser<'a> {
         })
     }
 
-    /// `@fn(args)` — recognized; elaboration reports it unsupported (§8.5).
+    /// `@fn(args)` — a compile-time function call (§8.5).
     fn call(&mut self) -> Result<TmplNode, Diagnostic> {
+        self.call_node(true)
+    }
+
+    /// True when a `cm.…( … )` builtin call starts at the cursor (the
+    /// whitepaper's builtin namespace is spelled without `@`, §8.5).
+    fn cm_call_ahead(&self) -> bool {
+        if !self.at_word("cm") {
+            return false;
+        }
+        let mut cursor = self.cursor + "cm".len();
+        if !self.text[cursor..].starts_with('.') {
+            return false;
+        }
+        cursor += 1;
+        loop {
+            let word = self.word_len_at(cursor);
+            if word == 0 {
+                return false;
+            }
+            cursor += word;
+            if self.text[cursor..].starts_with('.') {
+                cursor += 1;
+                continue;
+            }
+            break;
+        }
+        skip_ws_and_comments(
+            self.text,
+            &mut cursor,
+            &crate::mega::profile::checkmate_scan_profile(),
+        );
+        self.text[cursor..].starts_with('(')
+    }
+
+    fn word_len_at(&self, cursor: usize) -> usize {
+        self.text[cursor..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .map(char::len_utf8)
+            .sum()
+    }
+
+    fn call_node(&mut self, at: bool) -> Result<TmplNode, Diagnostic> {
         let start = self.cursor;
-        self.cursor += 1; // `@`
+        if at {
+            self.cursor += 1; // `@`
+        }
         let mut path = vec![self.peek_word().to_string()];
         self.cursor += path[0].len();
         loop {
@@ -690,9 +743,10 @@ impl<'a> TmplParser<'a> {
         }
         self.skip_trivia();
         if !self.rest().starts_with('(') {
-            return Err(self.error("expected `(` after `@function`"));
+            return Err(self.error("expected `(` after the function path"));
         }
         self.cursor += 1;
+        let is_cm_parse = path.as_slice() == ["cm", "parse"];
         let mut args = Vec::new();
         loop {
             self.skip_trivia();
@@ -700,7 +754,28 @@ impl<'a> TmplParser<'a> {
                 self.cursor += 1;
                 break;
             }
-            args.push(self.value()?);
+            if is_cm_parse && args.is_empty() {
+                // `cm.parse(grammar.rule, text)` — the first argument is a
+                // rule path, not a capture; take it verbatim as text.
+                let mut rule = String::new();
+                loop {
+                    let word = self.word_len_at(self.cursor);
+                    if word == 0 {
+                        break;
+                    }
+                    rule.push_str(&self.text[self.cursor..self.cursor + word]);
+                    self.cursor += word;
+                    if self.rest().starts_with('.') {
+                        rule.push('.');
+                        self.cursor += 1;
+                        continue;
+                    }
+                    break;
+                }
+                args.push(TmplValue::Str(rule));
+            } else {
+                args.push(self.value()?);
+            }
             self.skip_trivia();
             if self.rest().starts_with(',') {
                 self.cursor += 1;
@@ -715,6 +790,20 @@ impl<'a> TmplParser<'a> {
 
     fn value(&mut self) -> Result<TmplValue, Diagnostic> {
         self.skip_trivia();
+        if self.rest().starts_with('@') {
+            let node = self.call_node(true)?;
+            let TmplNode::Call { path, args, .. } = node else {
+                unreachable!("call_node returns a Call node")
+            };
+            return Ok(TmplValue::Call { path, args });
+        }
+        if self.cm_call_ahead() {
+            let node = self.call_node(false)?;
+            let TmplNode::Call { path, args, .. } = node else {
+                unreachable!("call_node returns a Call node")
+            };
+            return Ok(TmplValue::Call { path, args });
+        }
         if self.rest().starts_with('$') {
             self.cursor += 1;
             let path = self.dotted_path()?;
@@ -747,6 +836,17 @@ impl<'a> TmplParser<'a> {
             self.cursor += 5;
             return Ok(TmplValue::Bool(false));
         }
+        // A bare capture path (`let x = item`) — the `$` is optional in
+        // value positions, as in conditions (plan §1.4.5).
+        if self
+            .peek_word()
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            let path = self.dotted_path()?;
+            return Ok(TmplValue::Capture { path });
+        }
         Err(self.error("expected a value"))
     }
 }
@@ -758,12 +858,14 @@ impl<'a> TmplParser<'a> {
 /// Elaborates `template` with `root` bound to the entry pattern's capture
 /// name. Returns the generated code text, or the diagnostics that made
 /// elaboration impossible (unknown captures, non-exhaustive matches, failed
-/// `require`s).
+/// `require`s). `ct` is the compile-time evaluator backing `@`-calls and the
+/// `cm.*` builtins (§8.5); `None` only in tests of templates that use none.
 pub fn elaborate(
     template: &Template,
     root_name: &str,
     root: Capture,
     source_span: Span,
+    ct: Option<&CtEngine>,
 ) -> Result<String, Vec<Diagnostic>> {
     let mut elaborator = Elaborator {
         out: String::new(),
@@ -774,6 +876,7 @@ pub fn elaborate(
         }],
         diagnostics: Vec::new(),
         source_span,
+        ct,
     };
     elaborator.nodes(&template.nodes);
     if elaborator.diagnostics.is_empty() {
@@ -788,15 +891,17 @@ struct Scope {
     element: Option<Capture>,
 }
 
-struct Elaborator {
+struct Elaborator<'e> {
     out: String,
     enclosures: Vec<char>,
     scopes: Vec<Scope>,
     diagnostics: Vec<Diagnostic>,
     source_span: Span,
+    /// The compile-time evaluator backing `@`-calls and `cm.*` (§8.5).
+    ct: Option<&'e CtEngine<'e>>,
 }
 
-impl Elaborator {
+impl<'e> Elaborator<'e> {
     fn error(&mut self, message: impl Into<String>) {
         self.diagnostics
             .push(Diagnostic::parse(message, self.source_span));
@@ -959,13 +1064,55 @@ impl Elaborator {
                     ));
                 }
             }
-            TmplNode::Call { path, .. } => {
-                self.error(format!(
-                    "compile-time function `{}` needs §8.5 support (Task 7)",
-                    path.join(".")
-                ));
+            TmplNode::Call { path, args, span } => {
+                self.emit_call(path, args, *span);
             }
         }
+    }
+
+    /// Evaluates one compile-time call (a user `@fn` or a `cm.*` builtin)
+    /// and splices its result: a `code` result emits its text raw, a plain
+    /// result renders as a Checkmate literal (§8.5).
+    fn emit_call(&mut self, path: &[String], args: &[TmplValue], span: Span) {
+        match self.eval_call(path, args) {
+            Ok(result) => {
+                let text = if result.is_code {
+                    match &result.value {
+                        Value::Str(text) => Ok(text.clone()),
+                        other => Err(format!(
+                            "a `code` result must be text, got {}",
+                            value_kind_name(other)
+                        )),
+                    }
+                } else {
+                    cteval::render_value(&result.value)
+                };
+                match text {
+                    Ok(text) => {
+                        self.track_enclosures(&text);
+                        self.out.push_str(&text);
+                    }
+                    Err(message) => self.error(message),
+                }
+            }
+            Err(message) => self.diagnostics.push(Diagnostic::parse(message, span)),
+        }
+    }
+
+    /// Resolves call arguments to captures and invokes the compile-time
+    /// evaluator. Shared by splices, `let` bindings, and nested call args.
+    fn eval_call(&self, path: &[String], args: &[TmplValue]) -> Result<cteval::CtResult, String> {
+        let Some(engine) = self.ct else {
+            return Err(format!(
+                "compile-time function `{}` needs the §8.5 evaluator",
+                path.join(".")
+            ));
+        };
+        let mut captures = Vec::new();
+        for arg in args {
+            captures.push(self.resolve_value(arg)?);
+        }
+        engine.call(path, &captures)
     }
 
     /// Tracks template-text brackets for the join rule (strings transparent).
@@ -1016,6 +1163,23 @@ impl Elaborator {
                 matched: value.to_string(),
                 span: self.source_span,
             }),
+            TmplValue::Call { path, args } => {
+                let result = self.eval_call(path, args)?;
+                if result.is_code {
+                    let Value::Str(text) = &result.value else {
+                        return Err("a `code` result must be text".to_string());
+                    };
+                    return Ok(Capture {
+                        kind: CaptureKind::Text(TextKind::Raw),
+                        matched: text.clone(),
+                        span: self.source_span,
+                    });
+                }
+                cteval::value_to_capture(&result.value).map(|mut capture| {
+                    capture.span = self.source_span;
+                    capture
+                })
+            }
         }
     }
 
@@ -1134,12 +1298,25 @@ impl Elaborator {
                     .unwrap_or(false);
                 Some(CtxVal::Bool(present))
             }
-            CtxExpr::Call { path, .. } => {
-                self.error(format!(
-                    "compile-time function `{}` needs §8.5 support (Task 7)",
-                    path.join(".")
-                ));
-                None
+            CtxExpr::Call { path, args } => {
+                // A compile-time call in a condition position: resolve the
+                // condition-language arguments into captures, invoke the
+                // engine, and convert the result back into a value.
+                let result = (|| {
+                    let engine = self.ct?;
+                    let mut captures = Vec::new();
+                    for arg in args {
+                        captures.push(ctx_val_to_capture(self.eval(arg)?));
+                    }
+                    engine.call(path, &captures).ok()
+                })();
+                match result {
+                    Some(result) => ctx_val_from_value(result.value),
+                    None => {
+                        self.error("condition call did not evaluate");
+                        None
+                    }
+                }
             }
         }
     }
@@ -1232,7 +1409,7 @@ fn apply(capture: Capture, accessor: Option<Accessor>) -> Result<Capture, String
     }
 }
 
-fn escape_checkmate(text: &str) -> String {
+pub(crate) fn escape_checkmate(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -1324,6 +1501,63 @@ enum CtxVal {
     Capture(Capture),
 }
 
+/// Converts a condition value into a capture for `@`-call arguments in
+/// condition positions.
+fn ctx_val_to_capture(value: CtxVal) -> Capture {
+    match value {
+        CtxVal::Bool(value) => Capture {
+            kind: CaptureKind::Text(TextKind::Raw),
+            matched: value.to_string(),
+            span: Span::missing(0),
+        },
+        CtxVal::Str(value) => Capture {
+            kind: CaptureKind::Text(TextKind::Raw),
+            matched: value,
+            span: Span::missing(0),
+        },
+        CtxVal::Int(value) => Capture {
+            kind: CaptureKind::Int(value),
+            matched: value.to_string(),
+            span: Span::missing(0),
+        },
+        CtxVal::Float(value) => Capture {
+            kind: CaptureKind::Float(value),
+            matched: format!("{value}"),
+            span: Span::missing(0),
+        },
+        CtxVal::Capture(capture) => capture,
+    }
+}
+
+/// Converts a compile-time result into a condition value: scalars keep
+/// their kind, everything else bridges back into a capture.
+fn ctx_val_from_value(value: Value) -> Option<CtxVal> {
+    match value {
+        Value::Bool(value) => Some(CtxVal::Bool(value)),
+        Value::Str(value) => Some(CtxVal::Str(value)),
+        Value::Int(value) => Some(CtxVal::Int(value)),
+        Value::Float(value) => Some(CtxVal::Float(value)),
+        other => match cteval::value_to_capture(&other) {
+            Ok(capture) => Some(CtxVal::Capture(capture)),
+            Err(_) => None,
+        },
+    }
+}
+
+fn value_kind_name(value: &Value) -> &'static str {
+    match value {
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::Str(_) => "str",
+        Value::Bool(_) => "bool",
+        Value::Void => "void",
+        Value::Struct { .. } => "a struct",
+        Value::Enum { .. } => "an enum",
+        Value::Array(_) => "an array",
+        Value::Map(_) => "a map",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1363,9 +1597,9 @@ mod tests {
         let pattern = parse_pattern(pattern_text, Span::new(0, pattern_text.len())).unwrap();
         let template = parse_template(template_text, Span::new(0, template_text.len())).unwrap();
         let match_region = MatchRegion::new(region, 0, region);
-        let root = match_entry(&set, 0, &pattern, &match_region)
+        let root = match_entry(&set, 0, &pattern, &match_region, None)
             .map_err(|failure| vec![Diagnostic::parse(failure.message, Span::missing(0))])?;
-        elaborate(&template, "root", root, Span::missing(0))
+        elaborate(&template, "root", root, Span::missing(0), None)
     }
 
     #[test]

@@ -2957,3 +2957,13 @@ pub fn parse_block_text(text: &str) -> SubParseResult {
         true
     })
 }
+
+/// Parses `text` as a Checkmate statement list (§8.5's `cm.parseStmts`):
+/// zero diagnostics and full consumption required. Used by the compile-time
+/// evaluator to validate statements before they enter the expansion queue.
+pub fn parse_stmts_text(text: &str) -> SubParseResult {
+    subparse_text(text, "statement list", |parser| {
+        let (_, errors) = parser.parse_program_with_errors();
+        errors.is_empty()
+    })
+}

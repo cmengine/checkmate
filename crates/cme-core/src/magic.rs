@@ -356,13 +356,24 @@ pub enum TmplStrPart {
 }
 
 /// A value position in a template: a capture path or a literal.
+///
+/// `Call` (a plan extension) allows `@fn(…)` results to feed other `@`-calls
+/// and `let` bindings — nested compile-time computation (§8.5). A capture
+/// path appearing as the first argument of `cm.parse(…)` is parsed as a
+/// grammar rule path by the template parser and arrives as `Str`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TmplValue {
-    Capture { path: Vec<String> },
+    Capture {
+        path: Vec<String>,
+    },
     Str(String),
     Int(i64),
     Float(f64),
     Bool(bool),
+    Call {
+        path: Vec<String>,
+        args: Vec<TmplValue>,
+    },
 }
 
 /// One template node. Every node carries the span of the template element it

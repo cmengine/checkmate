@@ -144,6 +144,21 @@ this makes `\n`-joined template element lists safe inside `( )`.
    worked example); `indent` step 1 treats a mid-line cursor whose remaining
    line is blank as an end-of-line start (otherwise YAML `limits:` could never
    open a block at the child column, contradicting §8.3.5's worked example).
+9. **§8.5 text-level shapes (Task 7).** A `code` value IS its text: the
+   checker treats `code` as an alias of `str`, a `code`-typed result splices
+   raw, and a plain result renders as a Checkmate literal (quoted strings,
+   `Name.Variant(…)` enums, named-arg structs). Captures bridge into
+   interpreter values per the callee's DECLARED parameter types: scalars for
+   `int`/`float`/`str`/`bool` params, the file-declared `Capture` enum
+   (`Text(str)`, `Int(int)`, `Float(float)`, `List(Capture[])`,
+   `Rec(str, map<str, Capture>)`, `Absent()`) for tree params. The whitepaper's
+   `span` argument to `cm.parse*` is accepted and ignored (provenance stays
+   anchored at the template element, per §1.4.1). `@`-paths resolve against
+   the file's own top-level functions by their LAST segment (`@py.emitBody`
+   → `fn emitBody`); the `cm.*` builtins are spelled without `@`; `TmplValue::Call`
+   (a plan extension) lets `let` bindings and nested arguments carry
+   `@`-calls. The `cm` word is reserved for the builtin namespace in
+   templates and conditions.
 
 ### 1.5 Working rules (from AGENTS.md — binding)
 
@@ -443,13 +458,13 @@ pub enum CaptureValue {
       parses and type-checks; `call (f(1, 2), g(3))` keeps each call whole).
 - [x] Commit: `feat(compiler): parse-integrated raw/expr/type/template extents`.
 
-### Task 7 — §8.5 compile-time computation  `[ ]`
-- [ ] Compile-time evaluator for pure Checkmate functions (bridge capture
+### Task 7 — §8.5 compile-time computation  `[x]`
+- [x] Compile-time evaluator for pure Checkmate functions (bridge capture
       values ↔ interpreter values; spans as an opaque value; `code` type).
-- [ ] `@fn(…)` in templates; `cm.parseExpr/cm.parseStmts/cm.parse`;
+- [x] `@fn(…)` in templates; `cm.parseExpr/cm.parseStmts/cm.parse`;
       `cm.code.*` builder subset (`cm.code.str`, `cm.code.call` minimal).
-- [ ] Purity enforcement: only core/self imports (single-file: trivially true).
-- [ ] Commit: `feat(compiler): compile-time function evaluation for megaprograms`.
+- [x] Purity enforcement: only core/self imports (single-file: trivially true).
+- [x] Commit: `feat(compiler): compile-time function evaluation for megaprograms`.
 
 ### Task 8 — `magic.cm` upgraded to whitepaper templates  `[ ]`
 - [ ] `@toValue`-style codegen: JSON/TOML/YAML → a `jsonTree`-style enum value

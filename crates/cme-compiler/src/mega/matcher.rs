@@ -27,6 +27,8 @@ use cme_core::magic::{
     Pattern, TextKind,
 };
 
+use crate::mega::cteval::{self, CtEngine};
+
 /// One compiled grammar: profile plus rules.
 #[derive(Debug, Clone, Default)]
 pub struct CompiledGrammar {
@@ -264,8 +266,9 @@ pub fn match_entry(
     grammar_index: usize,
     pattern: &Pattern,
     region: &MatchRegion<'_>,
+    ct: Option<&CtEngine>,
 ) -> Result<Capture, MatchFailure> {
-    match_entry_with_fuel(set, grammar_index, pattern, region, FUEL_BUDGET)
+    match_entry_with_fuel(set, grammar_index, pattern, region, FUEL_BUDGET, ct)
 }
 
 /// [`match_entry`] with an explicit fuel budget (operation count). Used by
@@ -276,8 +279,9 @@ pub fn match_entry_with_fuel(
     pattern: &Pattern,
     region: &MatchRegion<'_>,
     fuel: u64,
+    ct: Option<&CtEngine>,
 ) -> Result<Capture, MatchFailure> {
-    let mut matcher = Matcher::new(set, region, fuel);
+    let mut matcher = Matcher::new(set, region, fuel, ct);
     let mut env = Env {
         skip: SkipMode::On,
         grammar: grammar_index,
@@ -339,6 +343,10 @@ struct Matcher<'a> {
     /// report. The parse-integrated extent machinery reports its own,
     /// position-accurate diagnostics instead.
     speculative: usize,
+    /// The §8.5 compile-time evaluator, for `@fn(…)` calls in `where`
+    /// conditions and validator rule delegation. Absent in matcher-internal
+    /// tests that use none.
+    ct: Option<&'a CtEngine<'a>>,
 }
 
 /// One recorded failure: position, message, and the diagnostic context that
@@ -481,7 +489,12 @@ fn capture_signature(capture: &Capture, out: &mut String) {
 }
 
 impl<'a> Matcher<'a> {
-    fn new(set: &'a GrammarSet, region: &'a MatchRegion<'a>, fuel: u64) -> Self {
+    fn new(
+        set: &'a GrammarSet,
+        region: &'a MatchRegion<'a>,
+        fuel: u64,
+        ct: Option<&'a CtEngine<'a>>,
+    ) -> Self {
         Self {
             set,
             region,
@@ -496,6 +509,7 @@ impl<'a> Matcher<'a> {
             memo: HashMap::new(),
             in_progress: HashSet::new(),
             speculative: 0,
+            ct,
         }
     }
 
@@ -2384,7 +2398,7 @@ impl<'a> Matcher<'a> {
                 };
                 let rule = self.set.grammars[grammar_index].rules[rule_index].clone();
                 let sub_region = MatchRegion::new(self.region.source, self.absolute(start), &text);
-                match_entry(self.set, grammar_index, &rule.pattern, &sub_region)
+                match_entry(self.set, grammar_index, &rule.pattern, &sub_region, self.ct)
                     .map(|_| ())
                     .map_err(|failure| failure.message)
             }
@@ -2483,7 +2497,7 @@ impl<'a> Matcher<'a> {
         if let Some((grammar_index, rule_index)) = self.resolve(&effective, env) {
             let rule = self.set.grammars[grammar_index].rules[rule_index].clone();
             let sub_region = MatchRegion::new(self.region.source, self.absolute(start), &text);
-            return match match_entry(self.set, grammar_index, &rule.pattern, &sub_region) {
+            return match match_entry(self.set, grammar_index, &rule.pattern, &sub_region, self.ct) {
                 Ok(_) => Ok(()),
                 Err(_) => Err(format!(
                     "validator `{}` rejected `{}` (the text does not match the rule)",
@@ -2602,14 +2616,49 @@ impl<'a> Matcher<'a> {
                 };
                 Some(CtxVal::Bool(present))
             }
-            CtxExpr::Call { path, .. } => {
-                self.note_failure(
-                    0,
-                    format!(
-                        "compile-time function `{}` needs §8.5 support (Task 7)",
-                        path.join(".")
-                    ),
-                );
+            CtxExpr::Call { path, args } => self.eval_ct_call(path, args, env),
+        }
+    }
+
+    /// A compile-time call in a condition position (§8.5): `@fn(…)` against
+    /// the file's own pure functions, or a `cm.*` builtin. In `cm.parse` the
+    /// first argument is a rule path (a capture-shaped path in the condition
+    /// syntax).
+    fn eval_ct_call(&mut self, path: &[String], args: &[CtxExpr], env: &mut Env) -> Option<CtxVal> {
+        if path.is_empty() {
+            self.note_failure(0, "empty compile-time call path");
+            return None;
+        }
+        let Some(engine) = self.ct else {
+            self.note_failure(
+                0,
+                format!(
+                    "compile-time function `{}` needs the §8.5 evaluator",
+                    path.join(".")
+                ),
+            );
+            return None;
+        };
+        let is_cm_parse = path.len() == 2 && path[0] == "cm" && path[1] == "parse";
+        let mut captures = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            if is_cm_parse
+                && index == 0
+                && let CtxExpr::Capture { path: rule, .. } = arg
+            {
+                captures.push(Capture {
+                    kind: CaptureKind::Text(TextKind::Raw),
+                    matched: rule.join("."),
+                    span: Span::missing(0),
+                });
+                continue;
+            }
+            captures.push(self.eval_or_capture(arg, env));
+        }
+        match engine.call(path, &captures) {
+            Ok(result) => ct_value_to_ctx_val(result.value),
+            Err(message) => {
+                self.note_failure(0, message);
                 None
             }
         }
@@ -2837,6 +2886,21 @@ fn comment_len_at(
     })
 }
 
+/// Converts a compile-time result into a condition value: scalars keep
+/// their kind, everything else bridges back into a capture.
+fn ct_value_to_ctx_val(value: cme_interp::Value) -> Option<CtxVal> {
+    match value {
+        cme_interp::Value::Bool(value) => Some(CtxVal::Bool(value)),
+        cme_interp::Value::Str(value) => Some(CtxVal::Str(value)),
+        cme_interp::Value::Int(value) => Some(CtxVal::Int(value)),
+        cme_interp::Value::Float(value) => Some(CtxVal::Float(value)),
+        other => match cteval::value_to_capture(&other) {
+            Ok(capture) => Some(CtxVal::Capture(capture)),
+            Err(_) => None,
+        },
+    }
+}
+
 /// A `where`-language value.
 #[derive(Debug, Clone, PartialEq)]
 enum CtxVal {
@@ -2981,7 +3045,8 @@ mod tests {
             .unwrap();
         let pattern = set.grammars[0].rules[rule_index].pattern.clone();
         let match_region = MatchRegion::new(region, 0, region);
-        match_entry(set, grammar_index, &pattern, &match_region).map_err(|failure| failure.message)
+        match_entry(set, grammar_index, &pattern, &match_region, None)
+            .map_err(|failure| failure.message)
     }
 
     #[test]
@@ -3044,7 +3109,7 @@ mod tests {
         let grammar_index = 0;
         let pattern = set.grammars[0].rules[0].pattern.clone();
         let region = MatchRegion::new("aaaaaaaa", 0, "aaaaaaaa");
-        let failure = match_entry_with_fuel(&set, grammar_index, &pattern, &region, 5)
+        let failure = match_entry_with_fuel(&set, grammar_index, &pattern, &region, 5, None)
             .expect_err("tiny fuel must not be enough");
         assert!(
             failure.message.contains("fuel budget exhausted"),
@@ -3052,7 +3117,7 @@ mod tests {
             failure.message
         );
         // The same region under the default budget matches cleanly.
-        assert!(match_entry(&set, grammar_index, &pattern, &region).is_ok());
+        assert!(match_entry(&set, grammar_index, &pattern, &region, None).is_ok());
     }
 
     #[test]

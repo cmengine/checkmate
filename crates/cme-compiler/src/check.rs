@@ -660,6 +660,16 @@ impl Checker {
                 self.validate_decl_type(value, params, span);
             }
             Type::Named { name, args } => {
+                // §8.5 (text-level deviation): `code` — the compile-time
+                // syntax-fragment type — degenerates to its textual payload
+                // at runtime, so the checker treats it as `str`.
+                if name == "code" {
+                    if !args.is_empty() {
+                        self.report("`code` takes no type arguments".to_string(), span);
+                        return;
+                    }
+                    return;
+                }
                 if params.iter().any(|p| p == name) {
                     if !args.is_empty() {
                         self.report(
@@ -718,6 +728,15 @@ impl Checker {
                 name,
                 args: type_args,
             } => {
+                // §8.5 (text-level deviation): the compile-time `code` type
+                // is a checked alias of `str` — a `code` value IS its text.
+                if name == "code" {
+                    if !type_args.is_empty() {
+                        self.report("`code` takes no type arguments".to_string(), span);
+                        return Ty::Poison;
+                    }
+                    return Ty::Str;
+                }
                 if let Some(pos) = params.iter().position(|p| p == name) {
                     if !type_args.is_empty() {
                         self.report(
@@ -1778,6 +1797,10 @@ impl Checker {
                 name,
                 args: type_args,
             } => {
+                // §8.5 (text-level deviation): `code` resolves as `str`.
+                if name == "code" && type_args.is_empty() {
+                    return Ty::Str;
+                }
                 if let Some(pos) = params.iter().position(|p| p == name) {
                     return args.get(pos).cloned().unwrap_or(Ty::Poison);
                 }

@@ -23,6 +23,7 @@ name = "cme-compiler"
 version = "0.2.0"
 dependencies = [
  "cme-core",
+ "cme-interp",
  "logos",
 ]
 

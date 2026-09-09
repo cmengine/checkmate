@@ -62,6 +62,11 @@ pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> 
         return Err(diagnostics);
     }
 
+    // The §8.5 compile-time evaluator: the file's own pure functions run
+    // against the interpreter during expansion (single-file megaprograms
+    // make the §8.7.4 import-purity check trivially satisfied).
+    let engine = crate::mega::cteval::CtEngine::new(source, &scan, &set);
+
     let mut current = source.to_string();
     let mut records = Vec::new();
     let mut depth = 0usize;
@@ -100,13 +105,20 @@ pub fn expand_source(source: &str) -> Result<ExpansionOutcome, Vec<Diagnostic>> 
                 invocation.region_span.start,
                 &invocation.region,
             );
-            match match_entry(&set, macro_def.grammar_index, &macro_def.pattern, &region) {
+            match match_entry(
+                &set,
+                macro_def.grammar_index,
+                &macro_def.pattern,
+                &region,
+                Some(&engine),
+            ) {
                 Ok(root) => {
                     let generated = elaborate(
                         &macro_def.template,
                         &macro_def.bind_name,
                         root,
                         invocation.span,
+                        Some(&engine),
                     );
                     match generated {
                         Ok(text) => {

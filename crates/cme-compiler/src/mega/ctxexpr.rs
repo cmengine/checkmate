@@ -119,6 +119,12 @@ fn parse_primary(text: &str, cursor: &mut usize, span: Span) -> Result<CtxExpr, 
     skip_trivia(text, cursor);
     let rest = &text[*cursor..];
 
+    // `@fn(…)` — a pure compile-time function call (§8.5). The `@` marks
+    // the call; the call itself is parsed as a path + arguments below.
+    if rest.starts_with('@') {
+        *cursor += 1;
+    }
+
     if rest.starts_with('(') {
         *cursor += 1;
         let inner = parse_or(text, cursor, span)?;

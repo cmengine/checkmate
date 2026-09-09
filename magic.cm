@@ -149,6 +149,10 @@ grammar yaml {
             alias  => ( "*" $word name )
             flow   => ( peek { line } flowNode )
             block  => ( peek { not { line } } blockNode )
+            // A bare same-line scalar (`title: Checkmate`); the whitepaper
+            // elides plain scalars from `node` (§8.8 comment) — restored
+            // here so scalar-valued fields parse.
+            scalar => ( peek { line } scalar as value )
         }
     }
 
@@ -183,10 +187,12 @@ grammar yaml {
 
     // Inside flow collections a plain scalar stops at `,`, `]`, `}` —
     // the block-scalar `lineRest` form would swallow the rest of the line.
+    // The `lineStop` arm keeps a bare same-line scalar (`fuel: 1000000`,
+    // no bracket stop anywhere ahead) from spilling across lines.
     rule flowScalar {
         oneof {
             quoted => $str text
-            plain  => until { oneof { comma => ",", seqEnd => "]", mapEnd => "}" } } as text
+            plain  => until { oneof { comma => ",", seqEnd => "]", mapEnd => "}", lineStop => eol } } as text
         }
     }
 
@@ -699,12 +705,12 @@ magic def(py.def as d) {
                     [each in $item.body {
                         match ($item) {
                             return => return $item.value
-                            call   => $item.callee(each in $item.args { $item })
+                            call   => $item.callee(each in $item.args { $item.arg })
                         }
                     }]
                 }
                 return => return $item.value
-                call   => $item.callee(each in $item.args { $item })
+                call   => $item.callee(each in $item.args { $item.arg })
             }
         }
     }
@@ -806,12 +812,16 @@ int checkToml() {
 }
 
 int checkYaml() {
+    // NOTE: normalization trims only the region EDGES (§8.6), so a
+    // line-oriented region must be authored with its interior lines
+    // indented relative to the first line's (trimmed) column — here the
+    // mapping entries are flush with it.
     str[] yamlLines = magic(yamlValue) {
-        title: Checkmate
-        limits:
-            fuel: 1000000
-            deadlineMs: 50
-        tags: [embeddable, aot, arc]
+    title: Checkmate
+limits:
+    fuel: 1000000
+    deadlineMs: 50
+tags: [embeddable, aot, arc]
     }
     int fails = 0
     if (yamlLines.length != 3) { fails += 1 }

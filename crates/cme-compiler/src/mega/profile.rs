@@ -285,7 +285,7 @@ pub fn parse_profile(body: &str, span: Span) -> Result<LexProfile, Diagnostic> {
 }
 
 /// Skips whitespace and Checkmate-shaped comments from `cursor` onward.
-fn skip_ws_and_comments(text: &str, cursor: &mut usize, profile: &LexProfile) {
+pub(crate) fn skip_ws_and_comments(text: &str, cursor: &mut usize, profile: &LexProfile) {
     loop {
         while let Some(c) = text[*cursor..].chars().next() {
             if profile.skip.matches(c) {
@@ -303,7 +303,7 @@ fn skip_ws_and_comments(text: &str, cursor: &mut usize, profile: &LexProfile) {
 }
 
 /// The identifier-like word starting at `cursor`.
-fn next_word(text: &str, cursor: usize) -> &str {
+pub(crate) fn next_word(text: &str, cursor: usize) -> &str {
     let rest = &text[cursor..];
     let end = rest
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -313,7 +313,7 @@ fn next_word(text: &str, cursor: usize) -> &str {
 
 /// A quoted char literal (`'a'`, `'\t'`) at `cursor`; returns the decoded
 /// character and the consumed length.
-fn parse_char_literal(text: &str, cursor: usize) -> Option<(char, usize)> {
+pub(crate) fn parse_char_literal(text: &str, cursor: usize) -> Option<(char, usize)> {
     let rest = &text[cursor..];
     let mut chars = rest.chars();
     if chars.next()? != '\'' {
@@ -346,7 +346,7 @@ fn parse_char_literal(text: &str, cursor: usize) -> Option<(char, usize)> {
 
 /// A double-quoted string literal at `cursor` (with backslash escapes);
 /// returns the decoded text and the consumed length.
-fn parse_string_literal(text: &str, cursor: usize) -> Option<(String, usize)> {
+pub(crate) fn parse_string_literal(text: &str, cursor: usize) -> Option<(String, usize)> {
     let rest = &text[cursor..];
     if !rest.starts_with('"') {
         return None;
@@ -484,12 +484,23 @@ fn parse_string_form(text: &str, cursor: &mut usize, span: Span) -> Result<Strin
     }
     *cursor += 1;
     skip_ws_and_comments(text, cursor, &scanner);
-    let (quote, len) = parse_char_literal(text, *cursor).ok_or_else(|| {
-        Diagnostic::parse(
-            "expected a character literal for the string delimiter",
-            offset_span(span, *cursor),
-        )
-    })?;
+    // The delimiter is one character, spelled either as a char literal
+    // (`'\''`) or as a one-character string literal (`"'"` — the §8.8
+    // grammars use this spelling for quote characters).
+    let (quote, len) = match parse_char_literal(text, *cursor) {
+        Some((value, len)) => (value, len),
+        None => match parse_string_literal(text, *cursor) {
+            Some((value, len)) if value.chars().count() == 1 => {
+                (value.chars().next().unwrap(), len)
+            }
+            _ => {
+                return Err(Diagnostic::parse(
+                    "expected a character literal for the string delimiter",
+                    offset_span(span, *cursor),
+                ));
+            }
+        },
+    };
     *cursor += len;
     let mut form = StringForm {
         quote,
@@ -555,12 +566,44 @@ fn parse_string_form(text: &str, cursor: &mut usize, span: Span) -> Result<Strin
     }
 }
 
-/// Skips a whole `rule name [signature] { body }` declaration, balancing
+/// Skips a whole `rule name [( context … )] { body }` declaration, balancing
 /// parens and braces so nested structures cannot confuse the profile scan.
 fn skip_rule_declaration(text: &str, cursor: &mut usize, profile: &LexProfile) {
     *cursor += "rule".len();
-    let mut depth_paren = 0i32;
-    let mut depth_brace = 0i32;
+    // The rule name sits between `rule` and the signature/body.
+    skip_ws_and_comments(text, cursor, profile);
+    *cursor += next_word(text, *cursor).len();
+    // Optional `( context … )` signature (balanced parens).
+    skip_ws_and_comments(text, cursor, profile);
+    if text[*cursor..].starts_with('(') {
+        let mut depth = 0i32;
+        while *cursor < text.len() {
+            if let Some(len) = string_len(text, *cursor, profile) {
+                *cursor += len;
+                continue;
+            }
+            let c = match text[*cursor..].chars().next() {
+                Some(c) => c,
+                None => return,
+            };
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    *cursor += c.len_utf8();
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            *cursor += c.len_utf8();
+        }
+        skip_ws_and_comments(text, cursor, profile);
+    }
+    // The rule body: balanced braces down to the matching `}`.
+    let mut depth = 0i32;
     while *cursor < text.len() {
         if let Some(len) = comment_len(text, *cursor, profile) {
             *cursor += len;
@@ -575,23 +618,16 @@ fn skip_rule_declaration(text: &str, cursor: &mut usize, profile: &LexProfile) {
             None => return,
         };
         match c {
-            '(' => depth_paren += 1,
-            ')' => depth_paren -= 1,
-            '{' => depth_brace += 1,
+            '{' => depth += 1,
             '}' => {
-                depth_brace -= 1;
-                if depth_brace == 0 && depth_paren <= 0 {
-                    *cursor += 1;
+                depth -= 1;
+                *cursor += c.len_utf8();
+                if depth == 0 {
                     return;
                 }
+                continue;
             }
-            other => {
-                if depth_brace == 0 && depth_paren <= 0 && !other.is_whitespace() {
-                    // A malformed rule header: stop skipping so the outer
-                    // loop can resynchronize at the next word.
-                    return;
-                }
-            }
+            _ => {}
         }
         *cursor += c.len_utf8();
     }

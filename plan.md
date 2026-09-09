@@ -348,11 +348,13 @@ pub enum CaptureValue {
       decl/invocation distinction; spans exact.
 - [x] Commit: `feat(compiler): scan magic declarations and invocation regions`.
 
-### Task 3 — Expansion core + `cme expand` CLI  `[ ]`
-- [ ] `mega/pattern.rs`: parse pattern text → `cme_core::magic::Pattern`
+### Task 3 — Expansion core + `cme expand` CLI  `[x] DONE`
+- [x] `mega/pattern.rs`: parse pattern text → `cme_core::magic::Pattern`
       (all §8.3 forms parse; matcher support may lag — unimplemented matcher
       forms fail with a clear diagnostic at match time, never a panic).
-- [ ] `mega/matcher.rs`: packrat engine — flow mode first, then line mode:
+      Also: `oneof` takes a trailing `as` bind; implicit (bare) binds are
+      line-aware so a next-line construct is never stolen (§1.4.5 errata).
+- [x] `mega/matcher.rs`: packrat engine — flow mode first, then line mode:
       skip/comment handling, literals (`i"…"`), classes, `any`, `scan`,
       `until` (literal and `{ p }`), `lineRest`, `eol`/`line`/`eof`,
       `soft`, `optional`, `each` (+`sep`/`trailing`/bounds/`each+`), `oneof`
@@ -362,21 +364,26 @@ pub enum CaptureValue {
       fragments `$ident $word $tag $int $float $str` + `$text` (remainder
       fallback) + `$type`/`$expr`/`$raw` with tail-matching extents
       (parse-integration deferred to Task 6). Capture tree per §2.2.
-- [ ] `mega/template.rs`: parse template text → `Template`; elaborator →
+      Notes: the caller's continuation flows through `rule_ref` and
+      `each` bodies (`Continuation::Repeat`) so tail-bounded fragments
+      find their real boundary; inside `indent` blocks each iterations
+      begin at the next content line and must sit at the block's base
+      column; bare captures compare by scalar value in `where`.
+- [x] `mega/template.rs`: parse template text → `Template`; elaborator →
       generated code TEXT (splice/interp/each/when/match/let/require).
-- [ ] `mega/expand.rs`: orchestrator (§2.5) + `pub fn expand_source(source)
+- [x] `mega/expand.rs`: orchestrator (§2.5) + `pub fn expand_source(source)
       -> Result<ExpansionOutcome, Vec<Diagnostic>>` exported from
       cme-compiler; `ExpansionOutcome { expanded: String, records: Vec<…> }`.
-- [ ] Root CLI: `cme expand <file.cm>` writes `<stem>_expanded.cm` next to the
+- [x] Root CLI: `cme expand <file.cm>` writes `<stem>_expanded.cm` next to the
       original + header comment; then parse+check the expanded file (reporting
       against it). `check|run|ast` expand first when magic blocks are present.
       `USAGE` string updated.
-- [ ] Tests: cme-compiler unit tests (pattern parser, matcher, template,
+- [x] Tests: cme-compiler unit tests (pattern parser, matcher, template,
       expand) + root integration `tests/megaprogram.rs` pinning: JSON region →
       expanded `map<str, str>`; `py.def` region → real Checkmate function
       (returns/calls; nested-if limit documented); `cme expand` output file
       name and clean parse/check.
-- [ ] Commit: `feat(compiler): megaprogram expansion core and cme expand command`.
+- [x] Commit: `feat(compiler): megaprogram expansion core and cme expand command`.
 
 ### Task 4 — Pattern-language completion + hardening  `[ ]`
 - [ ] Left-recursion (nullable-prefix cycle) static rejection with rewrite hint.
@@ -475,12 +482,25 @@ pub enum CaptureValue {
 
 ## 5. Session log / handoff notes
 
-- Session 1 (this one): Tasks 1–3 completed, committed on top of base
-  `1af9f94`. Per-commit patches exported (see delivery note below).
+- Session 1: Tasks 1–3 completed, committed on top of base `1af9f94`.
+  Per-commit patches exported (see delivery note below).
 - The megaprogram subsystem lives in `crates/cme-compiler/src/mega/`
   (`mod.rs`, `scan.rs`, `profile.rs`, `pattern.rs`, `matcher.rs`,
-  `template.rs`, `expand.rs`) with data models in `crates/cme-core/src/magic.rs`.
-  `cme expand` is implemented in `src/main.rs` (root, `cli` feature).
+  `template.rs`, `expand.rs`, `ctxexpr.rs`) with data models in
+  `crates/cme-core/src/magic.rs`. `cme expand` is implemented in
+  `src/main.rs` (root, `cli` feature).
 - Known intentional gaps after Task 3 are exactly §3 Task 4+ items; the
   matcher returns `unsupported` diagnostics (never panics) for forms added
   later.
+- Errata added while landing Task 3 (see §1.4): implicit binds are
+  line-aware; generated output is edge-trimmed per invocation and per
+  `[each]` item; `[each]` joins are brace-aware (map entries newline,
+  lists/arrays commas); bare captures compare by scalar value in
+  conditions; non-record captures expose trailing accessors
+  (`$item.children.length`).
+- Task 5 loop status at the end of Session 1: `cme expand magic.cm`
+  expands all 10 invocations and the expansion parses + type-checks;
+  `cme run magic.cm` exits 0 with `fails = 2` remaining, both from the
+  HTML child-counting semantics (zero-width text node at the element's
+  stop position, and `1 < 2` not splitting into two text nodes) — the
+  expected-vs-actual decisions are the first order of Task 5.

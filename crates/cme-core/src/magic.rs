@@ -183,6 +183,15 @@ pub enum CtxExpr {
     },
 }
 
+/// A declared `context` field of a rule (§8.3.7): `context { selector
+/// parent = none }` — an optional compile-time default (`= none` means an
+/// absent value, surfacing as an `Opt(None)` capture).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextField {
+    pub name: String,
+    pub default: Option<CtxExpr>,
+}
+
 // ---------------------------------------------------------------------------
 // Patterns (§8.3)
 // ---------------------------------------------------------------------------
@@ -276,7 +285,11 @@ pub enum PatKind {
         bind: Option<String>,
     },
     /// `oneof { label => ( p ), … }` — ordered choice, first match wins.
-    OneOf { branches: Vec<(String, Pattern)> },
+    OneOf {
+        branches: Vec<(String, Pattern)>,
+        /// `oneof { … } as name` — binds the chosen branch's record.
+        bind: Option<String>,
+    },
     /// `peek { p }` / `not { p }` — zero-width lookahead.
     Peek { negated: bool, body: Box<Pattern> },
     /// `( p )` — grouping.
@@ -330,7 +343,10 @@ pub struct Template {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TmplStrPart {
     Lit(String),
-    Hole { path: Vec<String> },
+    Hole {
+        path: Vec<String>,
+        accessor: Option<Accessor>,
+    },
 }
 
 /// A value position in a template: a capture path or a literal.
@@ -350,7 +366,13 @@ pub enum TmplNode {
     /// Verbatim Checkmate text emitted as-is.
     Text { text: String, span: Span },
     /// `$cap` / `$cap.field` — splices the capture per §8.4's position table.
-    Splice { path: Vec<String>, span: Span },
+    /// An optional trailing accessor (`.matched`, `.length`) is applied
+    /// before splicing (plan §1.4 extensions).
+    Splice {
+        path: Vec<String>,
+        accessor: Option<Accessor>,
+        span: Span,
+    },
     /// `$"…{cap}…"` — interpolates captures into a Checkmate string literal.
     Interp { parts: Vec<TmplStrPart>, span: Span },
     /// `[each NAME in xs { … }]` — repetition. `NAME` defaults to `item`;

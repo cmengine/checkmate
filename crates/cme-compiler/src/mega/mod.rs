@@ -7,5 +7,10 @@
 //! compiler, which re-lexes, parses, checks, and runs it like hand-written
 //! code. That text-level contract is what makes `cme expand` possible.
 
+pub mod ctxexpr;
+pub mod expand;
+pub mod matcher;
+pub mod pattern;
 pub mod profile;
 pub mod scan;
+pub mod template;

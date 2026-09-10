@@ -393,6 +393,12 @@ pub enum TmplValue {
     Capture {
         path: Vec<String>,
     },
+    /// `$"…{cap}…"` in a VALUE position (a call argument): resolves to the
+    /// concatenated text — literal parts verbatim, holes as the capture's
+    /// text (§8.4's interpolation, usable wherever a value is expected).
+    Interp {
+        parts: Vec<TmplStrPart>,
+    },
     Str(String),
     Int(i64),
     Float(f64),

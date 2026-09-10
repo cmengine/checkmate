@@ -256,8 +256,23 @@ impl<'g> CtEngine<'g> {
                     is_code: true,
                 })
             }
+            ["cm", "code", "fn"] => {
+                // cm.code.fn(ret, name, params, body) — builds a whole
+                // function declaration (§8.5's builder API). Arguments are
+                // code positions: string literals contribute their CONTENT
+                // (unquoted), code values their text; the body is emitted
+                // verbatim so multi-statement bodies stay authorable.
+                let ret = str_arg(path, args, 0)?;
+                let name = str_arg(path, args, 1)?;
+                let params = str_arg(path, args, 2)?;
+                let body = str_arg(path, args, 3)?;
+                Ok(CtResult {
+                    value: Value::Str(format!("{} {}({}) {{\n{}\n}}", ret, name, params, body)),
+                    is_code: true,
+                })
+            }
             _ => Err(format!(
-                "unknown `cm` builtin `{}` (available: cm.parseExpr, cm.parseStmts, cm.parse, cm.code.str, cm.code.call)",
+                "unknown `cm` builtin `{}` (available: cm.parseExpr, cm.parseStmts, cm.parse, cm.code.str, cm.code.call, cm.code.fn)",
                 path.join(".")
             )),
         }
@@ -397,6 +412,28 @@ impl CtHost for CtEngine<'_> {
                     }
                 }
                 Ok(Value::Str(format!("{}({})", name, parts.join(", "))))
+            }
+            ["cm", "code", "fn"] => {
+                let Some(ret) = text(0) else {
+                    return Some(Err("cm.code.fn argument 1 must be text".to_string()));
+                };
+                let mut parts_text: Vec<String> = Vec::new();
+                for arg in &args[1..] {
+                    match arg {
+                        Value::Str(text) => parts_text.push(text.clone()),
+                        other => match render_value(other) {
+                            Ok(rendered) => parts_text.push(rendered),
+                            Err(message) => return Some(Err(message)),
+                        },
+                    }
+                }
+                if parts_text.len() < 3 {
+                    return Some(Err("cm.code.fn needs (ret, name, params, body)".to_string()));
+                }
+                Ok(Value::Str(format!(
+                    "{} {}({}) {{\n{}\n}}",
+                    ret, parts_text[0], parts_text[1], parts_text[2]
+                )))
             }
             _ => return None,
         };
@@ -896,6 +933,40 @@ int main() {
         let outcome = expand_source(source).expect("expansion succeeds");
         assert!(
             outcome.expanded.contains("usePy(\"x\", 5)"),
+            "{}",
+            outcome.expanded
+        );
+    }
+
+    #[test]
+    fn cm_code_fn_builds_a_whole_function() {
+        // §8.5's builder API: cm.code.fn(ret, name, params, body) emits a
+        // complete declaration at declaration position; main calls it.
+        let source = r#"
+grammar tag {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule word {
+        $word w
+    }
+}
+
+magic mkFn(tag.word as t) {
+    cm.code.fn("int", $"gen{$t.w}", "int x", "return x + 1")
+}
+
+magic(mkFn) {
+    Double
+}
+
+int main() {
+    return genDouble(41)
+}
+"#;
+        let outcome = expand_source(source).expect("expansion succeeds");
+        assert!(
+            outcome
+                .expanded
+                .contains("int genDouble(int x) {\nreturn x + 1\n}"),
             "{}",
             outcome.expanded
         );

@@ -418,6 +418,16 @@ impl<'a> TmplParser<'a> {
     fn interp(&mut self) -> Result<TmplNode, Diagnostic> {
         let start = self.cursor;
         self.cursor += 2; // `$"`
+        let parts = self.interp_parts()?;
+        Ok(TmplNode::Interp {
+            parts,
+            span: self.node_span(start),
+        })
+    }
+
+    /// The inside of a `$"…"` interpolation string, up to and including the
+    /// closing quote. Shared by the node form and the value form.
+    fn interp_parts(&mut self) -> Result<Vec<TmplStrPart>, Diagnostic> {
         let mut parts = Vec::new();
         let mut literal = String::new();
         loop {
@@ -466,10 +476,7 @@ impl<'a> TmplParser<'a> {
         if !literal.is_empty() {
             parts.push(TmplStrPart::Lit(literal));
         }
-        Ok(TmplNode::Interp {
-            parts,
-            span: self.node_span(start),
-        })
+        Ok(parts)
     }
 
     /// `[each [NAME] in [$]path [where cond] { body }]`
@@ -817,6 +824,12 @@ impl<'a> TmplParser<'a> {
                 unreachable!("call_node returns a Call node")
             };
             return Ok(TmplValue::Call { path, args });
+        }
+        if self.rest().starts_with('$') && self.rest()[1..].starts_with('"') {
+            // `$"…{cap}…"` as a value: the interpolated TEXT (§8.4).
+            self.cursor += 2;
+            let parts = self.interp_parts()?;
+            return Ok(TmplValue::Interp { parts });
         }
         if self.rest().starts_with('$') {
             self.cursor += 1;
@@ -1204,6 +1217,25 @@ impl<'e> Elaborator<'e> {
     fn resolve_value(&self, value: &TmplValue) -> Result<Capture, String> {
         match value {
             TmplValue::Capture { path } => self.lookup(path),
+            TmplValue::Interp { parts } => {
+                // A value-position interpolation resolves to the concatenated
+                // text: literals verbatim, holes as the capture's text.
+                let mut text = String::new();
+                for part in parts {
+                    match part {
+                        TmplStrPart::Lit(literal) => text.push_str(literal),
+                        TmplStrPart::Hole { path, accessor } => {
+                            let capture = self.resolve(path, accessor.clone())?;
+                            text.push_str(capture.matched.trim());
+                        }
+                    }
+                }
+                Ok(Capture {
+                    kind: CaptureKind::Text(TextKind::Raw),
+                    matched: text,
+                    span: self.source_span,
+                })
+            }
             TmplValue::Str(value) => Ok(Capture {
                 kind: CaptureKind::Text(TextKind::Str),
                 matched: value.clone(),

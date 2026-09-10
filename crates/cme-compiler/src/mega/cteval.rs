@@ -165,6 +165,31 @@ impl<'g> CtEngine<'g> {
         if path.first().map(String::as_str) == Some("cm") {
             return self.call_builtin(path, args);
         }
+        // §8.3.4's accumulation helper: `append(list, item)` extends a list
+        // capture by one element (`recur with context { open: append(open,
+        // name) }`). It is the §11 core-library collection function, provided
+        // natively here while imports/core land (plan §1.4.3 scale).
+        if path.len() == 1 && path[0] == "append" {
+            let Some(item) = args.get(1) else {
+                return Err("`append` needs (list, item)".to_string());
+            };
+            let mut items = match args.first().map(|first| &first.kind) {
+                Some(CaptureKind::List(items)) => items.clone(),
+                // An absent context default (`= none`) accumulates from empty.
+                Some(CaptureKind::Opt(None)) | None => Vec::new(),
+                Some(_) => Vec::new(),
+            };
+            items.push(item.clone());
+            let result = Capture {
+                kind: CaptureKind::List(items),
+                matched: String::new(),
+                span: Span::missing(0),
+            };
+            return Ok(CtResult {
+                value: capture_to_capture_value(&result),
+                is_code: false,
+            });
+        }
         self.call_user(path, args)
     }
 

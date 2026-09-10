@@ -228,10 +228,16 @@ impl<'a> PatternParser<'a> {
                 self.cursor += 1;
                 return Ok(fields);
             }
+            let before_field = self.cursor;
             // `[Type] name [= default]` — the whitepaper's `selector parent
             // = none`: an optional rule-typed first word, then the name.
+            // The type may carry the §8.3.4 array suffix (`str[] open`).
             let first = self.ident();
             self.skip_trivia();
+            if self.rest().starts_with('[') && self.rest()[1..].starts_with(']') {
+                self.cursor += 2;
+                self.skip_trivia();
+            }
             let second = self.peek_word();
             let (name, _type) = if !second.is_empty()
                 && !RESERVED.contains(&second)
@@ -253,6 +259,9 @@ impl<'a> PatternParser<'a> {
             self.skip_trivia();
             if self.rest().starts_with(',') {
                 self.cursor += 1;
+            }
+            if self.cursor == before_field {
+                return Err(self.error("expected a context field declaration"));
             }
         }
     }

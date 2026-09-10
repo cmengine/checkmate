@@ -135,13 +135,24 @@ grammar toml {
             litStr   => ( "'" until "'" as text "'" )
             mStrB    => ( "\"\"\"" until "\"\"\"" as text "\"\"\"" )
             mStrL    => ( "'''" until "'''" as text "'''" )
-            integer  => ( optional { "-" } scan [0-9] as digits )
-            floatV   => ( optional { "-" } scan [0-9] as intPart "." scan [0-9] as fracPart )
+            integer  => ( optional { "-" } scan [0-9] as digits
+                          peek { not { oneof { dash => "-", dot => ".", tee => "T" } } } )
+            floatV   => ( optional { "-" } scan [0-9] as intPart "." scan [0-9] as fracPart
+                          peek { not { oneof { dash => "-", dot => "." } } } )
             trueV    => "true"
             falseV   => "false"
+            datetime => datetime
             array    => ( "[" soft { each sep "," trailing { value } as items "]" } )
             inline   => ( "{" soft { each sep "," { dottedKey k "=" value as v } as fields "}" } )
         }
+    }
+
+    // Date-time forms (TOML 1.0): an offset/local date-time, or a bare
+    // date. The whole form is bound once; @toValue carries it verbatim.
+    rule datetime {
+        ( scan [0-9] as y "-" scan [0-9] as mo "-" scan [0-9] as d
+          optional { "T" scan [0-9:.] as clock
+                     optional { oneof { zulu => "Z", offset => ( oneof { plus => "+", minus => "-" } scan [0-9] as hhmm ) } } } ) as stamp
     }
 }
 
@@ -210,7 +221,7 @@ grammar yaml {
     }
 
     rule key {
-        oneof { plain => scan [A-Za-z0-9_.-] as k, quoted => $str k }
+        oneof { plain => scan [A-Za-z0-9_.-] as k, merge => "<<", quoted => $str k }
     }
 
     rule scalar {
@@ -497,10 +508,48 @@ grammar js {
         oneof {
             number   => oneof { frac => $float literal, whole => $int literal }
             string   => $str literal
+            template => ( "`" $template<"${" "}" expression> lit "`" )
             ident    => $word name
             regex    => re.literal            // grammar reuse
             paren    => ( "(" soft { expression inner ")" } )
         }
+    }
+}
+
+// ------------------------------------------------------------ ts (§8.2/§8.8)
+// std.ts's shape: `grammar ts extends js` overrides `statement` to accept a
+// type annotation; every other form is inherited, and the `plain` branch
+// delegates to the parent namespace explicitly (`js.statement`).
+grammar ts extends js {
+    rule statement {
+        oneof {
+            typedDecl => ( oneof { let => "let", const => "const" } $word name ":" $type ann
+                           optional { soft { "=" expression init } } semi )
+            plain     => js.statement
+        }
+    }
+}
+
+// -------------------------------------------------------- nest (§8.3.4/§8.3.7)
+// §8.3.4's third row: a cross-instance check that must STEER matching
+// accumulates the open-element list downward through `context` — `append`
+// extends the list at each recursion, `some … in` tests it in a `where`
+// (no nested duplicate tags), and `close == name` rejects mismatches.
+grammar nest {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule doc {
+        each { element } as items
+        eof
+    }
+
+    rule element(context { str[] open = none }) {
+        "<" $word name ">"
+        where !present(open) || !some x in open { x == name }
+        optional { until { "<" } as text }
+        each { element with context { open: append(open, name) } } as children
+        "</" $word close ">"
+        where close == name
     }
 }
 
@@ -604,6 +653,7 @@ magic jsonValue(json.value as v) {
 // TOML → JsonTree: a flat Obj with one entry per document item —
 // "dotted.key": <value tree> for keyvals, "[table.path]": Obj({}) for headers.
 magic tomlValue(toml.document as doc) {
+    require(@tablesConsistent($doc), "table redefined or reopened with a conflicting type")
     @toValue($doc)
 }
 
@@ -675,6 +725,71 @@ magic def(py.def as d) {
     }) {
         @emitBody($d.body)
     }
+}
+
+// §8.1's own example, verbatim shape: an INLINE entry pattern under the
+// default profile, with inert editor metadata (#complete/#hover are
+// cme-lsp's alone — §8.1/§8.3.10), binds seeding directly ($model,
+// $effort, $prompt), and a $text tail taking the region remainder.
+magic agent.spawn(
+    #complete(engine.availableModels)
+    #hover("Target model identifier, e.g. claude-opus-latest")
+    "model:" $tag model
+    "effort:" $word effort
+
+    $text prompt
+) {
+    spawnAgent(
+        model: $"{$model}"
+        effort: $"{$effort}"
+        prompt: $"{$prompt}"
+    )
+}
+
+// §8.3.3's parameterized $tt: the balanced token tree roots at the given
+// delimiter pair; braces inside strings stay interior to the tree.
+magic pair($word key "=" $tt<"{{" "}}"> value) {
+    Pair(key: $"{$key}", value: $"{$value.matched}")
+}
+
+// §8.3.3's live-island template (ui.banner's shape): $template splits the
+// region at {{ }} islands into tagged text/expr parts, dispatched with
+// match; islands are real Checkmate expressions, parse-checked at capture.
+magic uiBanner($template body) {
+    [
+        [each in $body {
+            match ($item) {
+                text => $"{$item.text}"
+                expr => $"[live: {$item.value}]"
+            }
+        }]
+    ]
+}
+
+// Type-position invocation (§8.4): the template emits a TYPE, so the
+// invocation sits where `str[]` would.
+magic listOf($word base) {
+    $base[]
+}
+
+// TS declarations → summary lines (the extends demo; plain statements
+// delegate to the parent grammar).
+magic tsRun(ts.program as p) {
+    [
+        [each in $p.stmts {
+            match ($item) {
+                typedDecl => $"decl {$item.name} : {$item.ann}"
+                plain     => "js"
+            }
+        }]
+    ]
+}
+
+// Nest documents → "name[childCount]" per top-level element.
+magic nestTree(nest.doc as d) {
+    [
+        [each in $d.items { $"{$item.name}[{$item.children.length}]" }]
+    ]
 }
 
 // SQL SELECT → SqlQuery struct value (struct declared in Part 3).
@@ -858,6 +973,9 @@ code toValue(Capture v) {
             if (tag == "integer") {
                 return "JsonTree.Num(\"" + strOf(fields["digits"]) + "\")"
             }
+            if (tag == "datetime") {
+                return "JsonTree.Str(\"" + strOf(fields["stamp"]) + "\")"
+            }
             if (tag == "floatV") {
                 return "JsonTree.Num(\"" + strOf(fields["intPart"]) + "." + strOf(fields["fracPart"]) + "\")"
             }
@@ -1013,6 +1131,48 @@ str dottedJoin(Capture key) {
         _ => {}
     }
     return out
+}
+
+// -- TOML table consistency (§8.8's require + §8.5) ---------------------------
+
+// True when no table header path is declared twice (the "table redefined"
+// half of §8.8's TOML require). The doc's items are scanned with two nested
+// iterations and manual indices; a repeated `dottedJoin(path)` rejects.
+bool tablesConsistent(Capture doc) {
+    match (doc) {
+        Rec(str tag, map<str, Capture> fields) => {
+            match (fields["items"]) {
+                List(Capture[] items) => {
+                    int i = 0
+                    for (Capture a in items) {
+                        int j = 0
+                        for (Capture b in items) {
+                            if (j < i) {
+                                str pa = tablePath(a)
+                                str pb = tablePath(b)
+                                if (pa != "" && pa == pb) { return false }
+                            }
+                            j += 1
+                        }
+                        i += 1
+                    }
+                    return true
+                }
+                _ => { return true }
+            }
+        }
+        _ => { return true }
+    }
+}
+
+str tablePath(Capture item) {
+    match (item) {
+        Rec(str tag, map<str, Capture> f) => {
+            if (tag == "table") { return dottedJoin(f["path"]) }
+            return ""
+        }
+        _ => { return "" }
+    }
 }
 
 // -- YAML anchors (§8.3.4 require + §8.5) -------------------------------------
@@ -1411,6 +1571,15 @@ struct SqlQuery {
     int limit
 }
 
+struct Pair {
+    str key
+    str value
+}
+
+str spawnAgent(str model, str effort, str prompt) {
+    return model + "/" + effort
+}
+
 void usePy(int x) {
     return
 }
@@ -1490,6 +1659,9 @@ int checkToml() {
         [db]
         port = 5432
         enabled = true
+
+        [tool]
+        since = 1979-05-27T07:32:00Z
     }
     int fails = 0
     match (doc) {
@@ -1518,6 +1690,18 @@ int checkToml() {
                 Bool(bool b) => { if (!b) { fails += 1 } }
                 _ => { fails += 1 }
             }
+            match (fields["since"]) {
+                Str(str stamp) => { if (stamp != "1979-05-27T07:32:00Z") { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["[tool]"]) {
+                Obj(map<str, JsonTree> tool) => {
+                    str keys = ""
+                    for (str k in tool) { keys = keys + k }
+                    if (keys != "") { fails += 1 }
+                }
+                _ => { fails += 1 }
+            }
         }
         _ => { fails += 1 }
     }
@@ -1528,13 +1712,20 @@ int checkYaml() {
     // NOTE: normalization trims only the region EDGES (§8.6), so a
     // line-oriented region must be authored with its interior lines
     // indented relative to the first line's (trimmed) column — here the
-    // mapping entries are flush with it.
+    // mapping entries are flush with it. Anchors (&def), aliases (*def)
+    // and the << merge key are §8.8's YAML shapes; the require in the
+    // magic checks every alias against the anchors (§8.3.4).
     JsonTree doc = magic(yamlValue) {
     title: Checkmate
 limits:
     fuel: 1000000
     deadlineMs: 50
 tags: [embeddable, aot, arc]
+defaults: &def
+    retries: 3
+production:
+    <<: *def
+    retries: 5
     }
     int fails = 0
     match (doc) {
@@ -1556,6 +1747,26 @@ tags: [embeddable, aot, arc]
             }
             match (fields["tags"]) {
                 Arr(JsonTree[] items) => { if (items.length != 3) { fails += 1 } }
+                _ => { fails += 1 }
+            }
+            match (fields["defaults"]) {
+                Obj(map<str, JsonTree> inner) => {
+                    match (inner["retries"]) {
+                        Str(str n) => { if (n != "3") { fails += 1 } }
+                        _ => { fails += 1 }
+                    }
+                }
+                _ => { fails += 1 }
+            }
+            // The << merge key merged *def's retries, then the local
+            // `retries: 5` overrode it — both entries stay in the map.
+            match (fields["production"]) {
+                Obj(map<str, JsonTree> inner) => {
+                    match (inner["retries"]) {
+                        Str(str n) => { if (n != "5") { fails += 1 } }
+                        _ => { fails += 1 }
+                    }
+                }
                 _ => { fails += 1 }
             }
         }
@@ -1671,6 +1882,110 @@ int checkJs() {
     return fails
 }
 
+// §8.6's heredoc regions: `magic(name) <<tag … tag` is verbatim to the tag
+// line — the exact escape for content whose braces no composed profile can
+// balance (here: the regex's {2,3} bound under re's empty skip set).
+int checkReHeredoc() {
+    ReNode matcher = magic(reCompile) <<REGEX
+    ^a{2,3}b$
+    REGEX
+    int fails = 0
+    match (matcher) {
+        Alt(ReNode[] alts) => {
+            if (alts.length != 1) { fails += 1 }
+            match (alts[0]) {
+                Seq(ReNode[] terms) => {
+                    if (terms.length != 4) { fails += 1 }
+                    match (terms[1]) {
+                        Repeat(str kind, ReNode inner, int min, int max) => {
+                            if (min != 2) { fails += 1 }
+                            if (max != 3) { fails += 1 }
+                        }
+                        _ => { fails += 1 }
+                    }
+                }
+                _ => { fails += 1 }
+            }
+        }
+        _ => { fails += 1 }
+    }
+    return fails
+}
+
+// §8.2's `grammar ts extends js` end to end: the typed declaration is the
+// child's override ($type live island), the call statement delegates.
+int checkTs() {
+    str[] tsLines = magic(tsRun) {
+        let count: int = 5
+        console.log(count)
+    }
+    int fails = 0
+    if (tsLines.length != 2) { fails += 1 }
+    if (tsLines[0] != "decl count : int") { fails += 1 }
+    if (tsLines[1] != "js") { fails += 1 }
+    return fails
+}
+
+// §8.3.4/§8.3.7's context accumulation: the open-element list threads down
+// through `with context { open: append(open, name) }` and steers matching.
+int checkNest() {
+    str[] nestLines = magic(nestTree) {
+        <section>
+            <subsection>
+                <p>hello</p>
+            </subsection>
+        </section>
+        <div></div>
+    }
+    int fails = 0
+    if (nestLines.length != 2) { fails += 1 }
+    if (nestLines[0] != "section[1]") { fails += 1 }
+    if (nestLines[1] != "div[0]") { fails += 1 }
+    return fails
+}
+
+// The §8.1 inline entry + inert annotations, end to end.
+int checkSpawn() {
+    int fails = 0
+    // Expression position.
+    str line = magic(agent.spawn) {
+        model: claude-opus-latest
+        effort: high
+
+        Hi. Coordinate the player NPC patrol routes.
+    }
+    if (line != "claude-opus-latest/high") { fails += 1 }
+    // Statement position (the generated call is the whole statement).
+    magic(agent.spawn) {
+        model: gpt-5
+        effort: low
+        Patrol the east wing.
+    }
+    return fails
+}
+
+// The parameterized $tt and the live-island $template demos.
+int checkPairAndBanner() {
+    int fails = 0
+    Pair p = magic(pair) {
+        alpha = {{ f(1) + g(2) }}
+    }
+    if (p.key != "alpha") { fails += 1 }
+    if (p.value != "{{ f(1) + g(2) }}") { fails += 1 }
+    // Type position: the invocation expands to the element TYPE str[].
+    // Interior region whitespace stays verbatim (§8.6 trims only the edges),
+    // so the region is authored on one line for stable part text.
+    magic(listOf) { str } banner = magic(uiBanner) {
+        Welcome back, {{ userName }}! You have {{ score }} points.
+    }
+    if (banner.length != 5) { fails += 1 }
+    if (banner[0] != "Welcome back, ") { fails += 1 }
+    if (banner[1] != "[live: userName]") { fails += 1 }
+    if (banner[3] != "[live: score]") { fails += 1 }
+    if (banner[4] != " points.") { fails += 1 }
+    return fails
+}
+
 int checkPy() {
     int fails = 0
     int clamped = pyClampFn(2, 1, 5)
@@ -1711,7 +2026,12 @@ int main() {
     fails += checkHtml()
     fails += checkHtmlScript()
     fails += checkRe()
+    fails += checkReHeredoc()
     fails += checkJs()
+    fails += checkTs()
+    fails += checkNest()
+    fails += checkSpawn()
+    fails += checkPairAndBanner()
     fails += checkPy()
     fails += checkSql()
     return fails

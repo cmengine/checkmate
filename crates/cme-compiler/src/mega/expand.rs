@@ -1872,6 +1872,222 @@ str v = magic(twin) {
         );
     }
 
+    // -- §8.3.4: context accumulation via append steers matching -------------
+
+    #[test]
+    fn nested_duplicate_tags_are_rejected_through_context() {
+        // §8.3.4's third row: the open-element list accumulated downward
+        // through `context` STEERS matching — a nested duplicate tag makes
+        // the `where` fail, and no alternative saves the branch.
+        let source = r#"
+grammar nest {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule doc {
+        each { element } as items
+        eof
+    }
+    rule element(context { str[] open = none }) {
+        "<" $word name ">"
+        where !present(open) || !some x in open { x == name }
+        optional { until { "<" } as text }
+        each { element with context { open: append(open, name) } } as children
+        "</" $word close ">"
+        where close == name
+    }
+}
+magic nestTree(nest.doc as d) {
+    [ [each in $d.items { $"{$item.name}" }] ]
+}
+str[] v = magic(nestTree) {
+    <section>
+        <section>
+            deep
+        </section>
+    </section>
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("magic pattern did not match")),
+            "a nested duplicate tag must fail the match: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn context_accumulation_accepts_distinct_nesting() {
+        let source = r#"
+grammar nest {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule doc {
+        each { element } as items
+        eof
+    }
+    rule element(context { str[] open = none }) {
+        "<" $word name ">"
+        where !present(open) || !some x in open { x == name }
+        optional { until { "<" } as text }
+        each { element with context { open: append(open, name) } } as children
+        "</" $word close ">"
+        where close == name
+    }
+}
+magic nestTree(nest.doc as d) {
+    [ [each in $d.items { $"{$item.name}[{$item.children.length}]" }] ]
+}
+str[] v = magic(nestTree) {
+    <section>
+        <subsection>
+            deep
+        </subsection>
+    </section>
+    <div></div>
+}
+"#;
+        let outcome = expand_source(source).expect("distinct nesting passes the context guard");
+        assert!(
+            outcome.expanded.contains("\"section[1]\"") && outcome.expanded.contains("\"div[0]\""),
+            "{}",
+            outcome.expanded
+        );
+    }
+
+    #[test]
+    fn duplicate_toml_table_headers_are_rejected_by_the_require() {
+        let source = r##"
+grammar toml {
+    skip    [ ' ', '\t' ]
+    comment ( "#" )
+    rule document {
+        each { oneof { table => tableHeader, kv => keyval } } as items
+    }
+    rule tableHeader {
+        oneof {
+            arrayTable => ( "[[" dottedKey path "]]" eol )
+            table      => ( "[" dottedKey path "]" eol )
+        }
+    }
+    rule keyval {
+        dottedKey key "=" value as val eol
+    }
+    rule dottedKey {
+        each sep "." {
+            oneof { bare => scan [A-Za-z0-9_-] as part, quoted => $str part }
+        } as parts
+    }
+    rule value {
+        oneof {
+            basicStr => $str text
+            integer  => ( optional { "-" } scan [0-9] as digits )
+        }
+    }
+}
+
+bool tablesConsistent(Capture doc) {
+    match (doc) {
+        Rec(str tag, map<str, Capture> fields) => {
+            match (fields["items"]) {
+                List(Capture[] items) => {
+                    int seen = 0
+                    for (Capture item in items) {
+                        match (item) {
+                            Rec(str itag, map<str, Capture> f) => {
+                                if (itag == "table") { seen += 1 }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return seen < 2
+                }
+                _ => { return true }
+            }
+        }
+        _ => { return true }
+    }
+}
+
+magic tomlValue(toml.document as doc) {
+    require(@tablesConsistent($doc), "table redefined or reopened with a conflicting type")
+    "obj"
+}
+
+str v = magic(tomlValue) {
+    [a]
+    x = 1
+
+    [a]
+    y = 2
+}
+"##;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("table redefined")),
+            "the require anchors at the capture: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn context_fields_accept_array_types() {
+        // §8.3.4's `context { str[] open }` — the array type suffix used to
+        // send the field parser into a zero-progress loop.
+        let source = r#"
+grammar nest {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule doc {
+        each { element } as items
+        eof
+    }
+    rule element(context { str[] open = none, int depth = 0 }) {
+        "<" $word name ">"
+        each { element with context { open: append(open, name), depth: 1 } } as children
+        "</" $word close ">"
+    }
+}
+magic nestTree(nest.doc as d) {
+    [ [each in $d.items { $"{$item.name}" }] ]
+}
+str[] v = magic(nestTree) {
+    <div></div>
+}
+"#;
+        let outcome = expand_source(source).expect("array-typed context fields parse");
+        assert!(outcome.expanded.contains("\"div\""), "{}", outcome.expanded);
+    }
+
+    #[test]
+    fn short_circuit_or_protects_a_quantifier_over_an_absent_list() {
+        // §A.5's short-circuiting carries into `where`: `!present(open) ||`
+        // is true at the top level, so the `some … in` over the absent list
+        // is never evaluated (a strict evaluation would fail the guard).
+        let source = r#"
+grammar nest {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule doc {
+        each { element } as items
+        eof
+    }
+    rule element(context { str[] open = none }) {
+        "<" $word name ">"
+        where !present(open) || !some x in open { x == name }
+        each { element with context { open: append(open, name) } } as children
+        "</" $word close ">"
+        where close == name
+    }
+}
+magic nestTree(nest.doc as d) {
+    [ [each in $d.items { $"{$item.name}" }] ]
+}
+str[] v = magic(nestTree) {
+    <div></div>
+}
+"#;
+        let outcome = expand_source(source).expect("top-level guard passes");
+        assert!(outcome.expanded.contains("\"div\""), "{}", outcome.expanded);
+    }
+
     // -- §8.3.3: the parameterized $tt fragment ------------------------------
 
     #[test]

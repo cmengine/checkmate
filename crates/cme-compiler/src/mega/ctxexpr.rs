@@ -227,6 +227,7 @@ fn parse_primary(text: &str, cursor: &mut usize, span: Span) -> Result<CtxExpr, 
                 ));
             }
             *cursor += 2;
+            skip_trivia(text, cursor);
             let list = parse_path_with_accessors(text, cursor, span)?;
             skip_trivia(text, cursor);
             if !text[*cursor..].starts_with('{') {

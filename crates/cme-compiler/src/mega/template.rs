@@ -1367,7 +1367,13 @@ impl<'e> Elaborator<'e> {
                 apply(capture, accessor.clone()).ok().map(CtxVal::Capture)
             }
             CtxExpr::Bin(op, lhs, rhs) => {
+                // §A.5 short-circuiting, as in the matcher's evaluator.
                 let lhs = self.eval(lhs)?;
+                if *op == CtxBinOp::And && lhs == CtxVal::Bool(false)
+                    || *op == CtxBinOp::Or && lhs == CtxVal::Bool(true)
+                {
+                    return Some(lhs);
+                }
                 let rhs = self.eval(rhs)?;
                 eval_bin(op.clone(), &lhs, &rhs)
             }

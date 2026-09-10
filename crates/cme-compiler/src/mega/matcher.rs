@@ -2791,7 +2791,15 @@ impl<'a> Matcher<'a> {
                 self.apply_accessor(capture, accessor)
             }
             CtxExpr::Bin(op, lhs, rhs) => {
+                // §A.5 short-circuiting carries into the condition language:
+                // `&&`/`||` evaluate the right side only when it can matter,
+                // so a guard may protect a quantifier over an absent list.
                 let lhs = self.eval(lhs, env)?;
+                if *op == CtxBinOp::And && lhs == CtxVal::Bool(false)
+                    || *op == CtxBinOp::Or && lhs == CtxVal::Bool(true)
+                {
+                    return Some(lhs);
+                }
                 let rhs = self.eval(rhs, env)?;
                 eval_bin(op.clone(), &lhs, &rhs)
             }

@@ -127,6 +127,12 @@ pub enum Accessor {
     Col,
     /// A list capture's element count.
     Length,
+    /// The capture's source span (§8.3.4). The span is the value the
+    /// whitepaper threads into `cm.parse*(text, span)` / `cm.code.*`;
+    /// plan §1.4.9 accepts and ignores that argument at the text level, so
+    /// the accessor yields the span's region-relative `line:col` text when
+    /// one is needed as a plain value.
+    Span,
 }
 
 /// Binary operators available to `where` conditions (Appendix A subset).

@@ -1418,6 +1418,7 @@ fn accessor_keyword(segment: &str) -> Option<Accessor> {
         "length" => Some(Accessor::Length),
         "line" => Some(Accessor::Line),
         "col" => Some(Accessor::Col),
+        "span" => Some(Accessor::Span),
         _ => None,
     }
 }
@@ -1447,6 +1448,15 @@ fn apply(capture: Capture, accessor: Option<Accessor>) -> Result<Capture, String
         Some(Accessor::Line) | Some(Accessor::Col) => Ok(Capture {
             kind: CaptureKind::Int(0),
             matched: "0".to_string(),
+            span: capture.span,
+        }),
+        // `.span` (§8.3.4): the capture's span as `start:end` byte offsets —
+        // the same opaque, equality-comparable token form the matcher's
+        // `where` evaluator produces (plan §1.4.9: span arguments to the
+        // `cm.*` API are accepted and ignored at the text level).
+        Some(Accessor::Span) => Ok(Capture {
+            kind: CaptureKind::Text(TextKind::Raw),
+            matched: format!("{}:{}", capture.span.start, capture.span.end),
             span: capture.span,
         }),
     }

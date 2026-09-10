@@ -1760,6 +1760,86 @@ str v = magic(outer) {
         );
     }
 
+    // -- §8.3.3: function validators; §8.3.4: the .span accessor -------------
+
+    #[test]
+    fn fragment_validators_may_name_pure_functions() {
+        let source = r#"
+bool isValidTag(str t) {
+    return t == "on" || t == "off"
+}
+
+magic flip($word<isValidTag> state) {
+    $"{$state}!"
+}
+
+str v = magic(flip) {
+    on
+}
+"#;
+        let outcome = expand_source(source).expect("a function validator accepts `on`");
+        assert!(outcome.expanded.contains("\"on!\""), "{}", outcome.expanded);
+
+        let rejected = r#"
+bool isValidTag(str t) {
+    return t == "on" || t == "off"
+}
+
+magic flip($word<isValidTag> state) {
+    $"{$state}!"
+}
+
+str v = magic(flip) {
+    sideways
+}
+"#;
+        let errors = expansion_errors(rejected);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("validator `isValidTag` rejected")),
+            "the function validator rejects non-members: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn span_accessor_compares_for_identity() {
+        // §8.3.4's capture accessors include `.span`; two captures over the
+        // same extent share one span text, distinct extents differ.
+        let source = r#"
+magic twin($word as a $word as b where a.span != b.span) {
+    "spans differ"
+}
+
+str v = magic(twin) {
+    one two
+}
+"#;
+        let outcome = expand_source(source).expect("distinct spans compare");
+        assert!(
+            outcome.expanded.contains("spans differ"),
+            "{}",
+            outcome.expanded
+        );
+
+        let same = r#"
+magic twin($word as a $word as b where a.span == b.span) {
+    "same"
+}
+
+str v = magic(twin) {
+    echo
+}
+"#;
+        let errors = expansion_errors(same);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("magic pattern did not match")),
+            "a single word cannot bind twice, so the where never passes: {errors:?}"
+        );
+    }
+
     // -- Task 10: diagnostics & provenance polish (§8.3.9, §8.6) --------------
 
     #[test]

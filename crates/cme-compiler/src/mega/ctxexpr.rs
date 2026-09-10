@@ -304,6 +304,7 @@ pub fn parse_path_with_accessors(
             "line" => Some(Accessor::Line),
             "col" => Some(Accessor::Col),
             "length" => Some(Accessor::Length),
+            "span" => Some(Accessor::Span),
             _ => None,
         };
         match found {
@@ -313,7 +314,7 @@ pub fn parse_path_with_accessors(
             }
             None => {
                 return Err(Diagnostic::parse(
-                    "unknown accessor (expected `matched`, `line`, `col`, or `length`)",
+                    "unknown accessor (expected `matched`, `line`, `col`, `length`, or `span`)",
                     offset(span, dot),
                 ));
             }

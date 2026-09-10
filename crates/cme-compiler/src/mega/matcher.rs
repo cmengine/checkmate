@@ -2632,6 +2632,34 @@ impl<'a> Matcher<'a> {
                 Ok(())
             };
         }
+        // §8.3.3: a validator may also name a pure function from the same
+        // module (§8.5). The matched text bridges as a `str`; the function
+        // must return a `bool`.
+        if let Some(engine) = self.ct {
+            let argument = Capture {
+                kind: CaptureKind::Text(TextKind::Raw),
+                matched: text.clone(),
+                span: self.span(start, end),
+            };
+            match engine.call(&effective, &[argument]) {
+                Ok(result) => {
+                    return match result.value {
+                        cme_interp::Value::Bool(true) => Ok(()),
+                        cme_interp::Value::Bool(false) => Err(format!(
+                            "validator `{}` rejected `{text}` (the function returned false)",
+                            path.join(".")
+                        )),
+                        _ => Err(format!(
+                            "validator `{}` must return a bool (§8.3.3)",
+                            path.join(".")
+                        )),
+                    };
+                }
+                Err(message) => {
+                    return Err(format!("validator `{}` failed: {message}", path.join(".")));
+                }
+            }
+        }
         Err(format!(
             "unknown fragment validator `{}` (expected a rule path or a pure compile-time function)",
             path.join(".")
@@ -2881,6 +2909,14 @@ impl<'a> Matcher<'a> {
             }
             Some(Accessor::Line) => Some(CtxVal::Int(self.capture_line(&capture) as i64)),
             Some(Accessor::Col) => Some(CtxVal::Int(self.capture_col(&capture) as i64)),
+            // `.span` (§8.3.4): the capture's span as `start:end` byte
+            // offsets — an opaque, equality-comparable token. plan §1.4.9
+            // accepts and ignores span arguments to the `cm.*` API; the text
+            // form also lets conditions compare positions for identity.
+            Some(Accessor::Span) => Some(CtxVal::Str(format!(
+                "{}:{}",
+                capture.span.start, capture.span.end
+            ))),
         }
     }
 
@@ -2892,6 +2928,7 @@ impl<'a> Matcher<'a> {
             "length" => Accessor::Length,
             "line" => Accessor::Line,
             "col" => Accessor::Col,
+            "span" => Accessor::Span,
             _ => return None,
         };
         match self.apply_accessor(capture, &Some(accessor))? {

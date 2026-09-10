@@ -1,0 +1,143 @@
+// Program fixture: structs, enums, pattern matching, option/result, generics
+// (§2.6–§2.9, §2.15, §2.8).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+struct vec2 {
+    float x
+    float y
+}
+
+struct player {
+    str name
+    vec2 position
+    int health
+    bool alive
+}
+
+enum gameEvent {
+    Damage(int amount)
+    Heal(int amount)
+    Spawn(str enemyKind, vec2 position)
+    PlayerDied()
+}
+
+struct pair<A, B> {
+    A first
+    B second
+}
+
+float distanceSq(vec2 a, vec2 b) {
+    float dx = b.x - a.x
+    float dy = b.y - a.y
+    return dx * dx + dy * dy
+}
+
+player damage(player p, int amount) {
+    p.health -= amount
+    if (p.health <= 0) {
+        p.alive = false
+    }
+    return p
+}
+
+str describe(gameEvent event) {
+    return match (event) {
+        Damage(int amount) => "damage:" + amount
+        Heal(int amount) => "heal:" + amount
+        Spawn(str enemyKind, vec2 at) => "spawn:" + enemyKind
+        PlayerDied() => "died"
+    }
+}
+
+int eventCost(gameEvent event) {
+    match (event) {
+        Damage(int amount) => { return amount }
+        Heal(int amount) => { return 0 - amount }
+        Spawn(str kind, vec2 at) => { return 1 }
+        PlayerDied() => { return 1000 }
+    }
+}
+
+pair<int, str> zipInfo(int id) {
+    return pair(first: id, second: "id" + id)
+}
+
+int main() {
+    int fails = 0
+
+    // Struct construction takes exactly the declared fields, named (§2.6).
+    vec2 origin = vec2(x: 0.0, y: 0.0)
+    vec2 spot = vec2(x: 3.0, y: 4.0)
+    if (distanceSq(origin, spot) != 25.0) { fails += 1 }
+
+    player hero = player(
+        name: "Hero"
+        position: spot
+        health: 100
+        alive: true
+    )
+
+    // Value semantics: the mutation is visible only through the return (§2.13).
+    player hurt = damage(hero, 60)
+    if (hurt.health != 40) { fails += 1 }
+    if (hurt.alive != true) { fails += 1 }
+    if (hero.health != 100) { fails += 1 }
+
+    // The kill pin.
+    player dead = damage(hero, 150)
+    if (dead.alive != false) { fails += 1 }
+
+    // Enum construction is qualified (§2.7).
+    gameEvent hit = gameEvent.Damage(25)
+    gameEvent seen = gameEvent.Spawn("goblin", spot)
+    if (describe(hit) != "damage:25") { fails += 1 }
+    if (describe(seen) != "spawn:goblin") { fails += 1 }
+    if (describe(gameEvent.PlayerDied()) != "died") { fails += 1 }
+
+    // Statement match dispatches per arm.
+    if (eventCost(hit) != 25) { fails += 1 }
+    if (eventCost(gameEvent.Heal(10)) != -10) { fails += 1 }
+    if (eventCost(gameEvent.PlayerDied()) != 1000) { fails += 1 }
+
+    // Generics (§2.9): type arguments crystallize from the fields.
+    pair<int, str> labelled = pair(first: 7, second: "seven")
+    if (labelled.first != 7) { fails += 1 }
+    if (labelled.second != "seven") { fails += 1 }
+    pair<str, bool> flag = pair(first: "on", second: true)
+    if (flag.second != true) { fails += 1 }
+    if (zipInfo(3).second != "id3") { fails += 1 }
+
+    // option<T> with crystallization and matching (§2.8).
+    option<int> found = option.Some(5)
+    int unwrapped = 0
+    match (found) {
+        Some(int v) => { unwrapped = v }
+        None() => { unwrapped = -1 }
+    }
+    if (unwrapped != 5) { fails += 1 }
+
+    option<int> missing = option.None()
+    match (missing) {
+        Some(int v) => { unwrapped = v }
+        None() => { unwrapped = -1 }
+    }
+    if (unwrapped != -1) { fails += 1 }
+
+    // result<T, E> construction and the ? operator (§2.8).
+    result<int, str> ok = result.Ok(9)
+    result<int, str> err = result.Err("boom")
+    match (ok) {
+        Ok(int v) => { unwrapped = v }
+        Err(str e) => { unwrapped = -2 }
+    }
+    if (unwrapped != 9) { fails += 1 }
+    match (err) {
+        Ok(int v) => { unwrapped = -3 }
+        Err(str e) => {
+            if (e != "boom") { fails += 1 }
+        }
+    }
+
+    if (fails != 0) { return fails }
+    return 0
+}

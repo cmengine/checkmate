@@ -1,0 +1,54 @@
+// Program fixture: strings, concatenation stringification, interpolation (§A.6, §2.8).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+str joinThree(str a, str b, str c) {
+    return a + b + c
+}
+
+int main() {
+    int fails = 0
+
+    // §A.6 canonical stringifications inside concatenation.
+    if ("HP: " + 100 != "HP: 100") { fails += 1 }
+    if ("ok: " + true != "ok: true") { fails += 1 }
+    if ("no: " + false != "no: false") { fails += 1 }
+    if (1.5 + "x" != "1.5x") { fails += 1 }
+    if ("a" + 1 + 2 != "a12") { fails += 1 }
+    if (1 + 2 + "a" != "3a") { fails += 1 }
+    if (-4 + "!" != "-4!") { fails += 1 }
+    if (0 + "" != "0") { fails += 1 }
+
+    // Float stringification: the shortest round-trip decimal form.
+    if (2.5 + "" != "2.5") { fails += 1 }
+    if (0.5 + 0.25 + "" != "0.75") { fails += 1 }
+    if (-2.25 + "" != "-2.25") { fails += 1 }
+
+    // Left associativity through a helper.
+    if (joinThree("x", "y", "z") != "xyz") { fails += 1 }
+
+    // Escapes (§2.2): \n \t \\ \" are the accepted set.
+    str escaped = "line1\nline2\ttabbed \"quoted\" back\\slash"
+    str expected = "line1" + "\n" + "line2" + "\t" + "tabbed \"quoted\" back\\slash"
+    if (escaped != expected) { fails += 1 }
+    if (escaped != "line1\nline2\ttabbed \"quoted\" back\\slash") { fails += 1 }
+
+    // Interpolation (§2.8/§4.1) of every scalar type.
+    int hp = 100
+    float ratio = 0.5
+    bool armed = true
+    str name = "hero"
+    if ($"hp={hp} ratio={ratio} armed={armed} name={name}" != "hp=100 ratio=0.5 armed=true name=hero") {
+        fails += 1
+    }
+
+    // Interpolation islands evaluate expressions.
+    if ($"sum={1 + 2}" != "sum=3") { fails += 1 }
+    if ($"neg={-(3)}" != "neg=-3") { fails += 1 }
+
+    // String indexing is absent; length is arrays-only (§11).
+    str text = "abc"
+    if (text + "!" != "abc!") { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

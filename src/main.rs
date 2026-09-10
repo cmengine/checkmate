@@ -200,9 +200,71 @@ fn render_diagnostics(errors: Vec<Diagnostic>, source: &str) -> Result<(), CliEr
     Ok(())
 }
 
+// Single-error convenience wrapper; the batch path uses `SourceLayout`
+// directly, and the test module exercises this one.
 #[cfg(feature = "cli")]
+#[allow(dead_code)]
 fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
     render_message_at(error.message(), error.span(), source, path)
+}
+
+/// A one-shot index of the source's line starts. Building it once turns a
+/// whole-diagnostics render from O(errors × file) byte scans into O(errors)
+/// — recovery-heavy files produce thousands of diagnostics, and per-
+/// diagnostic rescans made reporting the dominant cost.
+#[cfg(feature = "cli")]
+struct SourceLayout {
+    line_starts: Vec<usize>,
+}
+
+#[cfg(feature = "cli")]
+impl SourceLayout {
+    fn new(source: &str) -> Self {
+        let mut line_starts = vec![0usize];
+        for (index, byte) in source.bytes().enumerate() {
+            if byte == b'\n' {
+                line_starts.push(index + 1);
+            }
+        }
+        Self { line_starts }
+    }
+
+    /// The 1-based line of `offset`.
+    fn line_of(&self, offset: usize) -> usize {
+        match self.line_starts.binary_search(&offset) {
+            Ok(index) => index + 1,
+            Err(index) => index,
+        }
+        .max(1)
+    }
+
+    /// The byte offset where `line` (1-based) starts.
+    fn line_start(&self, line: usize) -> usize {
+        self.line_starts
+            .get(line - 1)
+            .copied()
+            .unwrap_or_else(|| *self.line_starts.last().unwrap_or(&0))
+    }
+
+    /// The full text of `line` (1-based), without its terminator.
+    fn line_text<'src>(&self, source: &'src str, line: usize) -> &'src str {
+        let start = self.line_start(line);
+        let end = source[start..]
+            .find('\n')
+            .map_or(source.len(), |relative| start + relative);
+        &source[start..end]
+    }
+
+    /// The 1-based (line, column) of `offset`, columns counted in
+    /// characters so carets stay aligned on multibyte lines.
+    fn line_column(&self, source: &str, offset: usize) -> (usize, usize) {
+        let line = self.line_of(offset);
+        let line_start = self.line_start(line);
+        let column_chars = source
+            .get(line_start..offset.min(source.len()))
+            .map_or(0, |text| text.chars().count());
+        (line, column_chars + 1)
+    }
 }
 
 /// Renders `message` located at `span` with the caret machinery. Shared by
@@ -211,14 +273,23 @@ fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
 /// UTF-8 text (byte offsets would smear the column past its true position).
 #[cfg(feature = "cli")]
 fn render_message_at(message: &str, span: Span, source: &str, path: &str) -> String {
-    let (line, column) = line_column(source, span.start);
-    let line_text = source
-        .split_inclusive(['\n'])
-        .nth(line - 1)
-        .unwrap_or_default()
-        .trim_end_matches('\n')
-        .to_string();
-    let start_byte = line_start_byte(source, line);
+    let layout = SourceLayout::new(source);
+    render_message_indexed(message, span, source, path, &layout)
+}
+
+/// The indexed variant: same output as [`render_message_at`], but the line
+/// layout is provided by the caller so batch rendering stays linear.
+#[cfg(feature = "cli")]
+fn render_message_indexed(
+    message: &str,
+    span: Span,
+    source: &str,
+    path: &str,
+    layout: &SourceLayout,
+) -> String {
+    let (line, column) = layout.line_column(source, span.start);
+    let line_text = layout.line_text(source, line);
+    let start_byte = layout.line_start(line);
     let leading = span.start.saturating_sub(start_byte);
     let prefix = String::from_utf8_lossy(&line_text.as_bytes()[..leading.min(line_text.len())])
         .chars()
@@ -238,41 +309,6 @@ fn render_message_at(message: &str, span: Span, source: &str, path: &str) -> Str
     format!("{path}:{line}:{column}: {message}\n{line_text}\n{caret}")
 }
 
-/// The 1-based (line, column) of `offset` in `source`, columns counted in
-/// characters so diagnostics match the character-based caret rendering.
-#[cfg(feature = "cli")]
-fn line_column(source: &str, offset: usize) -> (usize, usize) {
-    let mut line = 1usize;
-    let mut line_start = 0usize;
-    for (index, byte) in source.bytes().enumerate() {
-        if index >= offset {
-            break;
-        }
-        if byte == b'\n' {
-            line += 1;
-            line_start = index + 1;
-        }
-    }
-    let column_chars = source
-        .get(line_start..offset.min(source.len()))
-        .map_or(0, |text| text.chars().count());
-    (line, column_chars + 1)
-}
-
-#[cfg(feature = "cli")]
-fn line_start_byte(source: &str, line: usize) -> usize {
-    let mut current = 1usize;
-    for (index, byte) in source.bytes().enumerate() {
-        if current == line {
-            return index;
-        }
-        if byte == b'\n' {
-            current += 1;
-        }
-    }
-    source.len()
-}
-
 // This binary is only compiled if the user installs the CLI toolchain.
 #[cfg(feature = "cli")]
 fn main() -> ExitCode {
@@ -284,8 +320,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
         Err(CliError::Compiler(errors, source)) => {
+            // One layout for the whole batch: thousands of recovery
+            // diagnostics render in linear time.
+            let layout = SourceLayout::new(&source);
             for error in errors {
-                eprintln!("error: {}", render_error(&error, &source, &source_path));
+                eprintln!(
+                    "error: {}",
+                    render_message_indexed(
+                        error.message(),
+                        error.span(),
+                        &source,
+                        &source_path,
+                        &layout
+                    )
+                );
             }
             ExitCode::FAILURE
         }

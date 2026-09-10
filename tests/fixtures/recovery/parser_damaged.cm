@@ -1,0 +1,25 @@
+// Recovery fixture: parser-level damage — missing initializers, broken
+// headers, dangling operators, bad call shapes, stray brackets. Healthy
+// siblings on the lines BELOW damage must survive (strip-pass contract).
+int healthy(int v) {
+    return v
+}
+
+int brokenHeader(int int) {
+    return 0
+}
+
+int main() {
+    int missingInit =
+    int partial = 1 +
+    2
+    str wow how
+    if (missingInit > ) {
+        return 1
+    }
+    int fine = healthy(5)
+    if (fine != 5) {
+        return 1
+    }
+    return 0
+}

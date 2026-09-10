@@ -1,0 +1,54 @@
+// Program fixture: result<T, E> and the ? operator (§2.8) — propagation
+// through call boundaries, exact error-type matching, early return.
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+result<int, str> checkedDivide(int a, int b) {
+    if (b == 0) {
+        return Err("division by zero")
+    }
+    return Ok(a / b)
+}
+
+result<int, str> chained(int a, int b, int c) {
+    int first = checkedDivide(a, b)?
+    int second = checkedDivide(first, c)?
+    return Ok(second)
+}
+
+result<int, str> wrongErrorType(int a) {
+    infer broken = checkedDivide(a, 0)?
+    return Ok(broken)
+}
+
+result<str, str> describeError(int a, int b) {
+    int value = checkedDivide(a, b)?
+    return Ok("got " + value)
+}
+
+struct box2 {
+    int v
+}
+
+int main() {
+    int fails = 0
+
+    if (chained(64, 4, 2) != result.Ok(8)) { fails += 1 }
+    if (chained(64, 0, 2) != result.Err("division by zero")) { fails += 1 }
+    if (chained(64, 4, 0) != result.Err("division by zero")) { fails += 1 }
+
+    // ? unwraps through helper boundaries.
+    if (describeError(20, 4) != result.Ok("got 5")) { fails += 1 }
+    if (describeError(20, 0) != result.Err("division by zero")) { fails += 1 }
+
+    // Structural equality on results with struct payloads.
+    result<box2, str> packed = result.Ok(box2(v: 3))
+    match (packed) {
+        Ok(box2 payload) => {
+            if (payload.v != 3) { fails += 1 }
+        }
+        Err(str why) => { fails += 1 }
+    }
+
+    if (fails != 0) { return fails }
+    return 0
+}

@@ -1,0 +1,100 @@
+// Program fixture: collections — arrays, maps, indexing, for over keys, nesting (§11).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+int total(int[] values) {
+    int sum = 0
+    for (int v in values) {
+        sum += v
+    }
+    return sum
+}
+
+// Structs declared at top level (§2.6); collections nest inside.
+struct bag {
+    int[] items
+}
+
+int main() {
+    int fails = 0
+
+    // Array literals: comma or newline separated (§11.1 CMON style).
+    int[] nums = [1, 2, 3, 4, 5]
+    int[] stacked = [
+        10
+        20
+        30
+    ]
+    if (nums.length != 5) { fails += 1 }
+    if (stacked.length != 3) { fails += 1 }
+    if (total(nums) != 15) { fails += 1 }
+    if (total(stacked) != 60) { fails += 1 }
+
+    // Indexing reads; bounds are checked at runtime.
+    if (nums[0] != 1) { fails += 1 }
+    if (nums[4] != 5) { fails += 1 }
+    if (nums[1 + 1] != 3) { fails += 1 }
+
+    // Index writes mutate in place.
+    nums[2] = 30
+    if (nums[2] != 30) { fails += 1 }
+    if (total(nums) != 42) { fails += 1 }
+
+    // Empty array with a contextual element type is fine (§2.16).
+    int[] empty = []
+    if (empty.length != 0) { fails += 1 }
+    if (total(empty) != 0) { fails += 1 }
+
+    // Map literals: string keys, comma or newline separated.
+    map<str, int> ages = { "ana": 30, "bo": 25 }
+    map<int, str> names = {
+        1: "uno"
+        2: "dos"
+    }
+    if (ages["ana"] != 30) { fails += 1 }
+    if (ages["bo"] != 25) { fails += 1 }
+    if (names[1] != "uno") { fails += 1 }
+    if (names[2] != "dos") { fails += 1 }
+
+    // Index assignment replaces; assigning a NEW key inserts (§11).
+    ages["ana"] = 31
+    ages["cy"] = 19
+    if (ages["ana"] != 31) { fails += 1 }
+    if (ages["cy"] != 19) { fails += 1 }
+
+    // Duplicate keys in a literal keep the last value (set semantics).
+    map<str, int> dup = { "k": 1, "k": 2 }
+    if (dup["k"] != 2) { fails += 1 }
+    map<str, int> single = { "k": 1 }
+    if ((dup == single) != false) { fails += 1 }
+
+    // Iterating a map yields its KEYS in insertion order (plan §1.4.10).
+    map<str, int> stock = { "arrow": 12, "bow": 3, "ember": 7 }
+    str keys = ""
+    int count = 0
+    for (str key in stock) {
+        keys += key
+        count += 1
+    }
+    if (keys != "arrowbowember") { fails += 1 }
+    if (count != 3) { fails += 1 }
+
+    // Nested collections.
+    int[][] grid = [[1, 2], [3, 4]]
+    if (grid.length != 2) { fails += 1 }
+    if (grid[0][0] != 1) { fails += 1 }
+    if (grid[1][1] != 4) { fails += 1 }
+    grid[0][1] = 9
+    if (grid[0][1] != 9) { fails += 1 }
+
+    map<str, int[]> squads = { "red": [1, 2], "blue": [3, 4] }
+    if (squads["blue"][1] != 4) { fails += 1 }
+
+    // Structs hold collections; collections hold structs.
+    bag b = bag(items: [5, 6])
+    if (b.items.length != 2) { fails += 1 }
+    b.items[0] = 50
+    if (b.items[0] != 50) { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

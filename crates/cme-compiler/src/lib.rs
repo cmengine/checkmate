@@ -471,8 +471,9 @@ mod tests {
             ]
         );
 
-        // Inside brackets and braces: newlines are kept — array elements,
-        // map entries, and arm bodies are newline-delimited (§11.1, §2.15).
+        // Inside brackets and braces: newlines that END a statement or
+        // element are kept — array elements, map entries, and arm bodies
+        // stay newline-delimited (§11.1, §2.15).
         for source in ["[\n1\n2\n]", "{\n\"k\": 1\n}", "match (x) {\nA() => 1\n}"] {
             let tokens = Parser::strip_insignificant_newlines(spanned_tokens(source)).unwrap();
             assert!(
@@ -481,14 +482,43 @@ mod tests {
             );
         }
 
-        // Brackets inside parens re-enable significance for their interior
-        // (the leading newline after `[` is kept too — element lists skip
-        // leading separators).
+        // §A.8 continuation: a line ending in a token that cannot end a
+        // statement joins the next line — inside braces as much as at the
+        // top level.
+        for source in [
+            "int f() {\nint total = 10 +\n    20\nreturn total\n}",
+            "int f() {\nif (a &&\n    b) {\nreturn 1\n}\n}",
+        ] {
+            let tokens = Parser::strip_insignificant_newlines(spanned_tokens(source)).unwrap();
+            assert!(
+                !tokens.iter().any(|t| matches!(t.token, Token::Newline)
+                    && matches!(
+                        tokens[tokens.iter().position(|x| x == t).unwrap() - 1].token,
+                        Token::Plus | Token::And
+                    )),
+                "{source:?}: newline after a trailing operator must be dropped"
+            );
+        }
+
+        // `return` is the restricted production: the newline after a bare
+        // `return` survives even though the keyword cannot end an
+        // expression. (The newline after `{` is dropped — a block's leading
+        // newlines are parser-skipped either way.)
+        let source = "void f() {\nreturn\n}";
+        let tokens = Parser::strip_insignificant_newlines(spanned_tokens(source)).unwrap();
+        assert_eq!(
+            tokens.iter().filter(|t| t.token == Token::Newline).count(),
+            1
+        );
+
+        // Element lists skip leading separators, so the dropped leading
+        // newline after `[` changes no behavior — the separators after
+        // elements survive.
         let source = "f([\n1\n2\n])";
         let tokens = Parser::strip_insignificant_newlines(spanned_tokens(source)).unwrap();
         assert_eq!(
             tokens.iter().filter(|t| t.token == Token::Newline).count(),
-            3
+            2
         );
     }
 
@@ -2264,7 +2294,9 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].to_string(), "expression nesting is too deep");
 
-        // 5000 nested if blocks.
+        // 5000 nested if blocks. The nesting budget counts the statement
+        // AND its condition expression, so the guard fires within budget
+        // either way — the diagnostic names which one overflowed.
         let depth = 5000;
         let source = format!(
             "int f() {{\n{}x += 1\n{}return x\n}}\n",
@@ -2273,9 +2305,11 @@ mod tests {
         );
         let (_, errors) = parse_program_parts(&source);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.to_string() == "statement nesting is too deep"),
+            errors.iter().any(|e| {
+                let message = e.to_string();
+                message == "statement nesting is too deep"
+                    || message == "expression nesting is too deep"
+            }),
             "{errors:?}"
         );
     }

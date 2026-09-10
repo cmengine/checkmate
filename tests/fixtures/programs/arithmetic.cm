@@ -1,0 +1,52 @@
+// Program fixture: arithmetic, precedence, and integer semantics (§2.4, §A.1–§A.5).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+int main() {
+    int fails = 0
+
+    // §A.2 precedence and associativity trees.
+    if (1 + 2 * 3 != 7) { fails += 1 }
+    if (10 - 4 - 3 != 3) { fails += 1 }
+    if ((1 + 2) * 3 != 9) { fails += 1 }
+    if (100 / 10 / 5 != 2) { fails += 1 }
+    if (2 * 3 % 4 != 2) { fails += 1 }
+    if (7 % 4 * 2 != 6) { fails += 1 }
+
+    // §A.5 truncated division and remainder signs.
+    if (7 / 2 != 3) { fails += 1 }
+    if (0 - 7 / 2 != 0 - 3) { fails += 1 }
+    if (-7 / 2 != -3) { fails += 1 }
+    if (-7 % 2 != -1) { fails += 1 }
+    if (7 % -2 != 1) { fails += 1 }
+    if (-7 % -2 != -1) { fails += 1 }
+
+    // Unary chains (§A.2: --x is -(-x), so it is the identity).
+    int minusFive = -5
+    if (--minusFive != -5) { fails += 1 }
+    if (-(-minusFive) != -5) { fails += 1 }
+    if (!!(1 < 2) != true) { fails += 1 }
+    if (-(-(-1)) != -1) { fails += 1 }
+
+    // Float arithmetic is IEEE 754; no int/float mixing (§A.4).
+    float half = 1.0 / 4.0
+    if (half != 0.25) { fails += 1 }
+    float scaled = 2.5 * 4.0
+    if (scaled != 10.0) { fails += 1 }
+    if (1.5 + 1.5 != 3.0) { fails += 1 }
+
+    // Comparisons (§A.3: at most one per expression, parenthesized).
+    if ((1 < 2) != true) { fails += 1 }
+    if ((2 <= 2) != true) { fails += 1 }
+    if ((3 > 4) != false) { fails += 1 }
+    if ((4 >= 5) != false) { fails += 1 }
+    if ((1 == 1) != true) { fails += 1 }
+    if ((1 != 1) != false) { fails += 1 }
+
+    // i64 extremes: arithmetic is checked, literals below the maximum work.
+    int big = 9223372036854775807
+    if (big - 1 != 9223372036854775806) { fails += 1 }
+    if (big % 10 != 7) { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

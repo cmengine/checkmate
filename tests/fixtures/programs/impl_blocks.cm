@@ -1,0 +1,103 @@
+// Program fixture: impl blocks (§10.4) — struct members, enum members,
+// unioned blocks, dotted host-style targets, forward references.
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+struct counter {
+    int value
+}
+
+struct meter {
+    str label
+    int level
+}
+
+enum suit {
+    Hearts()
+    Spades()
+    Clubs()
+    Diamonds()
+}
+
+impl counter {
+    int peek(counter self) {
+        return self.value
+    }
+}
+
+// A second block for the same target unions with the first (§10.4).
+impl counter {
+    counter bump(counter self) {
+        self.value += 1
+        return self
+    }
+    int peekTwice(counter self) {
+        return counter.peek(self) * 2
+    }
+}
+
+impl meter {
+    bool redline(meter self, int limit) {
+        return self.level >= limit
+    }
+    str render(meter self) {
+        return self.label + ":" + self.level
+    }
+}
+
+impl suit {
+    str label(suit self) {
+        return match (self) {
+            Hearts() => "hearts"
+            Spades() => "spades"
+            Clubs() => "clubs"
+            Diamonds() => "diamonds"
+        }
+    }
+    bool isRed(suit self) {
+        return suit.label(self) == "hearts" || suit.label(self) == "diamonds"
+    }
+}
+
+// Host-style dotted path target (§10.4): members check and run; interface
+// completeness against a real schema stays host work.
+impl engine.gamemode {
+    int InitGame(int startingScore) {
+        return startingScore
+    }
+    int OnTick(int score, int delta) {
+        return engine.gamemode.InitGame(score + delta)
+    }
+}
+
+int main() {
+    int fails = 0
+
+    // Qualified member calls (§10.4).
+    counter c = counter(value: 41)
+    if (counter.peek(c) != 41) { fails += 1 }
+
+    // Value semantics: bump mutates its own clone.
+    counter bumped = counter.bump(c)
+    if (bumped.value != 42) { fails += 1 }
+    if (c.value != 41) { fails += 1 }
+
+    // Forward reference into the FIRST block (registration order is free).
+    if (counter.peekTwice(c) != 82) { fails += 1 }
+
+    meter m = meter(label: "fuel", level: 87)
+    if (meter.redline(m, 90) != false) { fails += 1 }
+    if (meter.redline(m, 80) != true) { fails += 1 }
+    if (meter.render(m) != "fuel:87") { fails += 1 }
+
+    if (suit.label(suit.Hearts()) != "hearts") { fails += 1 }
+    if (suit.label(suit.Spades()) != "spades") { fails += 1 }
+    if (suit.isRed(suit.Hearts()) != true) { fails += 1 }
+    if (suit.isRed(suit.Clubs()) != false) { fails += 1 }
+
+    // Dotted path calls.
+    if (engine.gamemode.InitGame(100) != 100) { fails += 1 }
+    if (engine.gamemode.OnTick(100, 5) != 105) { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

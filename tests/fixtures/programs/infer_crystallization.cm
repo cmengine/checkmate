@@ -1,0 +1,57 @@
+// Program fixture: `infer` crystallization (§2.16) — explicit, static, and
+// strict: ambiguous initializers fail to CHECK (pinned in the Rust suite).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+struct point {
+    int x
+    int y
+}
+
+int main() {
+    int fails = 0
+
+    // Scalars crystallize from the initializer.
+    infer count = 42
+    infer ratio = 4.5
+    infer label = "checkmate"
+    infer armed = true
+    count += 1
+    ratio *= 2.0
+    label += "!"
+    if (count != 43) { fails += 1 }
+    if (ratio != 9.0) { fails += 1 }
+    if (label != "checkmate!") { fails += 1 }
+    if (armed != true) { fails += 1 }
+
+    // Structs crystallize to the constructed type.
+    infer here = point(x: 1, y: 2)
+    if (here.x + here.y != 3) { fails += 1 }
+
+    // Collections crystallize from their elements.
+    infer numbers = [1, 2, 3]
+    infer names = ["a", "b"]
+    if (numbers.length != 3) { fails += 1 }
+    if (names.length != 2) { fails += 1 }
+    if (names[1] != "b") { fails += 1 }
+
+    // Constructors crystallize from an unambiguous initializer.
+    infer found = option.Some(9)
+    match (found) {
+        Some(int v) => { count = v }
+        None() => { count = 0 }
+    }
+    if (count != 9) { fails += 1 }
+
+    // Err alone cannot crystallize T (§2.16's ambiguity rule) — a declared
+    // expected type supplies it.
+    result<int, str> failure = result.Err("nope")
+    match (failure) {
+        Ok(int v) => { count = v }
+        Err(str why) => {
+            if (why != "nope") { fails += 1 }
+        }
+    }
+
+    if (fails != 0) { return fails }
+    return 0
+}

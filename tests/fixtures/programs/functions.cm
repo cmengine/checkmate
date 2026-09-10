@@ -1,0 +1,93 @@
+// Program fixture: functions — recursion, named arguments, mutual recursion,
+// forward references, early returns (§2.11, §2.12).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+int fib(int n) {
+    if (n <= 1) {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+bool isEven(int n) {
+    if (n == 0) {
+        return true
+    }
+    return isOdd(n - 1)
+}
+
+bool isOdd(int n) {
+    if (n == 0) {
+        return false
+    }
+    return isEven(n - 1)
+}
+
+// Named arguments bind by parameter name (§2.12).
+int clamp(int value, int low, int high) {
+    if (value < low) {
+        return low
+    }
+    if (value > high) {
+        return high
+    }
+    return value
+}
+
+str repeat(str text, int times) {
+    str out = ""
+    int i = 0
+    while (i < times) {
+        out += text
+        i += 1
+    }
+    return out
+}
+
+int ackermannSmall(int m, int n) {
+    if (m == 0) {
+        return n + 1
+    }
+    if (n == 0) {
+        return ackermannSmall(m - 1, 1)
+    }
+    return ackermannSmall(m - 1, ackermannSmall(m, n - 1))
+}
+
+int main() {
+    int fails = 0
+
+    // Recursion.
+    if (fib(10) != 55) { fails += 1 }
+    if (fib(0) != 0) { fails += 1 }
+    if (fib(1) != 1) { fails += 1 }
+
+    // Mutual recursion (forward reference resolves).
+    if (isEven(10) != true) { fails += 1 }
+    if (isEven(7) != false) { fails += 1 }
+    if (isOdd(9) != true) { fails += 1 }
+
+    // Positional arguments.
+    if (clamp(15, 0, 10) != 10) { fails += 1 }
+    if (clamp(-4, 0, 10) != 0) { fails += 1 }
+    if (clamp(5, 0, 10) != 5) { fails += 1 }
+
+    // Named arguments, one per line (§2.12 multi-line style).
+    int clamped = clamp(
+        value: 42
+        low: 0
+        high: 10
+    )
+    if (clamped != 10) { fails += 1 }
+    if (clamp(high: 10, low: 0, value: 7) != 7) { fails += 1 }
+
+    // String building through a loop.
+    if (repeat("ab", 3) != "ababab") { fails += 1 }
+    if (repeat("", 5) != "") { fails += 1 }
+
+    // Deep-ish double recursion.
+    if (ackermannSmall(2, 3) != 9) { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

@@ -1,0 +1,94 @@
+// Program fixture: control flow — if/else chains, while, for-in, scoping (§2.14).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+str grade(int score) {
+    if (score >= 90) {
+        return "A"
+    } else if (score >= 80) {
+        return "B"
+    } else if (score >= 70) {
+        return "C"
+    } else {
+        return "F"
+    }
+}
+
+int sumDown(int n) {
+    int total = 0
+    while (n > 0) {
+        total += n
+        n -= 1
+    }
+    return total
+}
+
+int sumAll(int[] values) {
+    int total = 0
+    for (int v in values) {
+        total += v
+    }
+    return total
+}
+
+int nestedLoops(int width, int height) {
+    int count = 0
+    int row = 0
+    while (row < height) {
+        for (int col in [1, 2, 3]) {
+            if (col <= width) {
+                count += 1
+            } else {
+                count += 0
+            }
+        }
+        row += 1
+    }
+    return count
+}
+
+int main() {
+    int fails = 0
+
+    // else-if chains pick the first matching arm.
+    if (grade(95) != "A") { fails += 1 }
+    if (grade(85) != "B") { fails += 1 }
+    if (grade(72) != "C") { fails += 1 }
+    if (grade(3) != "F") { fails += 1 }
+
+    // while accumulates.
+    if (sumDown(5) != 15) { fails += 1 }
+    if (sumDown(0) != 0) { fails += 1 }
+
+    // for-in iterates arrays in order.
+    if (sumAll([1, 2, 3, 4]) != 10) { fails += 1 }
+    if (sumAll([]) != 0) { fails += 1 }
+
+    // Loops nest; blocks introduce scopes.
+    if (nestedLoops(3, 2) != 6) { fails += 1 }
+    if (nestedLoops(1, 3) != 3) { fails += 1 }
+
+    // A block statement executes in order (parser recovery shape).
+    int blockHits = 0
+    if (true) {
+        blockHits += 1
+        blockHits += 1
+    } else {
+        blockHits += 100
+    }
+    if (blockHits != 2) { fails += 1 }
+
+    // Newlines INSIDE parens are insignificant (§A.8): long conditions wrap.
+    bool wrapped = (1 < 2 &&
+        2 < 3 &&
+        3 < 4)
+    if (wrapped != true) { fails += 1 }
+
+    // Trailing operator continues the statement on the next line (§A.8).
+    int total = 10 +
+        20 +
+        30
+    if (total != 60) { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

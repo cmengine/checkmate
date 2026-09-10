@@ -1,0 +1,59 @@
+// Program fixture: §A.8 operators and newlines — statement delimiting,
+// trailing-operator continuation, leading-operator rejection (pinned as a
+// recovery diagnostic in the Rust suite), unary continuations, and free
+// wrapping inside parens.
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+int main() {
+    int fails = 0
+
+    // Trailing binary operator continues the expression (§A.8 "ok").
+    int total = 100 +
+        20 +
+        3
+    if (total != 123) { fails += 1 }
+
+    // A continuation line may BEGIN with a unary operator.
+    int signed = 10 +
+        -4
+    if (signed != 6) { fails += 1 }
+
+    // Trailing logical operators continue too.
+    bool verdict = true &&
+        !false &&
+        (1 < 2 || 3 < 4)
+    if (verdict != true) { fails += 1 }
+
+    // Chained calls wrap freely inside parens (§A.8, §2.12).
+    int picked = max3(
+        5,
+        9,
+        7
+    )
+    if (picked != 9) { fails += 1 }
+
+    // Operators at the START of a continuation line after a complete
+    // operand join the expression when the previous line ended with an
+    // operator; a complete statement followed by a leading-operator line
+    // is a parse error (pinned in the Rust suite) — not exercised here.
+
+    // Structural sanity: statements stay separate lines.
+    int a = 1
+    int b = 2
+    int c = 3
+    if (a + b + c != 6) { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}
+
+int max3(int p, int q, int r) {
+    int best = p
+    if (q > best) {
+        best = q
+    }
+    if (r > best) {
+        best = r
+    }
+    return best
+}

@@ -1,0 +1,15 @@
+// Recovery fixture: lexer-level damage — invalid characters, unterminated
+// strings, bad escapes, unterminated block comments, integer overflow.
+// Pinned contract (suite runner): diagnostics are NON-EMPTY, the parser
+// never panics, and healthy siblings survive. Run: cme check <file> (exit 1).
+int main() {
+    int ok = 1
+    int broken = @|           // invalid character; line is skipped
+    str unterminated = "no closer here
+    int digitOverflow = 99999999999999999999
+    str badEscape = "oops \q inside"
+    int afterDamage = 2
+    return ok + afterDamage
+}
+// A trailing unterminated comment swallows the rest of the file:
+/* no closer ever ...

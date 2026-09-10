@@ -1,0 +1,33 @@
+// Recovery fixture: healthy and broken declarations interleaved. The pinned
+// contract: MANY diagnostics, no panic, and every healthy function still
+// parses with its body intact (tooling can see the whole outline).
+int alpha(int v) {
+    return v * 2
+}
+
+struct broken {
+    int x
+    ???
+    int y
+}
+
+int beta(int v) {
+    return v + 1
+}
+
+enum broken2 {
+    Okay(int v)
+    @@@
+}
+
+int gamma(int v) {
+    return v - 1
+}
+
+int main() {
+    int total = alpha(10) + beta(10) + gamma(10)
+    if (total != 30) {
+        return 1
+    }
+    return 0
+}

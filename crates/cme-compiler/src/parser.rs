@@ -240,6 +240,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let mut errors = Vec::new();
         let mut prev_can_end = false;
         let mut prev_was_type_kw = false;
+        let mut prev_was_return = false;
 
         let mut index = 0usize;
         while index < tokens.len() {
@@ -260,10 +261,22 @@ impl<'a, 'src> Parser<'a, 'src> {
                     let next_starts_statement = tokens
                         .get(index + 1)
                         .is_some_and(|next| next.token.starts_statement());
+                    // §A.8: a line that cannot end a statement continues
+                    // onto the next line — a trailing binary operator or an
+                    // open call joins across the break, inside braces and
+                    // brackets as much as at the top level. `return` is the
+                    // restricted production: a bare `return` ends at its
+                    // line even though the keyword cannot end an expression,
+                    // so `return` + newline + next statement stays two
+                    // statements.
                     let significant = match stack.last() {
                         Some(BracketKind::Paren) => false,
-                        Some(BracketKind::Bracket) | Some(BracketKind::Brace) => true,
-                        None => prev_can_end || prev_was_type_kw || next_starts_statement,
+                        _ => {
+                            prev_can_end
+                                || prev_was_type_kw
+                                || prev_was_return
+                                || next_starts_statement
+                        }
                     };
                     if significant {
                         out.push(SpannedToken { token: tok, span });
@@ -275,18 +288,21 @@ impl<'a, 'src> Parser<'a, 'src> {
                     stack.push(BracketKind::Paren);
                     prev_can_end = false;
                     prev_was_type_kw = false;
+                    prev_was_return = false;
                     out.push(SpannedToken { token: tok, span });
                 }
                 Token::LBracket => {
                     stack.push(BracketKind::Bracket);
                     prev_can_end = false;
                     prev_was_type_kw = false;
+                    prev_was_return = false;
                     out.push(SpannedToken { token: tok, span });
                 }
                 Token::LBrace => {
                     stack.push(BracketKind::Brace);
                     prev_can_end = false;
                     prev_was_type_kw = false;
+                    prev_was_return = false;
                     out.push(SpannedToken { token: tok, span });
                 }
                 Token::RParen | Token::RBracket | Token::RBrace => {
@@ -299,6 +315,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                         stack.pop();
                         prev_can_end = true;
                         prev_was_type_kw = false;
+                        prev_was_return = false;
                         out.push(SpannedToken { token: tok, span });
                     } else if let Some(depth) = stack.iter().rposition(|kind| *kind == expected) {
                         // An inner bracket was left open by broken source
@@ -309,6 +326,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                         stack.truncate(depth);
                         prev_can_end = true;
                         prev_was_type_kw = false;
+                        prev_was_return = false;
                         out.push(SpannedToken { token: tok, span });
                     } else if stack.is_empty() && matches!(tok, Token::RBracket | Token::RBrace) {
                         // A stray `]` or `}` at the top of the stream is kept
@@ -316,6 +334,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                         // unrecognizable statement (boom.cm pins this).
                         prev_can_end = can_end_statement(&tok);
                         prev_was_type_kw = false;
+                        prev_was_return = false;
                         out.push(SpannedToken { token: tok, span });
                     } else {
                         // A mismatched or dangling closing bracket: report,
@@ -339,6 +358,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 _ => {
                     prev_can_end = can_end_statement(&tok);
                     prev_was_type_kw = tok.is_type_keyword();
+                    prev_was_return = tok == Token::KwReturn;
                     out.push(SpannedToken { token: tok, span });
                 }
             }

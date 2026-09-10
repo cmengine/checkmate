@@ -1,0 +1,97 @@
+// Program fixture: value semantics — deep structural isolation (§2.13, §3.1).
+// Assignment and parameter passing logically clone; mutating a copy never
+// touches the original, at any depth (arrays, maps, structs nested inside).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+struct inner {
+    int[] data
+    map<str, int> tags
+}
+
+struct outer {
+    inner core
+    int[] simple
+}
+
+inner mutateArray(inner target) {
+    target.data[0] = 999
+    return target
+}
+
+int main() {
+    int fails = 0
+
+    // Plain assignment clones.
+    int original = 1
+    int copy = original
+    copy += 10
+    if (original != 1) { fails += 1 }
+
+    // Top-level array isolation.
+    int[] a = [1, 2, 3]
+    int[] b = a
+    b[0] = 100
+    if (a[0] != 1) { fails += 1 }
+    if (b[0] != 100) { fails += 1 }
+
+    // Map isolation (maps have no `.length`; compare by equality, §A.4).
+    map<str, int> m1 = { "k": 1 }
+    map<str, int> m2 = m1
+    m2["k"] = 2
+    m2["new"] = 3
+    if (m1["k"] != 1) { fails += 1 }
+    map<str, int> m1Expected = { "k": 1 }
+    if ((m1 == m1Expected) != true) { fails += 1 }
+    if ((m1 == m2) != false) { fails += 1 }
+
+    // Struct containing arrays and maps: deep isolation.
+    inner first = inner(
+        data: [1, 2]
+        tags: { "a": 1 }
+    )
+    inner second = first
+    second.data[0] = 42
+    second.tags["b"] = 7
+    if (first.data[0] != 1) { fails += 1 }
+    if (second.data[0] != 42) { fails += 1 }
+    map<str, int> firstTags = { "a": 1 }
+    if ((first.tags == firstTags) != true) { fails += 1 }
+    if (second.tags["b"] != 7) { fails += 1 }
+
+    // Nested struct in struct.
+    outer o1 = outer(
+        core: inner(data: [5], tags: { "t": 0 })
+        simple: [6, 7]
+    )
+    outer o2 = o1
+    o2.core.data[0] = 55
+    o2.simple[1] = 77
+    if (o1.core.data[0] != 5) { fails += 1 }
+    if (o2.core.data[0] != 55) { fails += 1 }
+    if (o1.simple[1] != 7) { fails += 1 }
+    if (o2.simple[1] != 77) { fails += 1 }
+
+    // Parameter passing clones (§2.13's damage example).
+    inner before = inner(data: [8], tags: { "x": 1 })
+    inner after = mutateArray(before)
+    if (before.data[0] != 8) { fails += 1 }
+    if (after.data[0] != 999) { fails += 1 }
+
+    // Equality is structural (§A.4).
+    inner twin1 = inner(data: [1, 2], tags: { "a": 1 })
+    inner twin2 = inner(data: [1, 2], tags: { "a": 1 })
+    if ((twin1 == twin2) != true) { fails += 1 }
+    twin2.data[1] = 3
+    if ((twin1 != twin2) != true) { fails += 1 }
+
+    int[] list1 = [1, 2, 3]
+    int[] list2 = [1, 2, 3]
+    if ((list1 == list2) != true) { fails += 1 }
+
+    map<str, int> map1 = { "a": 1, "b": 2 }
+    map<str, int> map2 = { "b": 2, "a": 1 }
+    if ((map1 == map2) != true) { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

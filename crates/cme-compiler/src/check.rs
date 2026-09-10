@@ -1069,7 +1069,20 @@ impl Checker {
             }
         };
 
-        // The loop variable binds per-iteration in the body's scope.
+        // The loop variable binds per-iteration in the body's scope — and
+        // honors the owner ruling `declare` enforces everywhere else:
+        // shadowing an enclosing declaration is forbidden. The binding
+        // survives so the loop body still checks.
+        if self
+            .scopes
+            .iter()
+            .any(|scope| scope.contains_key(elem_name))
+        {
+            self.report(
+                format!("declaration of `{elem_name}` shadows a declaration in an enclosing scope"),
+                span,
+            );
+        }
         let mut scope = HashMap::new();
         scope.insert(
             elem_name.to_string(),
@@ -1177,6 +1190,23 @@ impl Checker {
         let mut scope = HashMap::new();
         let mut seen: Vec<&str> = Vec::new();
         for (binding, field) in bindings.iter().zip(&variant_def.fields) {
+            // The owner ruling applies to payload bindings like any other
+            // declaration: shadowing an enclosing name is forbidden. The
+            // binding still enters the arm's scope so the body keeps
+            // checking without cascades.
+            if self
+                .scopes
+                .iter()
+                .any(|scope| scope.contains_key(binding.name.as_str()))
+            {
+                self.report(
+                    format!(
+                        "declaration of `{}` shadows a declaration in an enclosing scope",
+                        binding.name
+                    ),
+                    span,
+                );
+            }
             let subst = self.subst_type(&field.ty, &def.params, enum_args, span);
             let declared = self.resolve_type(&binding.ty, span);
             if !declared.is_poison() && !subst.is_poison() && declared != subst {
@@ -2678,6 +2708,41 @@ mod tests {
     fn nested_scopes_with_distinct_names_are_legal() {
         let source = "int f() {\nint x = 1\nif (true) {\nint y = 2\ny = y + x\n}\nreturn x\n}\n";
         assert!(check_source(source).is_empty());
+    }
+
+    #[test]
+    fn for_loop_variable_may_not_shadow_an_enclosing_declaration() {
+        // The owner ruling (shadowing is forbidden) covers the for loop's
+        // element binding like any other declaration.
+        let source = "int f() {\nint x = 1\nfor (int x in [1, 2]) {\nx += 1\n}\nreturn x\n}\n";
+        assert_error(
+            source,
+            "declaration of `x` shadows a declaration in an enclosing scope",
+            span_of(source, "for (int x in [1, 2]) {\nx += 1\n}"),
+        );
+        // A distinct element name is legal.
+        let source = "int f() {\nint x = 1\nfor (int v in [1, 2]) {\nx += v\n}\nreturn x\n}\n";
+        assert!(check_source(source).is_empty());
+    }
+
+    #[test]
+    fn match_pattern_binding_may_not_shadow_an_enclosing_declaration() {
+        let source = "enum opt2 {\nSome(int value)\nNone()\n}\nint f(opt2 e) {\nint value = 5\nmatch (e) {\nSome(int value) => { value += 1 }\nNone() => {}\n}\nreturn value\n}\n";
+        assert_error(
+            source,
+            "declaration of `value` shadows a declaration in an enclosing scope",
+            span_of(
+                source,
+                "match (e) {\nSome(int value) => { value += 1 }\nNone() => {}\n}",
+            ),
+        );
+        // The same rule holds in match EXPRESSION position.
+        let source = "enum opt2 {\nSome(int v)\nNone()\n}\nint f(opt2 e) {\nint v = 5\nint r = match (e) {\nSome(int v) => v\nNone() => 0\n}\nreturn r + v\n}\n";
+        assert_error(
+            source,
+            "declaration of `v` shadows a declaration in an enclosing scope",
+            span_of(source, "match (e) {\nSome(int v) => v\nNone() => 0\n}"),
+        );
     }
 
     #[test]

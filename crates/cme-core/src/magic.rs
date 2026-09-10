@@ -249,6 +249,20 @@ pub enum FragKind {
     Block,
 }
 
+/// The kind of an inert editor annotation (§8.1, §8.3.10). The payload is
+/// deliberately not retained: annotations are consumed by `cme-lsp` (§8.9),
+/// never affect matching, and are the only place host registries are
+/// visible — which the megaprogram pass must not observe (§8.5 purity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationKind {
+    /// `#complete(host.registry.expr)` — completion proposals.
+    Complete,
+    /// `#hover("tooltip text")` — hover documentation.
+    Hover,
+    /// `#token("token text")` — semantic-token hint.
+    Token,
+}
+
 /// A pattern element kind (§8.3.2, §8.3.10).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatKind {
@@ -332,6 +346,9 @@ pub enum PatKind {
         validator: Option<Vec<String>>,
         bind: Option<String>,
     },
+    /// An inert editor annotation (`#complete(…)`, `#hover(…)`, `#token(…)`)
+    /// between terms (§8.3.10): consumes nothing, never affects matching.
+    Annotation { kind: AnnotationKind },
 }
 
 // ---------------------------------------------------------------------------

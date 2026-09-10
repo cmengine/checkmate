@@ -15,11 +15,12 @@ use cme_core::magic::{FragKind, PatElem, PatKind, Pattern};
 use crate::diagnostics::Diagnostic;
 use crate::mega::matcher::{
     CompiledGrammar, CompiledRule, GrammarSet, MatchFailure, MatchRegion, match_entry,
+    match_entry_binds,
 };
 use crate::mega::pattern::{parse_pattern, parse_rule_declaration};
 use crate::mega::profile::{default_profile, with_default_strings};
 use crate::mega::scan::{InvocationScan, MagicScan, REGION_SCAN_HINT, scan_magic};
-use crate::mega::template::{elaborate, parse_template};
+use crate::mega::template::{elaborate, elaborate_seeded, parse_template};
 
 /// One expanded invocation, recorded for tooling and provenance.
 #[derive(Debug, Clone)]
@@ -80,6 +81,7 @@ pub fn expand_source_with(
     let macros = compile_macros(&scan, &set, &mut diagnostics);
     check_profiles(&set, &mut diagnostics);
     reject_left_recursion(&set, &mut diagnostics);
+    check_declaration_order(&scan, &macros, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
@@ -168,44 +170,64 @@ pub fn expand_source_with(
                 invocation.region_span.start,
                 &invocation.region,
             );
-            match match_entry(
-                &set,
-                macro_def.grammar_index,
-                &macro_def.pattern,
-                &region,
-                Some(&engine),
-            ) {
-                Ok(root) => {
-                    let generated = elaborate(
-                        &macro_def.template,
-                        &macro_def.bind_name,
-                        root,
-                        invocation.span,
+            let generated = match &macro_def.entry {
+                MacroEntry::RuleRef { bind } => {
+                    match match_entry(
+                        &set,
+                        macro_def.grammar_index,
+                        &macro_def.pattern,
+                        &region,
                         Some(&engine),
-                    );
-                    match generated {
-                        Ok(text) => {
-                            // The template's own layout whitespace at the
-                            // output's edges is an artifact of the template
-                            // source, not code (plan §1.4.9): trim it so an
-                            // expression-position invocation sits flush
-                            // against its context.
-                            records.push(ExpansionRecord {
-                                magic: invocation.name.clone(),
-                                span: invocation.span,
-                            });
-                            edits.push((invocation.span, text.trim().to_string()));
-                        }
-                        Err(errors) => diagnostics.extend(errors),
+                    ) {
+                        Ok(root) => elaborate(
+                            &macro_def.template,
+                            bind,
+                            root,
+                            invocation.span,
+                            Some(&engine),
+                        ),
+                        Err(failure) => Err(vec![region_failure_diagnostic(
+                            invocation,
+                            &failure,
+                            region_failure_message(invocation, &failure),
+                        )]),
                     }
                 }
-                Err(failure) => {
-                    let at = invocation.region_span.start + failure.byte_offset;
-                    diagnostics.push(Diagnostic::parse(
-                        region_failure_message(invocation, &failure),
-                        Span::new(at, at),
-                    ));
+                MacroEntry::Inline => {
+                    match match_entry_binds(
+                        &set,
+                        macro_def.grammar_index,
+                        &macro_def.pattern,
+                        &region,
+                        Some(&engine),
+                    ) {
+                        Ok(binds) => elaborate_seeded(
+                            &macro_def.template,
+                            binds,
+                            invocation.span,
+                            Some(&engine),
+                        ),
+                        Err(failure) => Err(vec![region_failure_diagnostic(
+                            invocation,
+                            &failure,
+                            region_failure_message(invocation, &failure),
+                        )]),
+                    }
                 }
+            };
+            match generated {
+                Ok(text) => {
+                    // The template's own layout whitespace at the output's
+                    // edges is an artifact of the template source, not code
+                    // (plan §1.4.9): trim it so an expression-position
+                    // invocation sits flush against its context.
+                    records.push(ExpansionRecord {
+                        magic: invocation.name.clone(),
+                        span: invocation.span,
+                    });
+                    edits.push((invocation.span, text.trim().to_string()));
+                }
+                Err(errors) => diagnostics.extend(errors),
             }
         }
         if !diagnostics.is_empty() {
@@ -336,6 +358,53 @@ fn region_failure_message(invocation: &InvocationScan, failure: &MatchFailure) -
     message
 }
 
+/// Builds the anchored diagnostic for a pattern-match failure: the message
+/// is rendered against the region, the span anchors in the original file.
+fn region_failure_diagnostic(
+    invocation: &InvocationScan,
+    failure: &MatchFailure,
+    message: String,
+) -> Diagnostic {
+    let at = invocation.region_span.start + failure.byte_offset.min(invocation.region.len());
+    Diagnostic::parse(message, Span::new(at, at))
+}
+
+/// The §8.1 resolution rule: "a macro must be imported, or declared earlier
+/// in the same file, before it is invoked." Single-file megaprograms have no
+/// imports, so every invocation in the ORIGINAL source must name a macro
+/// whose declaration starts earlier — except invocations authored INSIDE a
+/// declaration's template, which elaborate at the declaration's own position
+/// (generated text is re-scanned in later rounds and exempt here).
+fn check_declaration_order(
+    scan: &MagicScan,
+    macros: &[CompiledMacro],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let template_authored = |span: Span| {
+        scan.magics
+            .iter()
+            .any(|magic| magic.span.start <= span.start && span.end <= magic.span.end)
+    };
+    for invocation in &scan.invocations {
+        if template_authored(invocation.span) {
+            continue;
+        }
+        if let Some(macro_def) = macros
+            .iter()
+            .find(|macro_def| macro_def.name == invocation.name)
+            && macro_def.decl_span.start > invocation.span.start
+        {
+            diagnostics.push(Diagnostic::parse(
+                format!(
+                    "macro `{}` must be declared before it is invoked (§8.1)",
+                    invocation.name
+                ),
+                invocation.header_span,
+            ));
+        }
+    }
+}
+
 /// The containment chain of the deepest invocation: outermost first. This is
 /// the expansion stack the depth-cap diagnostic reports (§8.6: "the full
 /// expansion stack — each macro, span, and pass").
@@ -385,13 +454,27 @@ fn apply_edits(text: &str, edits: &[(Span, String)]) -> String {
 }
 
 /// A compiled macro: name, entry pattern, template, entry grammar index,
-/// and the entry capture's bind name.
+/// and the entry shape (§8.1): a leading rule reference binds the rule's
+/// record under one name; an inline pattern binds its top-level captures
+/// individually (`agent.spawn`'s shape).
 struct CompiledMacro {
     name: String,
     pattern: Pattern,
     template: cme_core::magic::Template,
     grammar_index: usize,
-    bind_name: String,
+    entry: MacroEntry,
+    /// The declaration's span — the §8.1 resolution rule (a macro must be
+    /// declared, or imported, before it is invoked) is checked against it.
+    decl_span: Span,
+}
+
+enum MacroEntry {
+    /// `magic m(grammar.rule as name) { … }` — the matched rule record is
+    /// bound to `name` and seeded as the template's root capture.
+    RuleRef { bind: String },
+    /// `magic m(#annot … pattern …) { … }` — an inline pattern; every
+    /// top-level bind seeds a capture of its own.
+    Inline,
 }
 
 /// Parses every grammar body into compiled rules. `extends` chains (§8.2)
@@ -795,7 +878,10 @@ fn prefix_elem(
 ) -> bool {
     match kind {
         // Zero-width elements: no input, no refs — the walk continues.
-        PatKind::Where { .. } | PatKind::Line | PatKind::Peek { .. } => false,
+        PatKind::Where { .. }
+        | PatKind::Line
+        | PatKind::Peek { .. }
+        | PatKind::Annotation { .. } => false,
         PatKind::Label { body, .. } => {
             prefix_edges(set, body, gi, ri, nullable, emit);
             false
@@ -893,7 +979,8 @@ fn elem_nullable(kind: &PatKind, nullable: &[Vec<bool>], gi: usize) -> bool {
         | PatKind::Eof
         | PatKind::Fragment { .. }
         | PatKind::RuleRef { .. }
-        | PatKind::Recur => false,
+        | PatKind::Recur
+        | PatKind::Annotation { .. } => false,
         PatKind::LineRest { .. } | PatKind::Until { .. } => true,
         PatKind::Line | PatKind::Peek { .. } | PatKind::Where { .. } => true,
         PatKind::Optional { .. } | PatKind::Indent { .. } => true,
@@ -1007,7 +1094,10 @@ fn compile_macros(
             ));
             continue;
         }
-        // Entry grammar + bind name from the pattern's leading rule ref.
+        // Entry shape from the pattern's first element: a leading rule
+        // reference makes a rule-record entry; anything else is an INLINE
+        // pattern (§8.1's agent.spawn) hosted by the synthetic default
+        // grammar under the default profile.
         let first = pattern.elems.first();
         if let Some(PatElem {
             kind: PatKind::RuleRef { path, bind, .. },
@@ -1067,13 +1157,39 @@ fn compile_macros(
                 pattern,
                 template,
                 grammar_index,
-                bind_name,
+                entry: MacroEntry::RuleRef { bind: bind_name },
+                decl_span: magic.span,
             });
         } else {
-            diagnostics.push(Diagnostic::parse(
-                "the entry pattern must begin with a rule reference (`grammar.rule as name`)",
-                magic.pattern_span,
-            ));
+            // Inline pattern (§8.1): literals, fragments, and QUALIFIED rule
+            // references under the default profile (horizontal and newline
+            // skipping, `"` strings, no comments — §8.2). One-segment rule
+            // references have no grammar namespace to resolve in; the
+            // profile check runs flow-oriented.
+            let default_index = set
+                .grammars
+                .iter()
+                .position(|grammar| grammar.name == "\u{0}default")
+                .expect("the synthetic default grammar is always compiled");
+            for elem in &pattern.elems {
+                check_pattern_profiles(
+                    &Pattern {
+                        elems: vec![elem.clone()],
+                    },
+                    "<inline pattern>",
+                    true,
+                    false,
+                    diagnostics,
+                );
+            }
+            macros.push(CompiledMacro {
+                name: magic.name.clone(),
+                pattern,
+                template,
+                grammar_index: default_index,
+                entry: MacroEntry::Inline,
+                decl_span: magic.span,
+            });
         }
     }
     macros
@@ -1518,6 +1634,129 @@ magic(runIt) {
         assert!(
             outcome.expanded.contains("\"world\""),
             "the $raw text splices"
+        );
+    }
+
+    // -- §8.1: inert annotations, inline entry patterns, resolution order -----
+
+    #[test]
+    fn annotations_are_inert_between_pattern_terms() {
+        // The §8.1 agent.spawn shape: #complete/#hover/#token appear between
+        // the pattern's terms and never affect matching.
+        let source = r#"
+magic agent.spawn(
+    #complete(engine.availableModels)
+    #hover("Target model identifier")
+    "model:" $tag model
+    "effort:" $word effort
+    #token("prompt")
+    $text prompt
+) {
+    $"{$model}|{$effort}|{$prompt}"
+}
+
+str cfg = magic(agent.spawn) {
+    model: claude-opus-latest
+    effort: high
+    patrol the routes
+}
+"#;
+        let outcome = expand_source(source).expect("annotated inline pattern expands");
+        assert!(
+            outcome
+                .expanded
+                .contains("\"claude-opus-latest|high|patrol the routes\""),
+            "the binds splice: {}",
+            outcome.expanded
+        );
+    }
+
+    #[test]
+    fn unknown_annotations_are_rejected() {
+        let source = r#"
+magic m(#complete2(x) "a") {
+    "b"
+}
+
+str v = magic(m) {
+    a
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("unknown annotation")),
+            "expected the unknown-annotation diagnostic: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn inline_entry_patterns_expand_without_a_rule_ref() {
+        // Pure inline pattern: literals + fragments, no grammar at all.
+        let source = r#"
+magic pair("a =" $word left "b =" $word right) {
+    infer both = $"{$left}-{$right}"
+    both
+}
+
+str v = magic(pair) {
+    a = one b = two
+}
+"#;
+        let outcome = expand_source(source).expect("inline pattern expands");
+        assert!(
+            outcome.expanded.contains("\"one-two\""),
+            "both binds splice: {}",
+            outcome.expanded
+        );
+    }
+
+    #[test]
+    fn macros_must_be_declared_before_they_are_invoked() {
+        let source = r#"
+str v = magic(later) {
+    x
+}
+
+magic later($word w) {
+    $"{$w}!"
+}
+"#;
+        let errors = expansion_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message.contains("must be declared before it is invoked")),
+            "expected the §8.1 order diagnostic: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn invocations_inside_a_template_are_exempt_from_the_order_check() {
+        // The nested `magic(inner)` sits inside `outer`'s TEMPLATE (a
+        // declaration span), so the §8.1 source-order rule does not apply;
+        // it expands when `outer` runs.
+        let source = r#"
+magic outer($word w) {
+    magic(inner) {
+        inner text
+    }
+}
+
+magic inner($text t) {
+    $"[{$t}]"
+}
+
+str v = magic(outer) {
+    hello
+}
+"#;
+        let outcome = expand_source(source).expect("template-nested invocation expands");
+        assert!(
+            outcome.expanded.contains("[inner text]"),
+            "the nested magic expanded: {}",
+            outcome.expanded
         );
     }
 

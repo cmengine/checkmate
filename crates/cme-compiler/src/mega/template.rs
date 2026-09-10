@@ -867,11 +867,28 @@ pub fn elaborate(
     source_span: Span,
     ct: Option<&CtEngine>,
 ) -> Result<String, Vec<Diagnostic>> {
+    elaborate_seeded(
+        template,
+        vec![(root_name.to_string(), root)],
+        source_span,
+        ct,
+    )
+}
+
+/// [`elaborate`] with several seeded captures — the INLINE entry-point shape
+/// (§8.1): every top-level pattern bind is visible under its own name
+/// (`$model`, `$effort`, `$prompt`).
+pub fn elaborate_seeded(
+    template: &Template,
+    lets: Vec<(String, Capture)>,
+    source_span: Span,
+    ct: Option<&CtEngine>,
+) -> Result<String, Vec<Diagnostic>> {
     let mut elaborator = Elaborator {
         out: String::new(),
         enclosures: Vec::new(),
         scopes: vec![Scope {
-            lets: vec![(root_name.to_string(), root)],
+            lets,
             element: None,
         }],
         diagnostics: Vec::new(),

@@ -11,8 +11,22 @@ use crate::mega::ctxexpr;
 use crate::mega::profile::{parse_string_literal, skip_ws_and_comments};
 use cme_core::Span;
 use cme_core::magic::{
-    CharItem, CharSet, ContextField, CtxExpr, FragKind, PatElem, PatKind, Pattern,
+    AnnotationKind, CharItem, CharSet, ContextField, CtxExpr, FragKind, PatElem, PatKind, Pattern,
 };
+
+/// Balances the parenthesized payload of an annotation (`#complete(…)`)
+/// over the pattern-text scanner profile: strings and comments stay
+/// transparent, nested parens count.
+fn balance_parens(text: &str, open: usize) -> Option<usize> {
+    crate::mega::profile::balance(
+        text,
+        open,
+        '(',
+        ')',
+        &crate::mega::profile::checkmate_scan_profile(),
+    )
+    .ok()
+}
 
 /// Words that can never be implicit capture names because they head pattern
 /// constructs or bind syntax. Also the word set of the `notReserved`
@@ -293,6 +307,41 @@ impl<'a> PatternParser<'a> {
         let first = rest.chars().next().unwrap();
 
         let kind = match first {
+            // Inert editor annotations (§8.1, §8.3.10): `#complete(expr)`,
+            // `#hover("…")`, `#token("…")`. They may appear between any
+            // terms, consume nothing, and never affect matching; the
+            // payload is parsed for balance and discarded (the megaprogram
+            // pass must not observe host registries, §8.5 purity).
+            '#' => {
+                self.cursor += 1;
+                let word = self.peek_word().to_string();
+                if word.is_empty() {
+                    return Err(self.error("expected an annotation name after `#`"));
+                }
+                self.cursor += word.len();
+                self.skip_trivia();
+                if !self.rest().starts_with('(') {
+                    return Err(self.error(format!("expected `(` after the `#{word}` annotation")));
+                }
+                // Balance the payload: a `#complete` argument is host-registry
+                // syntax, not a Checkmate expression, so it is skipped, not
+                // interpreted. Strings inside still balance.
+                let open = self.cursor;
+                let close = balance_parens(self.text, open)
+                    .ok_or_else(|| self.error(format!("unterminated `#{word}(…)` annotation")))?;
+                self.cursor = close + 1;
+                let kind = match word.as_str() {
+                    "complete" => AnnotationKind::Complete,
+                    "hover" => AnnotationKind::Hover,
+                    "token" => AnnotationKind::Token,
+                    other => {
+                        return Err(self.error(format!(
+                            "unknown annotation `#{other}` (expected `#complete`, `#hover`, or `#token`)"
+                        )));
+                    }
+                };
+                PatKind::Annotation { kind }
+            }
             '"' => {
                 let (value, len) = parse_string_literal(self.text, self.cursor)
                     .ok_or_else(|| self.error("malformed string literal"))?;

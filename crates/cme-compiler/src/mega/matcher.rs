@@ -268,7 +268,66 @@ pub fn match_entry(
     region: &MatchRegion<'_>,
     ct: Option<&CtEngine>,
 ) -> Result<Capture, MatchFailure> {
-    match_entry_with_fuel(set, grammar_index, pattern, region, FUEL_BUDGET, ct)
+    let (binds, primary) = match_entry_raw(set, grammar_index, pattern, region, ct)?;
+    Ok(match binds.len() {
+        1 => binds.into_iter().next().unwrap().1,
+        _ => match primary {
+            // A single structural result without a bind (an unbound leading
+            // `oneof`, say) IS the root capture (plan §2.2).
+            Some(primary) => primary,
+            None => Capture {
+                kind: CaptureKind::Record {
+                    tag: "root".to_string(),
+                    fields: binds,
+                },
+                matched: String::new(),
+                span: Span::missing(region.base),
+            },
+        },
+    })
+}
+
+/// [`match_entry`] for INLINE entry patterns (§8.1): returns every top-level
+/// bind with its name, so the template can reference `$model`, `$effort`, …
+/// directly instead of through a single entry record.
+pub fn match_entry_binds(
+    set: &GrammarSet,
+    grammar_index: usize,
+    pattern: &Pattern,
+    region: &MatchRegion<'_>,
+    ct: Option<&CtEngine>,
+) -> Result<Vec<(String, Capture)>, MatchFailure> {
+    let (binds, _) = match_entry_raw(set, grammar_index, pattern, region, ct)?;
+    Ok(binds)
+}
+
+/// Runs the entry pattern over the whole region; the pattern must consume it
+/// (§8.3.9). Returns the top-level binds and the optional structural primary
+/// (the chosen `oneof` branch / rule record when the pattern binds nothing).
+fn match_entry_raw(
+    set: &GrammarSet,
+    grammar_index: usize,
+    pattern: &Pattern,
+    region: &MatchRegion<'_>,
+    ct: Option<&CtEngine>,
+) -> Result<(Vec<(String, Capture)>, Option<Capture>), MatchFailure> {
+    let mut matcher = Matcher::new(set, region, FUEL_BUDGET, ct);
+    let mut env = Env {
+        skip: SkipMode::On,
+        grammar: grammar_index,
+        open_blocks: Vec::new(),
+        scope: HashMap::new(),
+        rule: None,
+    };
+    let out = matcher
+        .sequence(&pattern.elems, 0, &mut env, &Continuation::End)
+        .ok_or_else(|| matcher.failure())?;
+    let tail = matcher.skip(out.end, &env);
+    if tail != region.chars.len() {
+        matcher.note_failure(tail, "leftover content after the pattern match");
+        return Err(matcher.failure());
+    }
+    Ok((out.binds, out.primary))
 }
 
 /// [`match_entry`] with an explicit fuel budget (operation count). Used by
@@ -720,6 +779,9 @@ impl<'a> Matcher<'a> {
         // nested inside groups, soft regions, optionals, and each bodies).
         let outer = Continuation::Elems(siblings, cont);
         match &elem.kind {
+            // Inert editor annotations (§8.1, §8.3.10): consumed at parse
+            // time, they match nothing and never affect the cursor.
+            PatKind::Annotation { .. } => Some(Out::empty(pos)),
             PatKind::Lit { text, insensitive } => {
                 let start = self.skip(pos, env);
                 let end = self.lit_at(start, text, *insensitive)?;

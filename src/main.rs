@@ -206,7 +206,9 @@ fn render_error(error: &Diagnostic, source: &str, path: &str) -> String {
 }
 
 /// Renders `message` located at `span` with the caret machinery. Shared by
-/// compile-time diagnostics and interpreter runtime errors.
+/// compile-time diagnostics and interpreter runtime errors. Positions are
+/// CHARACTER based, so carets stay aligned on lines containing multibyte
+/// UTF-8 text (byte offsets would smear the column past its true position).
 #[cfg(feature = "cli")]
 fn render_message_at(message: &str, span: Span, source: &str, path: &str) -> String {
     let (line, column) = line_column(source, span.start);
@@ -218,8 +220,9 @@ fn render_message_at(message: &str, span: Span, source: &str, path: &str) -> Str
         .to_string();
     let start_byte = line_start_byte(source, line);
     let leading = span.start.saturating_sub(start_byte);
-    let prefix =
-        String::from_utf8_lossy(&line_text.as_bytes()[..leading.min(line_text.len())]).len();
+    let prefix = String::from_utf8_lossy(&line_text.as_bytes()[..leading.min(line_text.len())])
+        .chars()
+        .count();
     // A span that crosses a line break renders only its first-line
     // portion; `...` marks that the span continues on a later line. A
     // span that ends with the line break itself is still single-line.
@@ -235,6 +238,8 @@ fn render_message_at(message: &str, span: Span, source: &str, path: &str) -> Str
     format!("{path}:{line}:{column}: {message}\n{line_text}\n{caret}")
 }
 
+/// The 1-based (line, column) of `offset` in `source`, columns counted in
+/// characters so diagnostics match the character-based caret rendering.
 #[cfg(feature = "cli")]
 fn line_column(source: &str, offset: usize) -> (usize, usize) {
     let mut line = 1usize;
@@ -248,7 +253,10 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
             line_start = index + 1;
         }
     }
-    (line, offset - line_start + 1)
+    let column_chars = source
+        .get(line_start..offset.min(source.len()))
+        .map_or(0, |text| text.chars().count());
+    (line, column_chars + 1)
 }
 
 #[cfg(feature = "cli")]
@@ -352,5 +360,19 @@ mod tests {
         let rendered = render_error(&errors[0], source, "t.cm");
         assert!(rendered.starts_with("t.cm:1:9: missing return in non-void function `f`\n"));
         assert_eq!(caret_line(&rendered), "        ^...");
+    }
+
+    #[test]
+    fn multibyte_lines_keep_the_caret_aligned() {
+        // The prefix before the span contains two-character-wide multibyte
+        // runes; the caret must align by CHARACTERS, not bytes.
+        let source = "str s = \"日本語\" + x\n";
+        let span_start = source.find("x").unwrap();
+        let rendered = rendered(source, span_start, span_start + 1);
+        let lines: Vec<&str> = rendered.lines().collect();
+        let caret = lines[2];
+        let target = lines[1].chars().position(|c| c == 'x').unwrap();
+        assert_eq!(caret.chars().position(|c| c == '^').unwrap(), target);
+        assert!(rendered.starts_with("t.cm:1:"));
     }
 }

@@ -258,6 +258,14 @@ pub struct MatchFailure {
 /// error instead of hanging.
 const FUEL_BUDGET: u64 = 1_000_000;
 
+/// The maximum rule-recursion depth during matching. Each level of nested
+/// rule invocation costs kilobytes of stack (the packrat frames are wide),
+/// which is why the expansion pipeline runs matching on its dedicated
+/// large-stack thread ([`crate::mega::expand`]) and why the cap is still a
+/// hard diagnostic — the matcher reports "rule recursion too deep" (§8.7's
+/// budget-error shape) instead of aborting the process.
+const MAX_RULE_DEPTH: usize = 256;
+
 /// Matches `pattern` (a magic's entry pattern) against the whole region and
 /// returns the root capture. The pattern must consume the entire region
 /// (§8.3.9): only skippable trailing characters may remain.
@@ -1479,7 +1487,7 @@ impl<'a> Matcher<'a> {
         env: &mut Env,
         cont: &Continuation<'_>,
     ) -> Option<(Capture, usize)> {
-        if self.depth > 256 {
+        if self.depth > MAX_RULE_DEPTH {
             self.note_failure(pos, "rule recursion too deep");
             return None;
         }

@@ -65,6 +65,63 @@ pub fn expand_source_with(
     source: &str,
     options: ExpandOptions,
 ) -> Result<ExpansionOutcome, Vec<Diagnostic>> {
+    let owned = source.to_string();
+    run_on_expansion_stack(move || expand_source_inner(&owned, options))
+}
+
+/// Stack budget of the dedicated expansion thread. Deeply nested rule
+/// invocations cost kilobytes of stack per level (the packrat frames are
+/// wide); running the pipeline on its own thread gives matching a fixed,
+/// generous budget regardless of how small the calling thread's stack is.
+const EXPANSION_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+thread_local! {
+    /// Set on the dedicated expansion thread so nested `expand_source`
+    /// calls (there are none today, but the evaluator can parse deeply)
+    /// reuse the same big stack instead of spawning again.
+    static ON_EXPANSION_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `work` on a thread with a large stack — or inline when already on
+/// one. The work is closure-converted over owned data to satisfy `'static`.
+fn run_on_expansion_stack<T, F>(work: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if ON_EXPANSION_STACK.with(std::cell::Cell::get) {
+        return work();
+    }
+    let run = move || {
+        ON_EXPANSION_STACK.with(|cell| cell.set(true));
+        work()
+    };
+    let result = std::thread::Builder::new()
+        .stack_size(EXPANSION_STACK_BYTES)
+        .spawn(run)
+        .and_then(|handle| {
+            handle
+                .join()
+                .map_err(|_| std::io::Error::other("expansion thread aborted"))
+        });
+    match result {
+        Ok(value) => value,
+        // The work panicked: resume the unwind so the original panic
+        // surfaces at the caller (mirrors `join`'s default behavior).
+        Err(_) => std::panic::resume_unwind(Box::new(ExpansionThreadPanic)),
+    }
+}
+
+/// The panic payload re-raised when the expansion thread aborted. Internal
+/// expansion never panics by design (every failure is a diagnostic), so
+/// this only ever carries a bug.
+struct ExpansionThreadPanic;
+
+/// The actual pipeline; always invoked on the dedicated expansion stack.
+fn expand_source_inner(
+    source: &str,
+    options: ExpandOptions,
+) -> Result<ExpansionOutcome, Vec<Diagnostic>> {
     let (scan, scan_errors) = scan_magic(source);
     if !scan_errors.is_empty() {
         return Err(scan_errors);

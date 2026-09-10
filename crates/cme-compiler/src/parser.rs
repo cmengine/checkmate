@@ -9,6 +9,23 @@ use cme_core::ast::{
     VariantDecl,
 };
 
+/// The maximum recursion depth of one parse: parenthesized and unary
+/// expression nesting, statement (block) nesting, and generic type nesting
+/// all count. Each level costs kilobytes of stack, so the cap is sized to
+/// keep the whole parse inside even a 2 MiB worker thread — the Rust
+/// default for spawned threads — while remaining far beyond any
+/// hand-written or generated program's needs.
+pub const MAX_NESTING_DEPTH: usize = 128;
+
+/// The maximum number of binary operators in one statement's expressions.
+/// Real statements use a handful; a left-deep chain of this size is already
+/// a tree of this depth for every downstream recursive pass.
+pub const MAX_EXPR_OPERATORS: usize = 2048;
+
+/// The maximum number of type nodes (generic arguments + array suffixes)
+/// in one statement's types.
+pub const MAX_TYPE_NODES: usize = 4096;
+
 pub struct Parser<'a, 'src> {
     tokens: &'a [SpannedToken<'src>],
     pos: usize,
@@ -16,10 +33,36 @@ pub struct Parser<'a, 'src> {
     /// an `Invalid` node is planted into the AST at the failure site, so the
     /// parser never stops and always produces the fullest possible tree.
     errors: Vec<Diagnostic>,
+    /// Current recursion depth (parenthesized/unary expression nesting,
+    /// statement nesting, generic type nesting). Adversarially deep source
+    /// must fail with a clean diagnostic instead of overflowing the stack —
+    /// the parser never panics (boom.cm contract, §7 DoS defense).
+    depth: usize,
+    /// Binary operators built for the current statement's expressions.
+    /// A left-deep chain of N operators is an N-deep AST subtree, which the
+    /// validator, checker, and interpreter later recurse over — so the
+    /// parser bounds the total per statement, islands included.
+    expr_ops: usize,
+    /// Type nodes built for the current statement (generic arguments and
+    /// array suffixes). Bounds the `Type` tree depth the checker recurses.
+    type_nodes: usize,
 }
 
 impl<'a, 'src> Parser<'a, 'src> {
     pub fn new(tokens: &'a [SpannedToken<'src>]) -> Self {
+        Self::with_budget(tokens, 0, 0, 0)
+    }
+
+    /// A parser whose depth and complexity budgets continue the caller's.
+    /// Interpolation islands parse their text with a fresh token stream but
+    /// the same nesting stack — otherwise adversarially nested `$"..."`
+    /// strings would reset the depth guard per island.
+    fn with_budget(
+        tokens: &'a [SpannedToken<'src>],
+        depth: usize,
+        expr_ops: usize,
+        type_nodes: usize,
+    ) -> Self {
         debug_assert!(
             matches!(tokens.last(), Some(token) if token.token == Token::Eof),
             "token stream must end with a synthetic Eof"
@@ -28,7 +71,37 @@ impl<'a, 'src> Parser<'a, 'src> {
             tokens,
             pos: 0,
             errors: Vec::new(),
+            depth,
+            expr_ops,
+            type_nodes,
         }
+    }
+
+    /// Enters one level of recursion. Exceeding the nesting limit is a
+    /// clean parse error, never a stack overflow.
+    fn enter(&mut self) -> Result<(), Diagnostic> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            let span = self.peek().span;
+            return Err(Diagnostic::parse("expression nesting is too deep", span));
+        }
+        Ok(())
+    }
+
+    /// Counts one more binary operator for the current statement.
+    fn count_expr_op(&mut self, span: Span) -> Result<(), Diagnostic> {
+        self.expr_ops += 1;
+        if self.expr_ops > MAX_EXPR_OPERATORS {
+            return Err(Diagnostic::parse("expression is too complex", span));
+        }
+        Ok(())
+    }
+
+    /// Counts one more type node for the current statement; `false` when
+    /// the type has grown past its budget.
+    fn count_type_node(&mut self) -> bool {
+        self.type_nodes += 1;
+        self.type_nodes <= MAX_TYPE_NODES
     }
 
     /// Records a recoverable diagnostic and returns its index for embedding
@@ -378,7 +451,29 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// (Appendix A §A.3) is deliberately NOT run here: it runs once over the
     /// finished program in [`Self::parse_program_with_errors`], so a
     /// violation nested anywhere is reported exactly once.
+    ///
+    /// The guard wrapper tracks recursion depth (statement/blocks nest via
+    /// this entry point) and re-arms the per-statement complexity budgets;
+    /// the parsing itself lives in [`Self::parse_statement_at`].
     pub fn parse_statement(&mut self) -> Stmt {
+        if self.depth >= MAX_NESTING_DEPTH {
+            let span = self.peek().span;
+            let end = self.skip_to_statement_end(span.end);
+            let error = self.record("statement nesting is too deep", span);
+            return Stmt {
+                span: Span::new(span.start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+        self.depth += 1;
+        self.expr_ops = 0;
+        self.type_nodes = 0;
+        let statement = self.parse_statement_at();
+        self.depth -= 1;
+        statement
+    }
+
+    fn parse_statement_at(&mut self) -> Stmt {
         if self.at_eof() {
             let eof_span = self.eof_span();
             let error = self.record("unexpected end of file", eof_span);
@@ -464,6 +559,16 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// and recover. Never records diagnostics, so it is also safe for
     /// speculative parses (callers save/restore `pos` themselves).
     fn parse_type(&mut self) -> Option<Type> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let result = self.parse_type_guarded();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_type_guarded(&mut self) -> Option<Type> {
         let token = *self.peek();
         let base = match token.token {
             Token::KwInt
@@ -482,6 +587,9 @@ impl<'a, 'src> Parser<'a, 'src> {
                     self.advance();
                     return self.parse_type_generic_tail(name.to_string());
                 }
+                if !self.count_type_node() {
+                    return None;
+                }
                 Type::Named {
                     name: name.to_string(),
                     args: Vec::new(),
@@ -489,7 +597,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             }
             _ => return None,
         };
-        Some(self.parse_type_array_suffixes(base))
+        self.parse_type_array_suffixes(base)
     }
 
     /// After `Name <` (consumed): generic arguments for a named type or the
@@ -506,10 +614,13 @@ impl<'a, 'src> Parser<'a, 'src> {
                 return None;
             }
             self.advance();
-            return Some(self.parse_type_array_suffixes(Type::Map {
+            if !self.count_type_node() {
+                return None;
+            }
+            return self.parse_type_array_suffixes(Type::Map {
                 key: Box::new(first),
                 value: Box::new(value),
-            }));
+            });
         }
         let mut args = vec![first];
         while self.at(Token::Comma) {
@@ -520,11 +631,15 @@ impl<'a, 'src> Parser<'a, 'src> {
             return None;
         }
         self.advance();
-        Some(self.parse_type_array_suffixes(Type::Named { name, args }))
+        if !self.count_type_node() {
+            return None;
+        }
+        self.parse_type_array_suffixes(Type::Named { name, args })
     }
 
     /// Zero or more `[]` suffixes on an already-parsed base type (§11).
-    fn parse_type_array_suffixes(&mut self, ty: Type) -> Type {
+    /// `None` when the suffix run would exceed the statement's type budget.
+    fn parse_type_array_suffixes(&mut self, ty: Type) -> Option<Type> {
         let mut ty = ty;
         while self.at(Token::LBracket)
             && matches!(
@@ -534,9 +649,12 @@ impl<'a, 'src> Parser<'a, 'src> {
         {
             self.advance();
             self.advance();
+            if !self.count_type_node() {
+                return None;
+            }
             ty = Type::Array(Box::new(ty));
         }
-        ty
+        Some(ty)
     }
 
     /// A type declaration led by a scalar keyword (or `void`): the full
@@ -547,7 +665,11 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// function path and the variable path.
     fn parse_type_declaration(&mut self, type_token: SpannedToken<'src>, name_kind: &str) -> Stmt {
         let mut ty = Self::parse_type_from_token(&type_token.token).unwrap_or(Type::Infer);
-        ty = self.parse_type_array_suffixes(ty);
+        // Suffixes past the budget leave the base type in place; the
+        // declaration keeps parsing and the checker reports the leftovers.
+        if let Some(suffixed) = self.parse_type_array_suffixes(ty.clone()) {
+            ty = suffixed;
+        }
 
         let name = match *self.peek() {
             SpannedToken {
@@ -1650,11 +1772,14 @@ impl<'a, 'src> Parser<'a, 'src> {
         {
             self.advance();
             self.advance();
+            if !self.count_type_node() {
+                return None;
+            }
             let array = Type::Array(Box::new(Type::Named {
                 name: name.to_string(),
                 args: Vec::new(),
             }));
-            return Some(self.parse_type_array_suffixes(array));
+            return self.parse_type_array_suffixes(array);
         }
         Some(Type::Named {
             name: name.to_string(),
@@ -2217,12 +2342,20 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     fn parse_logic_or(&mut self) -> Result<Expr, Diagnostic> {
+        self.enter()?;
+        let result = self.parse_logic_or_loop();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_logic_or_loop(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_logic_and()?;
 
         while self.at(Token::Or) {
             self.advance();
             let rhs = self.parse_logic_and()?;
             let span = Span::new(expr.span.start, rhs.span.end);
+            self.count_expr_op(span)?;
             expr = Expr::new(
                 ExprKind::Binary {
                     op: BinaryOp::Or,
@@ -2243,6 +2376,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             self.advance();
             let rhs = self.parse_comparison()?;
             let span = Span::new(expr.span.start, rhs.span.end);
+            self.count_expr_op(span)?;
             expr = Expr::new(
                 ExprKind::Binary {
                     op: BinaryOp::And,
@@ -2274,6 +2408,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         }
 
         let span = Span::new(lhs.span.start, rhs.span.end);
+        self.count_expr_op(span)?;
         Ok(Expr::new(
             ExprKind::Binary {
                 op,
@@ -2291,6 +2426,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             self.advance();
             let rhs = self.parse_multiplicative()?;
             let span = Span::new(expr.span.start, rhs.span.end);
+            self.count_expr_op(span)?;
             expr = Expr::new(
                 ExprKind::Binary {
                     op,
@@ -2311,6 +2447,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             self.advance();
             let rhs = self.parse_unary()?;
             let span = Span::new(expr.span.start, rhs.span.end);
+            self.count_expr_op(span)?;
             expr = Expr::new(
                 ExprKind::Binary {
                     op,
@@ -2325,6 +2462,13 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, Diagnostic> {
+        self.enter()?;
+        let result = self.parse_unary_guarded();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_unary_guarded(&mut self) -> Result<Expr, Diagnostic> {
         let op_span = self.peek().span;
         let unary_op = match self.peek().token {
             Token::Minus => UnaryOp::Neg,
@@ -2619,7 +2763,10 @@ impl<'a, 'src> Parser<'a, 'src> {
 
     /// Parses the text of one `{...}` island as an expression: lexes it with
     /// the standard lexer, offsets every span to the island's absolute
-    /// position, and parses one expression with no trailing tokens.
+    /// position, and parses one expression with no trailing tokens. The
+    /// island's parser inherits this parser's budgets — nesting and operator
+    /// counts stay bounded across arbitrarily nested interpolation strings —
+    /// and hands the monotonic counters back when it is done.
     fn parse_island_expr(&mut self, island: &str, offset: usize) -> Result<Expr, Diagnostic> {
         let (tokens, errors) = crate::lexer::lex_with_errors(island);
         if let Some(error) = errors.into_iter().next() {
@@ -2633,10 +2780,12 @@ impl<'a, 'src> Parser<'a, 'src> {
                 span: Span::new(spanned.span.start + offset, spanned.span.end + offset),
             })
             .collect();
-        let mut parser = Parser::new(&tokens);
+        let mut parser = Parser::with_budget(&tokens, self.depth, self.expr_ops, self.type_nodes);
         let expr = match parser.parse_expression() {
             Ok(expr) => expr,
             Err(diagnostic) => {
+                self.expr_ops = parser.expr_ops;
+                self.type_nodes = parser.type_nodes;
                 return Err(remap_island_eof(diagnostic, offset + island.len()));
             }
         };
@@ -2648,6 +2797,8 @@ impl<'a, 'src> Parser<'a, 'src> {
                 other.span,
             ));
         }
+        self.expr_ops = parser.expr_ops;
+        self.type_nodes = parser.type_nodes;
         Ok(expr)
     }
     /// A primary expression with its postfix chain: field access (§2.6),

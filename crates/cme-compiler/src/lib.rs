@@ -2231,6 +2231,103 @@ mod tests {
     }
 
     #[test]
+    fn deep_expression_nesting_fails_with_a_clean_diagnostic() {
+        // 2000 nested parens used to overflow the parser stack and abort
+        // the process; now it is one recoverable diagnostic (§7 DoS
+        // defense, and the parser never panics).
+        let depth = 2000;
+        let source = format!(
+            "int f() {{\nint x = {}1{}\nreturn x\n}}\n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let (_, errors) = parse_program_parts(&source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].to_string(), "expression nesting is too deep");
+
+        // A distinct-name sanity: moderate nesting still parses.
+        let ok = format!(
+            "int f() {{\nint x = {}1{}\nreturn x\n}}\n",
+            "(".repeat(30),
+            ")".repeat(30)
+        );
+        let (stmts, errors) = parse_program_parts(&ok);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
+    fn deep_unary_and_statement_nesting_fail_cleanly() {
+        // 5000 unary minuses.
+        let source = format!("int f() {{\nint x = {}1\nreturn x\n}}\n", "-".repeat(5000));
+        let (_, errors) = parse_program_parts(&source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].to_string(), "expression nesting is too deep");
+
+        // 5000 nested if blocks.
+        let depth = 5000;
+        let source = format!(
+            "int f() {{\n{}x += 1\n{}return x\n}}\n",
+            "if (true) {\n".repeat(depth),
+            "}\n".repeat(depth)
+        );
+        let (_, errors) = parse_program_parts(&source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string() == "statement nesting is too deep"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn oversized_operator_chains_fail_cleanly() {
+        // A 40k-term addition chain is a 40k-deep left tree for every
+        // downstream recursive pass; the parser bounds it per statement.
+        let source = format!(
+            "int f() {{\nint x = {}1\nreturn x\n}}\n",
+            "1 + ".repeat(40_000)
+        );
+        let (_, errors) = parse_program_parts(&source);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].to_string(), "expression is too complex");
+
+        // A long but reasonable chain still parses and checks.
+        let source = format!(
+            "int f() {{\nint x = {}1\nreturn x\n}}\n",
+            "1 + ".repeat(300)
+        );
+        let outcome = parse_program_parts(&source);
+        assert!(outcome.1.is_empty(), "{:?}", outcome.1);
+    }
+
+    #[test]
+    fn nested_interpolation_islands_stay_within_the_budgets() {
+        // Nested interp strings parse fine at sane depths.
+        let source = "int f() {\nstr s = $\"a{$\"b{$\"c\"}\"}\"\nreturn 0\n}\n";
+        let (_, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // Adversarial nesting (island depth inherits the outer parser's
+        // budget) fails with a clean diagnostic, not a stack overflow.
+        let depth = 2000;
+        let mut source = String::from("int f() {\nstr s = ");
+        for _ in 0..depth {
+            source.push_str("$\"a{");
+        }
+        source.push('1');
+        for _ in 0..depth {
+            source.push_str("}\"");
+        }
+        source.push_str("\nreturn 0\n}\n");
+        let (_, errors) = parse_program_parts(&source);
+        assert!(
+            !errors.is_empty(),
+            "adversarial island nesting must not parse clean"
+        );
+    }
+
+    #[test]
     fn infer_function_return_type_is_rejected() {
         let (stmts, errors) = parse_program_parts("infer f() {\nreturn 1\n}\n");
         assert_eq!(errors.len(), 1);

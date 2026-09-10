@@ -642,3 +642,42 @@ pub enum CaptureValue {
   stop position, and `1 < 2` not splitting into two text nodes) — the
   expected-vs-actual decisions are the first order of Task 5. (Resolved
   in Session 2: see the Task 5 notes above.)
+
+## 6. Session 4 — whitepaper §8 parity audit (agent run)
+
+- Full re-read of WHITEPAPER.md §1–§15 + Appendix A against the
+  implementation; the gaps found were implemented and pinned:
+  - §8.1/§8.3.10 inert annotations `#complete(expr)` / `#hover("…")` /
+    `#token("…")` between any pattern terms (payloads parsed for balance,
+    never retained — host registries stay invisible to the pass, §8.5).
+  - §8.1 INLINE entry patterns (`agent.spawn` shape): a magic whose pattern
+    does not begin with a rule ref is hosted by the synthetic default
+    grammar; every top-level bind seeds the template directly
+    (`match_entry_binds` + `elaborate_seeded`).
+  - §8.1's declare-before-invoke rule as a static check on original-source
+    invocations (template-authored sites exempt).
+  - §8.3.3 fragment validators may name pure functions (the matched text
+    bridges as `str`, the function must return `bool`).
+  - §8.3.3 parameterized `$tt<"open" "close">` — the balanced tree roots at
+    the explicit pair (strings/comments transparent inside).
+  - §8.3.4 the `.span` capture accessor (opaque `start:end` text, equality-
+    comparable; consistent with plan §1.4.9's accepted-and-ignored span
+    arguments), native `append(list, item)` (the §11 core-library stand-in
+    for context accumulation), and §A.5 short-circuiting of `&&`/`||` in
+    both condition evaluators (a guard can protect a quantifier over an
+    absent list).
+  - §8.4 `where` filters on `[each … ]` repetitions, and `$"…"` interpolation
+    in VALUE positions (`TmplValue::Interp`).
+  - §8.5 the `cm.code.fn(ret, name, params, body)` builder.
+- Engine bug fixes surfaced by the audit: the context-field parser looped
+  forever on the §8.3.4 `str[] open` type spelling (zero-progress loop), and
+  the expanded-file removal comments were mangled (`// egaprogram …` →
+  `// [megaprogram …`).
+- `magic.cm` now exercises the whole §8 surface: 21 invocations across
+  declaration/statement/expression/type positions, `grammar ts extends js`,
+  YAML anchors/aliases/`<<` merge, TOML datetimes + `require(@tablesConsistent,
+  …)`, JS template literals with a nested `magic(jsonValue)` inside the
+  `${ … }` island, the `uiBanner` `$template` demo, the parameterized-`$tt`
+  demo, the `nest` context-accumulation demo (negative duplicate-tag case
+  pinned in tests), and a `<<REGEX` heredoc region. `cme run magic.cm`
+  exits 0 (main returns 0; every internal check passes).

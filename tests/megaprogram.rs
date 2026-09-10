@@ -232,7 +232,7 @@ fn magic_cm_expands_checks_and_runs_clean() {
     // megaprograms plus the §8.1 inline entry (twice), the §8.3.3 $tt and
     // $template demos, the type-position listOf, the §8.2 extends demo, the
     // §8.3.4 context-accumulation demo, and the §8.6 heredoc region.
-    assert_eq!(outcome.records.len(), 20, "expected 20 invocations");
+    assert_eq!(outcome.records.len(), 21, "expected 21 invocations");
     let rescan = cme_compiler::mega::scan::scan_magic(&outcome.expanded).0;
     assert!(rescan.invocations.is_empty(), "invocations remain");
     assert!(rescan.magics.is_empty(), "magic declarations remain");

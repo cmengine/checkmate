@@ -12,21 +12,33 @@
 //
 // Layout:
 //   Part 1   — `grammar` declarations ("parsers"): json, toml, yaml, css,
-//              html, re, js, py, sql — the §8.8/§8.4 whitepaper shapes.
+//              html, re, js, ts (extends js, §8.2), nest (context
+//              accumulation, §8.3.4/§8.3.7), py, sql — the §8.8/§8.4
+//              whitepaper shapes.
 //   Part 2   — `magic` declarations (the macros): one entry point per
-//              grammar. Templates are whitepaper-shaped: `@toValue`-style
-//              codegen, `where @isVoid` / `@isRawText` guards, late
-//              `cm.parse(css.sheet / js.program, body)` delegation inside
-//              `@emitElement`, `@emitBody` recursion for Python, and
-//              `@emitMatcher` for regexes (§8.5).
+//              grammar PLUS the §8.1 inline entry (`agent.spawn`, with
+//              inert #complete/#hover/#token annotations), the §8.3.3
+//              parameterized-$tt and live-island-$template demos, the
+//              type-position `listOf`, the §8.3.2 combinator demo
+//              (bounds/label/raw/$ident/$raw), the §8.2 extends demo
+//              (`tsRun`), and the §8.3.4 context-accumulation demo
+//              (`nestTree`). Tree-producing templates are whitepaper-
+//              shaped: `@toValue`-style codegen, `where @isVoid` /
+//              `@isRawText` guards, late `cm.parse(css.sheet /
+//              js.program, body)` delegation inside `@emitElement`,
+//              `@emitBody` recursion for Python, `@emitMatcher` for
+//              regexes (§8.5), and the §8.8 `require`s.
 //   Part 2.5 — the compile-time helper program: the `Capture` bridge enum,
 //              the generated-value enums (JsonTree, HtmlNode, ReNode), and
 //              the pure Checkmate functions the templates call with `@`.
 //              These run in the compile-time evaluator during expansion and
 //              remain (as dead code) in the expanded file.
-//   Part 3   — the consumer program: ordinary Checkmate code whose
-//              declarations and expressions call the macros with
-//              `magic(name) { region }`.
+//   Part 3   — the consumer program: ordinary Checkmate code calling the
+//              macros in every §8.4 invocation position — declaration
+//              (`magic(def)`), statement (`agent.spawn`), expression
+//              (jsonValue and friends), and type (`magic(listOf) { str }
+//              banner = …`) — plus the §8.6 heredoc region
+//              (`magic(reCompile) <<REGEX … REGEX`).
 //
 // The regions are real foreign-language source (JSON, TOML, YAML, CSS, HTML,
 // ECMAScript regex, JavaScript, Python, SQL).
@@ -770,6 +782,19 @@ magic uiBanner($template body) {
 // invocation sits where `str[]` would.
 magic listOf($word base) {
     $base[]
+}
+
+// §8.3.2's remaining combinators in one demo: `each [n, m]` bounds, a
+// `label` diagnostics context, `raw { … }` skipper suspension, the
+// `$ident` fragment, and a parse-integrated `$raw` tail.
+magic bounded(
+    label "a bounded word list" { each [2, 3] { $ident word } as items }
+    $raw tail ";"
+) {
+    [
+        [each in $items { $"{$item.word}" }]
+        $"{$tail.matched}"
+    ]
 }
 
 // TS declarations → summary lines (the extends demo; plain statements
@@ -1986,6 +2011,18 @@ int checkPairAndBanner() {
     return fails
 }
 
+int checkBounded() {
+    str[] parts = magic(bounded) {
+        alpha beta 1 + 2;
+    }
+    int fails = 0
+    if (parts.length != 3) { fails += 1 }
+    if (parts[0] != "alpha") { fails += 1 }
+    if (parts[1] != "beta") { fails += 1 }
+    if (parts[2] != "1 + 2") { fails += 1 }
+    return fails
+}
+
 int checkPy() {
     int fails = 0
     int clamped = pyClampFn(2, 1, 5)
@@ -2031,6 +2068,7 @@ int main() {
     fails += checkTs()
     fails += checkNest()
     fails += checkSpawn()
+    fails += checkBounded()
     fails += checkPairAndBanner()
     fails += checkPy()
     fails += checkSql()

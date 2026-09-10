@@ -304,13 +304,17 @@ pub fn match_entry_binds(
 /// Runs the entry pattern over the whole region; the pattern must consume it
 /// (§8.3.9). Returns the top-level binds and the optional structural primary
 /// (the chosen `oneof` branch / rule record when the pattern binds nothing).
+/// The raw entry outcome: named top-level binds plus the optional
+/// structural primary (an unbound leading `oneof`/rule record).
+type EntryRaw = (Vec<(String, Capture)>, Option<Capture>);
+
 fn match_entry_raw(
     set: &GrammarSet,
     grammar_index: usize,
     pattern: &Pattern,
     region: &MatchRegion<'_>,
     ct: Option<&CtEngine>,
-) -> Result<(Vec<(String, Capture)>, Option<Capture>), MatchFailure> {
+) -> Result<EntryRaw, MatchFailure> {
     let mut matcher = Matcher::new(set, region, FUEL_BUDGET, ct);
     let mut env = Env {
         skip: SkipMode::On,

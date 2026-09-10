@@ -1,0 +1,110 @@
+// Program fixture: composed semantics — enums as tagged unions flowing
+// through match statements and expressions, `?`-propagation, named
+// arguments, `impl` methods, and option plumbing (§2.6–§2.16).
+// Contract: parse + check clean; main returns 0 iff every pin holds.
+
+struct token {
+    str text
+    int line
+}
+
+enum node {
+    Leaf(int value)
+    Branch(node left, node right)
+    Named(str tag, node inner)
+}
+
+impl token {
+    str describe(token self) {
+        return $"[{self.line}] {self.text}"
+    }
+}
+
+int maxOf(int a, int b) {
+    if (a > b) {
+        return a
+    }
+    return b
+}
+
+int depth(node n) {
+    return match (n) {
+        Leaf(int value) => 1
+        Branch(node l, node r) => 1 + maxOf(depth(l), depth(r))
+        Named(str tag, node inner) => 1 + depth(inner)
+    }
+}
+
+int sum(node n) {
+    return match (n) {
+        Leaf(int value) => value
+        Branch(node l, node r) => sum(l) + sum(r)
+        Named(str tag, node inner) => sum(inner)
+    }
+}
+
+result<int, str> checkedInverse(int v) {
+    if (v == 0) {
+        return Err("zero has no inverse")
+    }
+    return Ok(100 / v)
+}
+
+int inverseOrSentinel(int v) {
+    result<int, str> r = checkedInverse(v)
+    return match (r) {
+        Ok(int q) => q
+        Err(str message) => -1
+    }
+}
+
+int unwrapOr(option<int> maybe, int fallback) {
+    return match (maybe) {
+        Some(int v) => v
+        None() => fallback
+    }
+}
+
+node build() {
+    return node.Branch(
+        node.Named("half", node.Leaf(20)),
+        node.Leaf(22)
+    )
+}
+
+int main() {
+    int fails = 0
+
+    // Enum trees: depth and sum walk the same shape differently.
+    node tree = build()
+    if (depth(tree) != 3) { fails += 1 }
+    if (sum(tree) != 42) { fails += 1 }
+    if (sum(node.Named("wrap", node.Leaf(5))) != 5) { fails += 1 }
+
+    // The Err payload carries the message; Ok carries the quotient.
+    if (inverseOrSentinel(4) != 25) { fails += 1 }
+    if (inverseOrSentinel(0) != -1) { fails += 1 }
+
+    result<int, str> bad = checkedInverse(0)
+    bool hitErr = false
+    match (bad) {
+        Err(str message) => {
+            if (message == "zero has no inverse") {
+                hitErr = true
+            }
+        }
+        Ok(int q) => { fails += 1 }
+    }
+    if (!hitErr) { fails += 1 }
+
+    // Option plumbing with an explicit fallback.
+    if (unwrapOr(option.Some(9), -1) != 9) { fails += 1 }
+    if (unwrapOr(option.None(), -1) != -1) { fails += 1 }
+
+    // Named arguments construct structs; methods take self explicitly.
+    token t = token(text: "end", line: 7)
+    if (token.describe(t) != "[7] end") { fails += 1 }
+
+    if (fails != 0) { return fails }
+    return 0
+}

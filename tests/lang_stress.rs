@@ -285,3 +285,18 @@ fn recursion_budget_sits_at_the_documented_limit() {
         "got: {message:?}"
     );
 }
+
+#[test]
+fn trailing_commas_are_rejected_in_call_arguments() {
+    // Newlines are free inside parens (§A.8), but a trailing comma before
+    // the closer is a clean parse error at the right place.
+    one_diagnostic(
+        "int f(int a, int b) {\nreturn a + b\n}\nint main() {\nreturn f(\n1,\n2,\n)\n}\n",
+        "expected an expression",
+    );
+    // The same call without the trailing comma parses and runs.
+    expect(
+        "int f(int a, int b) {\nreturn a + b\n}\nint main() {\nreturn f(\n1,\n2\n)\n}\n",
+        Value::Int(3),
+    );
+}

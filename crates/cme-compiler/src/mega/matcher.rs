@@ -1939,14 +1939,29 @@ impl<'a> Matcher<'a> {
                 }
                 return Some(out);
             }
-            FragKind::Tt => {
+            FragKind::Tt { explicit } => {
                 // A single token or balanced delimiter tree, honoring the
                 // grammar's profile string forms (§8.3.3): at a string form
                 // the whole string is the token; at a bracket opener the
                 // balanced tree is; otherwise a maximal run of
-                // non-whitespace, non-delimiter characters.
+                // non-whitespace, non-delimiter characters. The
+                // `$tt<"open" "close">` form roots the balanced tree at the
+                // given pair instead of the standard brackets.
                 let start = self.skip(pos, env);
-                let end = if self.profile_string_len_at(start, env).is_some()
+                let explicit_tree =
+                    |open: &str, close: &str| self.delimited_tree_len_at(start, open, close, env);
+                let end = if let Some((open, close)) = explicit {
+                    match explicit_tree(open, close) {
+                        Some(len) => start + len,
+                        None => {
+                            self.note_failure(
+                                start,
+                                format!("expected a `{open} … {close}` token tree"),
+                            );
+                            return None;
+                        }
+                    }
+                } else if self.profile_string_len_at(start, env).is_some()
                     || self.balanced_tree_len_at(start, env).is_some()
                 {
                     start
@@ -2084,6 +2099,60 @@ impl<'a> Matcher<'a> {
     /// The length of the balanced delimiter tree starting at `pos`, if any
     /// (`(…)`, `[…]`, `{…}`), honoring profile strings and comment forms
     /// inside so their delimiters never count.
+    /// The length of a balanced tree rooted at an EXPLICIT delimiter pair
+    /// (`$tt<"{{" "}}">`, §8.3.3): strings and comments stay transparent
+    /// inside, the openers nest, and the tree ends at the matching closer.
+    fn delimited_tree_len_at(
+        &self,
+        pos: usize,
+        open: &str,
+        close: &str,
+        env: &Env,
+    ) -> Option<usize> {
+        let open_chars: Vec<char> = open.chars().collect();
+        let close_chars: Vec<char> = close.chars().collect();
+        if !open_chars
+            .iter()
+            .enumerate()
+            .all(|(index, expected)| self.region.chars.get(pos + index) == Some(expected))
+        {
+            return None;
+        }
+        let profile = self.profile(env);
+        let mut depth = 0usize;
+        let mut cursor = pos;
+        while let Some(&_) = self.region.chars.get(cursor) {
+            let starts = |delimiter: &[char]| {
+                delimiter.iter().enumerate().all(|(index, expected)| {
+                    self.region.chars.get(cursor + index) == Some(expected)
+                })
+            };
+            if let Some(len) = self.profile_string_len_at(cursor, env) {
+                cursor += len;
+                continue;
+            }
+            if let Some(len) = comment_len_at(self.region, cursor, profile) {
+                cursor += len;
+                continue;
+            }
+            if starts(&open_chars) {
+                depth += 1;
+                cursor += open_chars.len();
+                continue;
+            }
+            if starts(&close_chars) {
+                depth -= 1;
+                cursor += close_chars.len();
+                if depth == 0 {
+                    return Some(cursor - pos);
+                }
+                continue;
+            }
+            cursor += 1;
+        }
+        None
+    }
+
     fn balanced_tree_len_at(&self, pos: usize, env: &Env) -> Option<usize> {
         let open = *self.region.chars.get(pos)?;
         let close = match open {

@@ -788,7 +788,7 @@ impl<'a> PatternParser<'a> {
             "int" => FragKind::Int,
             "float" => FragKind::Float,
             "str" => FragKind::Str,
-            "tt" => FragKind::Tt,
+            "tt" => FragKind::Tt { explicit: None },
             "text" => FragKind::Text,
             "template" => FragKind::Template {
                 open: "{{".to_string(),
@@ -866,10 +866,15 @@ impl<'a> PatternParser<'a> {
                     }
                 };
                 match kind {
+                    // `$template<open close [rule]>` and `$tt<open close>`
+                    // both take the delimiter pair (§8.3.3's templateSpec).
                     FragKind::Template { .. } => FragKind::Template { open, close, rule },
+                    FragKind::Tt { .. } => FragKind::Tt {
+                        explicit: Some((open, close)),
+                    },
                     other => {
                         return Err(self.error(format!(
-                            "delimiters are only valid on `$template`, not `${}`",
+                            "delimiters are only valid on `$template` or `$tt`, not `${}`",
                             match other {
                                 FragKind::Ident => "ident",
                                 FragKind::Word => "word",
@@ -877,7 +882,7 @@ impl<'a> PatternParser<'a> {
                                 FragKind::Int => "int",
                                 FragKind::Float => "float",
                                 FragKind::Str => "str",
-                                FragKind::Tt => "tt",
+                                FragKind::Tt { .. } => unreachable!(),
                                 FragKind::Text => "text",
                                 FragKind::Raw(_) => "raw",
                                 FragKind::Expr => "expr",

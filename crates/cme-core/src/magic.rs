@@ -233,8 +233,12 @@ pub enum FragKind {
     Int,
     Float,
     Str,
-    /// A single token or balanced delimiter tree honoring profile strings.
-    Tt,
+    /// A single token or balanced delimiter tree honoring profile strings
+    /// (§8.3.3). `explicit` carries the `$tt<"open" "close">` form: the
+    /// balanced tree roots at the given delimiter pair.
+    Tt {
+        explicit: Option<(String, String)>,
+    },
     /// Effective tail if one exists, else the region remainder.
     Text,
     /// A template with islands split by `{{ }}` (or parameterized

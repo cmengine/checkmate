@@ -1840,6 +1840,33 @@ str v = magic(twin) {
         );
     }
 
+    // -- §8.3.3: the parameterized $tt fragment ------------------------------
+
+    #[test]
+    fn parameterized_tt_balances_the_given_delimiters() {
+        // $tt<"{{" "}}"> roots the balanced tree at the explicit pair;
+        // braces inside (even in strings) stay interior to the tree.
+        let source = r#"
+magic cell($word key "=" $tt<"{{" "}}"> value) {
+    $"{$key}={$value.matched}"
+}
+
+str v = magic(cell) {
+    alpha = {{ f(1, { x: 2 }) + g("}}") }}
+}
+"#;
+        let outcome = expand_source(source).expect("the explicit tree balances");
+        // The emitted Checkmate literal escapes the inner quotes, so the
+        // tree text appears with \" inside it.
+        assert!(
+            outcome
+                .expanded
+                .contains(r#"alpha={{ f(1, { x: 2 }) + g(\"}}\") }}"#),
+            "the whole tree is one capture: {}",
+            outcome.expanded
+        );
+    }
+
     // -- Task 10: diagnostics & provenance polish (§8.3.9, §8.6) --------------
 
     #[test]

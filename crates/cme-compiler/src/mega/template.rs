@@ -472,12 +472,12 @@ impl<'a> TmplParser<'a> {
         })
     }
 
-    /// `[each [NAME] in [$]path { body }]`
+    /// `[each [NAME] in [$]path [where cond] { body }]`
     fn each_bracketed(&mut self) -> Result<TmplNode, Diagnostic> {
         let start = self.cursor;
         self.cursor += 1; // `[`
         self.cursor += "each".len();
-        let (element, list) = self.each_header()?;
+        let (element, list, filter) = self.each_header()?;
         let body = self.braced_nodes()?;
         self.skip_trivia();
         if !self.rest().starts_with(']') {
@@ -487,26 +487,28 @@ impl<'a> TmplParser<'a> {
         Ok(TmplNode::Each {
             element,
             list,
+            filter,
             body: Box::new(Template { nodes: body }),
             span: self.node_span(start),
         })
     }
 
-    /// `each [NAME] in [$]path { body }` (statement form)
+    /// `each [NAME] in [$]path [where cond] { body }` (statement form)
     fn each_bare(&mut self) -> Result<TmplNode, Diagnostic> {
         let start = self.cursor;
         self.cursor += "each".len();
-        let (element, list) = self.each_header()?;
+        let (element, list, filter) = self.each_header()?;
         let body = self.braced_nodes()?;
         Ok(TmplNode::Each {
             element,
             list,
+            filter,
             body: Box::new(Template { nodes: body }),
             span: self.node_span(start),
         })
     }
 
-    fn each_header(&mut self) -> Result<(String, TmplValue), Diagnostic> {
+    fn each_header(&mut self) -> Result<(String, TmplValue, Option<CtxExpr>), Diagnostic> {
         self.skip_trivia();
         // Optional explicit element name (must not be `in`).
         let word = self.peek_word();
@@ -526,7 +528,19 @@ impl<'a> TmplParser<'a> {
             self.cursor += 1;
         }
         let path = self.dotted_path()?;
-        Ok((element, TmplValue::Capture { path }))
+        // §8.4: an `each` may carry a `where` filter over the element's
+        // fields; filtered-out items emit nothing.
+        let mut filter = None;
+        let probe = self.cursor;
+        self.skip_trivia();
+        if self.at_word("where") {
+            self.cursor += "where".len();
+            let cond = ctxexpr::parse_expr(self.text, &mut self.cursor, self.span)?;
+            filter = Some(cond);
+        } else {
+            self.cursor = probe;
+        }
+        Ok((element, TmplValue::Capture { path }, filter))
     }
 
     fn braced_nodes(&mut self) -> Result<Vec<TmplNode>, Diagnostic> {
@@ -964,6 +978,7 @@ impl<'e> Elaborator<'e> {
             TmplNode::Each {
                 element,
                 list,
+                filter,
                 body,
                 ..
             } => {
@@ -998,6 +1013,30 @@ impl<'e> Elaborator<'e> {
                 for item in &items {
                     let saved_out = std::mem::take(&mut self.out);
                     let saved_stack = self.enclosures.clone();
+                    self.scopes.push(Scope {
+                        lets: vec![(element.clone(), item.clone())],
+                        element: Some(item.clone()),
+                    });
+                    // §8.4's where filter: an item whose condition is not
+                    // truthy emits nothing (and consumes no join slot).
+                    let keep = match filter {
+                        Some(cond) => match self.eval(cond) {
+                            Some(value) => matches!(value, CtxVal::Bool(true)),
+                            None => {
+                                self.scopes.pop();
+                                self.out = saved_out;
+                                self.error("each filter did not evaluate");
+                                return;
+                            }
+                        },
+                        None => true,
+                    };
+                    self.scopes.pop();
+                    if !keep {
+                        self.out = saved_out;
+                        self.enclosures = saved_stack;
+                        continue;
+                    }
                     self.scopes.push(Scope {
                         lets: vec![(element.clone(), item.clone())],
                         element: Some(item.clone()),

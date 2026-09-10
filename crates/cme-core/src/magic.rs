@@ -420,10 +420,13 @@ pub enum TmplNode {
     /// `$"…{cap}…"` — interpolates captures into a Checkmate string literal.
     Interp { parts: Vec<TmplStrPart>, span: Span },
     /// `[each NAME in xs { … }]` — repetition. `NAME` defaults to `item`;
-    /// the element's fields are also reachable bare (§8.4).
+    /// the element's fields are also reachable bare (§8.4). An optional
+    /// `where` filter (§8.4: "with optional `where` filters") skips items
+    /// whose condition is not truthy.
     Each {
         element: String,
         list: TmplValue,
+        filter: Option<CtxExpr>,
         body: Box<Template>,
         span: Span,
     },

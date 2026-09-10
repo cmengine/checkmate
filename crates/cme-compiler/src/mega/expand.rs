@@ -1611,6 +1611,38 @@ magic(runIt) {
         );
     }
 
+    // -- §8.4: where filters on template [each] ------------------------------
+
+    #[test]
+    fn template_each_supports_where_filters() {
+        // §8.4: `[each in xs where cond { … }]` skips items whose condition
+        // is not truthy; the join consumes no slot for them.
+        let source = r#"
+grammar list {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule doc {
+        each sep "," { $word name "=" $word flag } as items
+    }
+}
+
+magic keepers(list.doc as d) {
+    [
+        [each in $d.items where $item.flag == "yes" { $item.name }]
+    ]
+}
+
+str[] v = magic(keepers) {
+    a = yes, b = no, c = yes
+}
+"#;
+        let outcome = expand_source(source).expect("filtered each expands");
+        assert!(
+            outcome.expanded.contains("a, c") && !outcome.expanded.contains(", b"),
+            "only items passing the filter join the list: {}",
+            outcome.expanded
+        );
+    }
+
     #[test]
     fn tailed_code_fragments_in_entry_patterns_are_fine() {
         let source = r#"

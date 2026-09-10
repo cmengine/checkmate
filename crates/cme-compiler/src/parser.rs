@@ -2587,24 +2587,15 @@ impl<'a, 'src> Parser<'a, 'src> {
                 parts.push(InterpPart::Literal(unescape_interp_literal(
                     &content[literal_start..idx],
                 )));
-                // Find the matching `}` (nested braces come from struct and
-                // map literals inside the island).
-                let mut depth = 1usize;
-                let mut close = idx + 1;
-                while close < bytes.len() && depth > 0 {
-                    match bytes[close] {
-                        b'{' => depth += 1,
-                        b'}' => depth -= 1,
-                        _ => {}
-                    }
-                    close += 1;
-                }
-                if depth != 0 {
+                // Find the matching `}` (string-aware: a `}` inside a
+                // quoted string of the island does not close it, and
+                // nested braces come from struct and map literals).
+                let Some(close) = interp_island_close(bytes, idx) else {
                     return Err(Diagnostic::parse(
                         "unterminated interpolation island",
                         Span::new(base + idx, span.end - 1),
                     ));
-                }
+                };
                 let island = &content[idx + 1..close - 1];
                 if island.trim().is_empty() {
                     return Err(Diagnostic::parse(
@@ -2761,6 +2752,37 @@ fn multiplicative_operator(token: &Token) -> Option<BinaryOp> {
         Token::Percent => Some(BinaryOp::Rem),
         _ => None,
     }
+}
+
+/// The byte index just past the `}` matching the `{` at `open` in an
+/// interpolated string's content, or `None` when the island never closes.
+/// String-aware: a `"` inside the island opens a quoted run (escape pairs
+/// honored) whose braces and quotes do not count, so `{ m["key"] }` and
+/// `{ {"a": 1}["a"] }` find their true closing brace.
+fn interp_island_close(content: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut close = open + 1;
+    let mut in_string = false;
+    while close < content.len() {
+        match content[close] {
+            b'"' if in_string => in_string = false,
+            b'"' if !in_string => in_string = true,
+            b'\\' if in_string => {
+                // Escape pair inside the island's string: skip both bytes.
+                close += 1;
+            }
+            b'{' if !in_string => depth += 1,
+            b'}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(close + 1);
+                }
+            }
+            _ => {}
+        }
+        close += 1;
+    }
+    None
 }
 
 /// Decodes the four accepted escape pairs in an interpolated string's

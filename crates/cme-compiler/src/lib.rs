@@ -2205,7 +2205,9 @@ mod tests {
 
     #[test]
     fn broken_interpolation_islands_report_clean_diagnostics() {
-        // Unterminated island.
+        // Unterminated island: the quote after `x` backtracks to terminate
+        // the literal (the flat-regex reading), and the parser reports the
+        // broken island with the statement surviving for tooling.
         let source = "str f() {\nstr s = $\"oops {x\"\nreturn s\n}\n";
         let (_, errors) = parse_program_parts(source);
         assert_eq!(errors.len(), 1);

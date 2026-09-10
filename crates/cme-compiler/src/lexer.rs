@@ -41,12 +41,149 @@ fn is_accepted_escape_byte(byte: u8) -> bool {
     matches!(byte, b'n' | b't' | b'\\' | b'"')
 }
 
-/// The callback for [`Token::InterpStrLit`]: the `$"..."` literal validates
-/// escapes exactly like a plain string literal (the `{expr}` islands are
-/// parsed later, at expression level).
+/// The callback for [`Token::InterpStrLit`]: the regex matches only the
+/// `$"` opener; this callback scans the rest of the literal by hand
+/// because a `{...}` island may itself contain string literals —
+/// `$"age: { ages["ana"] }"` — whose quotes must not close the outer
+/// literal. The scan tracks island depth: a `"` at depth 0 closes the
+/// literal, a `"` at depth > 0 opens a nested string that is skipped
+/// whole (honoring the four accepted escape pairs). On success the
+/// lexer is bumped past the full literal; on failure recovery
+/// classifies the region via [`classify_interp_string_error`].
 fn interp_str_lit<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<&'src str> {
-    let slice = lex.slice();
-    str_escapes_valid(&slice[1..]).then_some(slice)
+    let rest = lex.remainder();
+    match scan_interp_rest(rest) {
+        InterpScan::Closed(rest_len) => {
+            lex.bump(rest_len);
+            Some(lex.slice())
+        }
+        // Consume the damaged extent before failing so recovery resyncs
+        // past the whole literal (one diagnostic, like the old regex's
+        // whole-literal failure span). A rejected escape pair swallows the
+        // rest of the line; an unterminated literal stops at its failure
+        // point (the recovery for that shape is already line-granular).
+        InterpScan::Unterminated(consumed) => {
+            lex.bump(consumed);
+            None
+        }
+        InterpScan::BadEscape(consumed) => {
+            let line_end = rest[consumed..]
+                .find(['\n', '\r'])
+                .map_or(rest.len(), |offset| consumed + offset);
+            lex.bump(line_end);
+            None
+        }
+    }
+}
+
+/// The outcome of scanning the text after a `$"` opener.
+enum InterpScan {
+    /// The literal is well formed: byte length consumed, including the
+    /// closing quote.
+    Closed(usize),
+    /// No closing quote before end of line/input: how far the literal
+    /// extends (the failure point).
+    Unterminated(usize),
+    /// An invalid escape pair outside an island string: how far the
+    /// literal extends, ending at the backslash.
+    BadEscape(usize),
+}
+
+/// Scans the text after a `$"` opener for the end of the interpolated
+/// string literal:
+///
+/// - a `"` outside any `{...}` island closes the literal;
+/// - a `"` inside an island opens a nested string that is skipped whole
+///   (escape pairs honored), so `{ m["key"] }` scans correctly;
+/// - an island string that never closes before the line end backtracks:
+///   its opening quote then terminates the literal, mirroring the old
+///   flat-regex reading and leaving the broken island to the parser's
+///   island diagnostics;
+/// - `\` pairs with one of the four accepted escapes; outside an island's
+///   nested strings a rejected pair fails the scan, inside one it is
+///   consumed (the parser's island sub-lex reports it later);
+/// - a line break or end of input outside any island string is a failure
+///   (literals are single-line).
+fn scan_interp_rest(rest: &str) -> InterpScan {
+    let bytes = rest.as_bytes();
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' if depth == 0 => return InterpScan::Closed(index + 1),
+            b'"' => {
+                // A nested string inside an island: skip it whole. If it
+                // never closes on this line, backtrack — this quote ends
+                // the literal instead (the old flat-regex reading).
+                let quote = index;
+                index += 1;
+                loop {
+                    match bytes.get(index) {
+                        Some(b'"') => {
+                            index += 1;
+                            break;
+                        }
+                        Some(b'\\') => {
+                            match bytes.get(index + 1) {
+                                Some(&escape) if is_accepted_escape_byte(escape) => index += 2,
+                                // An invalid escape pair inside the island's
+                                // string is still inside the outer literal's
+                                // extent: keep scanning so the closing quote
+                                // (if any) is found and the parser's island
+                                // sub-lex reports the real error later.
+                                Some(_) => index += 2,
+                                None => return InterpScan::Closed(quote + 1),
+                            }
+                        }
+                        Some(b'\n') | Some(b'\r') | None => return InterpScan::Closed(quote + 1),
+                        Some(_) => index += 1,
+                    }
+                }
+            }
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b'\\' => {
+                match bytes.get(index + 1) {
+                    Some(&escape) if is_accepted_escape_byte(escape) => index += 2,
+                    // A rejected pair — including a dangling backslash at
+                    // end of line or input — fails the token like the old
+                    // regex + validation did; recovery classifies it as
+                    // `InvalidEscape`.
+                    Some(_) | None => return InterpScan::BadEscape(index),
+                }
+            }
+            b'\n' | b'\r' => return InterpScan::Unterminated(index),
+            _ => index += 1,
+        }
+    }
+    InterpScan::Unterminated(bytes.len())
+}
+
+/// Rescans an interpolated string literal from `start` (the `$`) to
+/// classify why it failed, mirroring [`scan_interp_rest`] with absolute
+/// spans.
+fn classify_interp_string_error(source: &str, start: usize) -> LexError {
+    let content_start = start + 2;
+    match scan_interp_rest(&source[content_start.min(source.len())..]) {
+        InterpScan::Closed(_) => LexError::InvalidCharacter {
+            span: Span::new(start, start + 2),
+        },
+        InterpScan::Unterminated(consumed) => LexError::UnterminatedInterpolatedString {
+            span: Span::new(start, content_start + consumed),
+        },
+        InterpScan::BadEscape(at) => {
+            let backslash = content_start + at;
+            LexError::InvalidEscape {
+                span: Span::new(backslash, (backslash + 2).min(source.len())),
+            }
+        }
+    }
 }
 
 /// The callback for [`Token::BlockComment`]: after the regex matches the
@@ -77,9 +214,12 @@ pub enum Token<'a> {
     StrLit(&'a str),
 
     // Interpolated string literals (§2.8/§4.1): a `$` sigil before the
-    // opening quote. Escape validation is identical; `{expr}` islands are
+    // opening quote. The regex matches only the opener; the callback scans
+    // the rest by hand so a `{...}` island may contain string literals
+    // (`$"ages: { table["ana"] }"`) whose quotes do not close the literal.
+    // Escape validation is identical to plain strings; `{expr}` islands are
     // recognized by the parser, not the lexer.
-    #[regex(r#"\$\"(?:\\[^\r\n]|\\|[^\"\r\n\\])*\""#, interp_str_lit)]
+    #[regex(r#"\$\""#, interp_str_lit)]
     InterpStrLit(&'a str),
 
     // Block comments (§2.2). The regex matches the opener and the callback
@@ -379,15 +519,7 @@ fn classify_error(source: &str, span: Span) -> LexError {
         return LexError::UnterminatedBlockComment { span };
     }
     if source[span.start..].starts_with("$\"") {
-        match classify_string_error(source, span.start + 1) {
-            Some(LexError::UnterminatedString { span: inner }) => {
-                return LexError::UnterminatedInterpolatedString {
-                    span: Span::new(span.start, inner.end),
-                };
-            }
-            Some(error) => return error,
-            None => {}
-        }
+        return classify_interp_string_error(source, span.start);
     }
     if text.starts_with('"')
         && let Some(error) = classify_string_error(source, span.start)
@@ -734,6 +866,68 @@ mod tests {
         let (tokens, errors) = crate::lexer::lex_with_errors("$\"bad \\q\"");
         assert_eq!(errors.len(), 1);
         assert!(matches!(tokens.last().map(|t| t.token), Some(Token::Eof)));
+    }
+
+    #[test]
+    fn interpolated_string_islands_may_contain_string_literals() {
+        // A quoted string inside an island must not close the outer
+        // literal: the whole `$"..."` form is one token.
+        assert_eq!(
+            lex_tokens("$\"ages: { table[\"ana\"] }\""),
+            vec![
+                Token::InterpStrLit("$\"ages: { table[\"ana\"] }\""),
+                Token::Eof
+            ]
+        );
+        // Braces inside the island's strings do not affect balancing.
+        assert_eq!(
+            lex_tokens("$\"a { m[\"}\"] } b\""),
+            vec![Token::InterpStrLit("$\"a { m[\"}\"] } b\""), Token::Eof]
+        );
+        // Escaped quotes inside island strings are honored.
+        assert_eq!(
+            lex_tokens("$\"x { s[\"a\\\"b\"] } y\""),
+            vec![
+                Token::InterpStrLit("$\"x { s[\"a\\\"b\"] } y\""),
+                Token::Eof
+            ]
+        );
+        // Escapes outside islands validate exactly like plain strings.
+        let (tokens, errors) = lex_with_errors("$\"ok { a[\"n\"] } \\t\"");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            tokens.first().map(|t| t.token),
+            Some(Token::InterpStrLit("$\"ok { a[\"n\"] } \\t\""))
+        );
+    }
+
+    #[test]
+    fn broken_interp_string_recovery_is_line_granular() {
+        // One diagnostic for a bad escape: the failed token swallows the
+        // rest of the line so the `q` and the dangling quote behind the
+        // backslash produce no phantom errors.
+        let (tokens, errors) = lex_with_errors("$\"bad \\q\" tail");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0],
+            LexError::InvalidEscape {
+                span: Span::new(6, 8)
+            }
+        );
+        // The recovery newline carries the rest of the line; nothing else.
+        assert!(matches!(tokens.last().map(|t| t.token), Some(Token::Eof)));
+
+        // Unterminated literal: one diagnostic, resync at the line end.
+        let (tokens, errors) = lex_with_errors("$\"never { closes\nint x = 1\n");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            LexError::UnterminatedInterpolatedString { .. }
+        ));
+        assert!(
+            tokens.iter().any(|t| t.token == Token::KwInt),
+            "the next line's tokens survive recovery"
+        );
     }
 
     #[test]

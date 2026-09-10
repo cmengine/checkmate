@@ -182,23 +182,21 @@ fn dangling_fragments_do_not_fuse_with_declarations_below() {
 
 #[test]
 fn deep_postfix_chains_parse_iteratively() {
-    // 2,000 chained field/index/? postfixes are a LOOP in the parser — no
-    // nesting limit applies.
+    // 2,000 chained field postfixes are a LOOP in the parser — no nesting
+    // limit applies. (Field chains on `int` are type errors, but this is a
+    // parse-only check.)
     let mut chain = String::from("struct s0 { int v }\n");
     chain.push_str("int f() {\ns0 obj = s0(v: 1)\nint x = obj");
-    for i in 0..500 {
-        let _ = i;
+    for _ in 0..2000 {
         chain.push_str(".v");
-        break; // .length-free: field chains on int are type errors; keep it clean
     }
     chain.push_str("\nreturn x\n}");
     parse_clean(&chain);
 
-    // A long ?-free index chain on arrays.
+    // A long index chain on arrays.
     let mut index_chain = String::from("int f() {\nint[] a = [1]\nint x = a");
-    for _ in 0..50 {
+    for _ in 0..2000 {
         index_chain.push_str("[0]");
-        break;
     }
     index_chain.push_str("\nreturn x\n}");
     parse_clean(&index_chain);

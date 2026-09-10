@@ -1879,6 +1879,8 @@ impl<'a> Matcher<'a> {
         pos: usize,
         env: &mut Env,
     ) -> Option<Out> {
+        let mut delegated: Option<Capture> = None;
+        let slot = &mut delegated;
         let (start, end, folded) = match &kind {
             FragKind::Ident => {
                 let start = self.skip(pos, env);
@@ -2024,7 +2026,11 @@ impl<'a> Matcher<'a> {
             }
             FragKind::Raw(_) | FragKind::Expr | FragKind::Type | FragKind::Block => {
                 let start = self.skip(pos, env);
-                let end = self.parse_integrated_extent(start, &kind, siblings, cont, env)?;
+                let (end, delegated) =
+                    self.parse_integrated_extent(start, &kind, siblings, cont, env)?;
+                if let Some(record) = delegated {
+                    slot.replace(record);
+                }
                 (start, end, false)
             }
         };
@@ -2036,38 +2042,45 @@ impl<'a> Matcher<'a> {
             return None;
         }
 
-        let capture = match &kind {
-            FragKind::Int => {
-                let text = self.text(start, end);
-                let value = text.parse::<i64>().unwrap_or(0);
-                Capture {
-                    kind: CaptureKind::Int(value),
-                    matched: text,
-                    span: self.span(start, end),
+        // §8.3.3's capture-kind column: a `$raw<grammar.rule>` yields the
+        // REFERENCED RULE's record (the delegation parse already ran), so
+        // templates can match on its branch labels and navigate its fields.
+        let capture = if let (FragKind::Raw(Some(_)), Some(record)) = (&kind, delegated) {
+            record
+        } else {
+            match &kind {
+                FragKind::Int => {
+                    let text = self.text(start, end);
+                    let value = text.parse::<i64>().unwrap_or(0);
+                    Capture {
+                        kind: CaptureKind::Int(value),
+                        matched: text,
+                        span: self.span(start, end),
+                    }
                 }
-            }
-            FragKind::Float => {
-                let text = self.text(start, end);
-                let value = text.parse::<f64>().unwrap_or(0.0);
-                Capture {
-                    kind: CaptureKind::Float(value),
-                    matched: text,
-                    span: self.span(start, end),
+                FragKind::Float => {
+                    let text = self.text(start, end);
+                    let value = text.parse::<f64>().unwrap_or(0.0);
+                    Capture {
+                        kind: CaptureKind::Float(value),
+                        matched: text,
+                        span: self.span(start, end),
+                    }
                 }
-            }
-            _ => {
-                let text = self.text(start, end);
-                let text = if folded { text.to_lowercase() } else { text };
-                let text_kind = match &kind {
-                    FragKind::Ident => TextKind::Ident,
-                    FragKind::Word => TextKind::Word,
-                    FragKind::Tag => TextKind::Tag,
-                    _ => TextKind::Raw,
-                };
-                Capture {
-                    kind: CaptureKind::Text(text_kind),
-                    matched: text.trim().to_string(),
-                    span: self.span(start, end),
+                _ => {
+                    let text = self.text(start, end);
+                    let text = if folded { text.to_lowercase() } else { text };
+                    let text_kind = match &kind {
+                        FragKind::Ident => TextKind::Ident,
+                        FragKind::Word => TextKind::Word,
+                        FragKind::Tag => TextKind::Tag,
+                        _ => TextKind::Raw,
+                    };
+                    Capture {
+                        kind: CaptureKind::Text(text_kind),
+                        matched: text.trim().to_string(),
+                        span: self.span(start, end),
+                    }
                 }
             }
         };
@@ -2385,7 +2398,7 @@ impl<'a> Matcher<'a> {
         siblings: &[PatElem],
         cont: &Continuation<'_>,
         env: &mut Env,
-    ) -> Option<usize> {
+    ) -> Option<(usize, Option<Capture>)> {
         let has_tail = !siblings.is_empty() || has_effective_tail(cont);
         if !has_tail {
             // The static compile-time check rejects these patterns before any
@@ -2419,10 +2432,9 @@ impl<'a> Matcher<'a> {
             let tail_hit = self.tail_matches(end, &tail, env);
             env.scope = saved_scope;
             if tail_hit {
-                if let Err(message) = self.extent_parses(start, end, kind, env) {
-                    furthest = Some((end, message));
-                } else {
-                    return Some(end);
+                match self.extent_capture(start, end, kind, env) {
+                    Err(message) => furthest = Some((end, message)),
+                    Ok(delegated) => return Some((end, delegated)),
                 }
             }
             end += 1;
@@ -2498,9 +2510,11 @@ impl<'a> Matcher<'a> {
                     return None;
                 };
                 let content: String = self.region.chars[island_start..island_end].iter().collect();
-                // Parse integration (§8.3.6): the island content must parse.
+                // Parse integration (§8.3.6): the island content must parse
+                // (the referenced rule only validates here — island parts
+                // keep the uniform `text`/`expr` record shape).
                 if let Some(rule_path) = rule {
-                    if let Err(message) = self.extent_parses(
+                    if let Err(message) = self.extent_capture(
                         island_start,
                         island_end,
                         &FragKind::Raw(Some(rule_path.to_vec())),
@@ -2567,19 +2581,22 @@ impl<'a> Matcher<'a> {
 
     /// The parse step of §8.3.6's boundary acceptance: the captured text
     /// must parse as the fragment's code form (or match the delegated rule).
-    fn extent_parses(
+    /// The delegated `$raw<grammar.rule>` additionally yields the referenced
+    /// rule's record capture (§8.3.3's capture-kind column); the other forms
+    /// parse-validate only and contribute no capture of their own.
+    fn extent_capture(
         &self,
         start: usize,
         end: usize,
         kind: &FragKind,
         env: &Env,
-    ) -> Result<(), String> {
+    ) -> Result<Option<Capture>, String> {
         let text = self.text(start, end);
         match kind {
             FragKind::Raw(Some(rule_path)) => {
                 // Late delegation (§8.3.8): the text must match the
                 // referenced rule as a whole; `self.` names the current
-                // grammar.
+                // grammar. The match's capture IS the fragment's capture.
                 let effective: Vec<String> =
                     if rule_path.first().map(String::as_str) == Some("self") {
                         rule_path[1..].to_vec()
@@ -2594,14 +2611,30 @@ impl<'a> Matcher<'a> {
                 };
                 let rule = self.set.grammars[grammar_index].rules[rule_index].clone();
                 let sub_region = MatchRegion::new(self.region.source, self.absolute(start), &text);
-                match_entry(self.set, grammar_index, &rule.pattern, &sub_region, self.ct)
-                    .map(|_| ())
-                    .map_err(|failure| failure.message)
+                // The structural record is the delegated capture: the chosen
+                // oneof branch record when the rule is oneof-topped, else a
+                // record of the rule's binds tagged with the rule name.
+                let (binds, primary) =
+                    match_entry_raw(self.set, grammar_index, &rule.pattern, &sub_region, self.ct)
+                        .map_err(|failure| failure.message)?;
+                Ok(Some(match primary {
+                    Some(primary) => primary,
+                    None => Capture {
+                        kind: CaptureKind::Record {
+                            tag: rule.name.clone(),
+                            fields: binds,
+                        },
+                        matched: text.trim().to_string(),
+                        span: self.span(start, end),
+                    },
+                }))
             }
-            FragKind::Raw(None) | FragKind::Expr => crate::parser::parse_expr_text(&text),
-            FragKind::Type => crate::parser::parse_type_text(&text),
-            FragKind::Block => crate::parser::parse_block_text(&text),
-            _ => Ok(()),
+            FragKind::Raw(None) | FragKind::Expr => {
+                crate::parser::parse_expr_text(&text).map(|_| None)
+            }
+            FragKind::Type => crate::parser::parse_type_text(&text).map(|_| None),
+            FragKind::Block => crate::parser::parse_block_text(&text).map(|_| None),
+            _ => Ok(None),
         }
     }
 

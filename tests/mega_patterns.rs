@@ -4,7 +4,7 @@
 //! bar as hand-written code.
 
 use cme_compiler::check::check;
-use cme_compiler::mega::expand::{expand_source_with, ExpandOptions};
+use cme_compiler::mega::expand::{ExpandOptions, expand_source_with};
 use cme_interp::Value;
 
 /// Expands, checks, and RUNS the source's `main`, expecting `Value::Int(0)`.
@@ -43,12 +43,13 @@ fn expand_run(source: &str) -> String {
 
 /// Expands and expects the error list to mention `contains`.
 fn expand_err(source: &str, contains: &str) {
-    let error = expand_source_with(source, ExpandOptions::default())
-        .expect_err("expansion must fail");
+    let error =
+        expand_source_with(source, ExpandOptions::default()).expect_err("expansion must fail");
     assert!(
-        error
-            .iter()
-            .any(|e| e.to_string().to_lowercase().contains(&contains.to_lowercase())),
+        error.iter().any(|e| e
+            .to_string()
+            .to_lowercase()
+            .contains(&contains.to_lowercase())),
         "errors {error:?} should mention {contains:?}"
     );
 }
@@ -219,7 +220,7 @@ int main() {
 /// rule 2), it runs through the line terminator (plan §2.4 note), and the
 /// capture value is edge-trimmed (plan §1.4.4).
 #[test]
-fn lineRest_is_verbatim_and_atomic() {
+fn line_rest_is_verbatim_and_atomic() {
     expand_run(
         r##"
 grammar lr {
@@ -689,7 +690,10 @@ int main() {
 "##;
     let a = expand_source_with(source, ExpandOptions::default()).expect("expand a");
     let b = expand_source_with(source, ExpandOptions::default()).expect("expand b");
-    assert_eq!(a.expanded, b.expanded, "expansion must be byte-deterministic");
+    assert_eq!(
+        a.expanded, b.expanded,
+        "expansion must be byte-deterministic"
+    );
     assert_eq!(a.records.len(), b.records.len());
 
     let provenance =

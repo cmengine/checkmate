@@ -5,7 +5,7 @@ pub use cme_api as api;
 // ExecutionLimits}` — the flat re-exports keep that literal shape, with
 // `Value` as the argument/result currency.
 #[cfg(feature = "api")]
-pub use cme_api::{CompiledProgram, Context, Engine, ExecutionLimits, Value};
+pub use cme_api::{CompiledProgram, Context, Engine, ExecutionLimits, MAX_CALL_DEPTH, Value};
 
 #[cfg(feature = "compiler")]
 pub use cme_compiler as compiler;

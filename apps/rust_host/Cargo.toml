@@ -1,0 +1,21 @@
+[package]
+name = "cme-rust-host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Rust host application for Checkmate: loads programs, invokes entry points under §5.5 limits"
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "cme-rust-host"
+path = "src/main.rs"
+
+# Consumes the API through the `cme` facade exactly as the WHITEPAPER §13.1
+# example does: `use cme::{Engine, ExecutionLimits, ...}`.
+[dependencies]
+cme = { path = "../..", features = ["api"] }

@@ -74,6 +74,13 @@ name = "cme-runtime"
 version = "0.2.0"
 
 [[package]]
+name = "cme-rust-host"
+version = "0.2.0"
+dependencies = [
+ "cme",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

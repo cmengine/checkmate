@@ -12,10 +12,21 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 name = "cme"
 version = "0.2.0"
 dependencies = [
+ "cme-api",
  "cme-compiler",
  "cme-core",
  "cme-interp",
  "cme-runtime",
+]
+
+[[package]]
+name = "cme-api"
+version = "0.2.0"
+dependencies = [
+ "cme",
+ "cme-compiler",
+ "cme-core",
+ "cme-interp",
 ]
 
 [[package]]

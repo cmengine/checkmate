@@ -31,6 +31,7 @@ cme-core = { path = "crates/cme-core", version = "0.2.0", optional = true }
 cme-compiler = { path = "crates/cme-compiler", version = "0.2.0", optional = true }
 cme-interp = { path = "crates/cme-interp", version = "0.2.0", optional = true }
 cme-runtime = { path = "crates/cme-runtime", version = "0.2.0", optional = true }
+cme-api = { path = "crates/cme-api", version = "0.2.0", optional = true }
 
 # The root integration tests drive the real front end and interpreter.
 [dev-dependencies]
@@ -44,6 +45,9 @@ core = ["dep:cme-core"]
 compiler = ["dep:cme-compiler"]
 interp = ["dep:cme-interp"]
 runtime = ["dep:cme-runtime"]
+# The Rust host embedding API (WHITEPAPER §13.1): Engine, CompiledProgram,
+# Context, ExecutionLimits.
+api = ["dep:cme-api"]
 # The CLI toolchain requires these crates to function
 cli = ["core", "compiler", "interp", "runtime"]
 

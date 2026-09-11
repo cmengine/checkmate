@@ -26,3 +26,6 @@ rustc-ice-*.txt
 *_expanded.cm
 
 .DS_Store
+
+# The standalone C host app build output (see apps/c_host/Makefile)
+apps/c_host/c_host_app

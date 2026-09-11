@@ -62,6 +62,7 @@
 //! assert_eq!(interpreter.invoke("main", &[]), Ok(Value::Int(41)));
 //! ```
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -262,6 +263,12 @@ pub struct Interpreter<'a> {
     /// The §8.5 host builtin surface, if this interpreter runs under the
     /// megaprogram evaluator.
     host: Option<&'a dyn CtHost>,
+    /// The §5.5 fuel meter, when this run is budgeted: a shared,
+    /// deterministic OPERATION counter charged by every statement and
+    /// expression evaluation. The compile-time evaluator shares its cell so
+    /// a runaway `@`-function (an infinite loop, a memory bomb) terminates
+    /// with a clean [`InterpError`] instead of hanging the compiler.
+    fuel: Option<&'a Cell<u64>>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -302,6 +309,7 @@ impl<'a> Interpreter<'a> {
             enums,
             impls,
             host: None,
+            fuel: None,
         }
     }
 
@@ -309,6 +317,15 @@ impl<'a> Interpreter<'a> {
     /// evaluator; ordinary execution leaves it unset).
     pub fn with_host(mut self, host: &'a dyn CtHost) -> Self {
         self.host = Some(host);
+        self
+    }
+
+    /// Attaches the §5.5 fuel meter: a deterministic operation count shared
+    /// with the host (the compile-time evaluator). When the counter reaches
+    /// zero, evaluation stops with a clean budget error — an infinite loop
+    /// in compile-time code terminates instead of hanging the compiler.
+    pub fn with_fuel(mut self, fuel: &'a Cell<u64>) -> Self {
+        self.fuel = Some(fuel);
         self
     }
 
@@ -358,6 +375,7 @@ impl<'a> Interpreter<'a> {
             enums: &self.enums,
             impls: &self.impls,
             host: self.host,
+            fuel: self.fuel,
             scopes: Vec::new(),
             depth: 0,
         }
@@ -388,11 +406,31 @@ struct Runner<'env, 'a> {
     enums: &'env HashMap<&'a str, &'a Stmt>,
     impls: &'env HashMap<String, HashMap<String, &'a Stmt>>,
     host: Option<&'env dyn CtHost>,
+    fuel: Option<&'env Cell<u64>>,
     scopes: Vec<HashMap<String, Value>>,
     depth: usize,
 }
 
 impl<'env, 'a> Runner<'env, 'a> {
+    /// Charges one deterministic operation against the fuel meter (§5.5).
+    /// An operation attempted at zero remaining budget is a clean budget
+    /// error — never a hang, never wall-clock time, so compile-time
+    /// evaluation stays byte-reproducible across platforms.
+    fn spend_fuel(&mut self, span: Span) -> Result<(), InterpError> {
+        if let Some(fuel) = self.fuel {
+            let remaining = fuel.get();
+            if remaining == 0 {
+                return Err(InterpError::new(
+                    "compile-time fuel budget exhausted (§5.5: execution is \
+                     metered by operation count)",
+                    span,
+                ));
+            }
+            fuel.set(remaining - 1);
+        }
+        Ok(())
+    }
+
     /// Enters a function: depth guard, arity check, parameter binding by
     /// value in the function frame, body execution, and `Flow` conversion.
     /// A `?` control signal (§2.8) becomes this function's return value.
@@ -485,6 +523,7 @@ impl<'env, 'a> Runner<'env, 'a> {
     }
 
     fn exec_stmt(&mut self, stmt: &'a Stmt) -> Result<Flow, InterpError> {
+        self.spend_fuel(stmt.span)?;
         match &stmt.kind {
             // A call statement evaluates and discards its result — void or
             // not, silently (owner ruling).
@@ -677,6 +716,7 @@ impl<'env, 'a> Runner<'env, 'a> {
     }
 
     fn eval(&mut self, expr: &'a Expr) -> Result<Value, InterpError> {
+        self.spend_fuel(expr.span)?;
         match &expr.kind {
             ExprKind::IntLit(value) => Ok(Value::Int(*value)),
             ExprKind::FloatLit(value) => Ok(Value::Float(*value)),
@@ -1667,6 +1707,7 @@ fn unary_symbol(op: UnaryOp) -> &'static str {
 mod tests {
     use super::{InterpError, Interpreter, MAX_CALL_DEPTH, Value};
     use cme_core::Span;
+    use std::cell::Cell;
 
     /// The full pipeline with the same gate a host applies: the source must
     /// parse AND check clean before the interpreter runs.
@@ -1696,6 +1737,18 @@ mod tests {
             outcome.diagnostics
         );
         Interpreter::new(&outcome.statements).invoke("main", &[])
+    }
+
+    /// Parse-only statements for tests that invoke something other than
+    /// `main` (fuel metering, direct function calls).
+    fn parse_statements_for_interp(source: &str) -> Vec<cme_core::ast::Stmt> {
+        let outcome = cme_compiler::parse_source(source);
+        assert!(
+            outcome.is_clean(),
+            "test source must parse clean: {:?}",
+            outcome.diagnostics
+        );
+        outcome.statements
     }
 
     fn ok(source: &str) -> Value {
@@ -2142,5 +2195,36 @@ mod tests {
                 .message
                 .contains("unknown function `engine.graphics.DrawTexture`")
         );
+    }
+
+    #[test]
+    fn fuel_exhaustion_is_a_clean_budget_error() {
+        // An infinite loop used to hang the caller forever: the tree-walker
+        // had no operation meter. With a fuel meter attached (§5.5 — a
+        // deterministic operation count, never wall-clock time), the loop
+        // terminates with a clean budget error, which is what keeps the
+        // compile-time evaluator (§8.7.3) from hanging the compiler on a
+        // runaway `@`-function.
+        let spin = "int spin() {\nint x = 0\nwhile (true) {\nx = x\n}\nreturn x\n}\n";
+        let statements = parse_statements_for_interp(spin);
+        let fuel = Cell::new(100);
+        let interpreter = Interpreter::new(&statements).with_fuel(&fuel);
+        let error = interpreter
+            .invoke("spin", &[])
+            .expect_err("100 operations must not finish an infinite loop");
+        assert!(
+            error
+                .message
+                .starts_with("compile-time fuel budget exhausted"),
+            "{error:?}"
+        );
+
+        // The same meter on a bounded program runs to completion with the
+        // correct result — it charges, it does not interfere.
+        let bounded = "int bounded() {\nint total = 0\nfor (int i in [1, 2, 3, 4, 5]) {\ntotal = total + i\n}\nreturn total\n}\n";
+        let statements = parse_statements_for_interp(bounded);
+        let fuel = Cell::new(1_000_000);
+        let interpreter = Interpreter::new(&statements).with_fuel(&fuel);
+        assert_eq!(interpreter.invoke("bounded", &[]), Ok(Value::Int(15)));
     }
 }

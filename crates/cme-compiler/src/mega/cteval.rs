@@ -224,7 +224,13 @@ impl<'g> CtEngine<'g> {
                 )
             })?);
         }
-        let interpreter = Interpreter::new(&self.program).with_host(self);
+        let interpreter = Interpreter::new(&self.program)
+            .with_host(self)
+            // §8.7.3: pathological compile-time code terminates with a
+            // budget error rather than hanging — the shared fuel cell is
+            // charged by every statement and expression the tree-walker
+            // evaluates inside the `@`-call.
+            .with_fuel(&self.fuel);
         let value = interpreter.invoke(name, &values).map_err(|error| {
             format!(
                 "compile-time call `{}` failed: {}",
@@ -1156,6 +1162,49 @@ int main() {
                     .message()
                     .contains("unknown compile-time function `nope`")
             }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_infinite_compile_time_loop_terminates_with_the_budget_error() {
+        // §8.7.3: the system does not trust the macro author with
+        // termination. A template calling an infinite-loop function used to
+        // hang `cme check` forever (the per-call CT fuel never looked
+        // inside the interpreter's execution); the tree-walker now shares
+        // the engine's fuel cell, so the runaway call ends in the §5.5
+        // budget error, surfaced as a normal expansion diagnostic.
+        let source = r#"
+grammar json {
+    skip [ ' ', '\t', '\r', '\n' ]
+    rule value {
+        oneof {
+            number => $int n
+            string => $str s
+        }
+    }
+}
+
+int spin(int x) {
+    while (true) {
+        x = x
+    }
+    return x
+}
+
+magic jsonSpin(json.value as v) {
+    @spin($v.n)
+}
+
+int main() {
+    return magic(jsonSpin) { 1 }
+}
+"#;
+        let error = expand_source(source).expect_err("an infinite loop must not hang");
+        assert!(
+            error
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("fuel budget exhausted")),
             "{error:?}"
         );
     }

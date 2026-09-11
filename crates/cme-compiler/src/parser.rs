@@ -528,6 +528,9 @@ impl<'a, 'src> Parser<'a, 'src> {
         if first.token == Token::KwImpl {
             return self.parse_impl_declaration(first);
         }
+        if first.token == Token::KwImport {
+            return self.parse_import_statement(first);
+        }
         if first.token == Token::KwVoid {
             if matches!(self.peek().token, Token::Ident(_))
                 && !matches!(
@@ -1274,6 +1277,96 @@ impl<'a, 'src> Parser<'a, 'src> {
             },
             Span::new(enum_token.span.start, end),
         )
+    }
+
+    /// Parses an import statement (§2.3, §10.3): `import` followed by a
+    /// dot-separated path of identifier segments, e.g.
+    /// `import self.gamemode.rules` or `import engine.graphics`. The path
+    /// needs at least two segments — a bare root names neither a module of
+    /// the mod tree nor a capability namespace. Resolution (does
+    /// `self.gamemode.rules` exist?) belongs to the mod loader, not the
+    /// parser; here only the shape is judged.
+    fn parse_import_statement(&mut self, import_token: SpannedToken<'src>) -> Stmt {
+        let start = import_token.span.start;
+
+        // The path: one identifier segment, then `.segment` extensions. A
+        // keyword segment (`import self.match`) does not lex as an
+        // identifier and is rejected like any other non-segment.
+        let head = *self.peek();
+        let (mut path, mut end) = match head.token {
+            Token::Ident(name) => {
+                self.advance();
+                (vec![name.to_string()], head.span.end)
+            }
+            other => {
+                let end = self.skip_to_statement_end(head.span.end);
+                let error = self.record(
+                    format!(
+                        "expected a module path after `import`, but found {}",
+                        other.describe()
+                    ),
+                    head.span,
+                );
+                return Stmt {
+                    span: Span::new(start, end),
+                    kind: StmtKind::Invalid { error },
+                };
+            }
+        };
+
+        while self.at(Token::Dot) {
+            let dot_span = self.peek().span;
+            let next = self.tokens.get(self.pos + 1).map(|t| (t.token, t.span));
+            match next {
+                Some((Token::Ident(_), _segment_span)) => {
+                    self.advance(); // dot
+                    let segment = self.advance();
+                    end = segment.span.end;
+                    if let Token::Ident(name) = segment.token {
+                        path.push(name.to_string());
+                    }
+                }
+                Some((other, other_span)) => {
+                    let end = self.skip_to_statement_end(other_span.end);
+                    let error = self.record(
+                        format!(
+                            "expected a path segment after `.`, but found {}",
+                            other.describe()
+                        ),
+                        other_span,
+                    );
+                    return Stmt {
+                        span: Span::new(start, end),
+                        kind: StmtKind::Invalid { error },
+                    };
+                }
+                None => {
+                    // The dot is the last token before end of file.
+                    let error = self.record("expected a path segment after `.`", dot_span);
+                    return Stmt {
+                        span: Span::new(start, dot_span.end),
+                        kind: StmtKind::Invalid { error },
+                    };
+                }
+            }
+        }
+
+        if path.len() < 2 {
+            let error = self.record(
+                "an import path needs at least two segments, like `self.rules` \
+                 or `engine.graphics`",
+                Span::new(start, end),
+            );
+            return Stmt {
+                span: Span::new(start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
+
+        Stmt {
+            span: Span::new(start, end),
+            kind: StmtKind::Import { path },
+        }
     }
 
     /// An impl block (§10.4): `impl target.path { members }`. The target is

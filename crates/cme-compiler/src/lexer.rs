@@ -337,6 +337,8 @@ pub enum Token<'a> {
     KwIn,
     #[token("impl")]
     KwImpl,
+    #[token("import")]
+    KwImport,
 
     // Integer Literals
     // This regex matches digits, and the closure parses it into an i64. A
@@ -428,6 +430,7 @@ impl<'a> Token<'a> {
             Token::KwFor => "`for`".into(),
             Token::KwIn => "`in`".into(),
             Token::KwImpl => "`impl`".into(),
+            Token::KwImport => "`import`".into(),
             Token::Assign => "`=`".into(),
             Token::AddAssign => "`+=`".into(),
             Token::SubAssign => "`-=`".into(),
@@ -485,6 +488,7 @@ impl<'a> Token<'a> {
                     | Token::KwMatch
                     | Token::KwFor
                     | Token::KwImpl
+                    | Token::KwImport
             )
     }
 }
@@ -839,7 +843,7 @@ mod tests {
 
     #[test]
     fn lexes_new_keywords() {
-        let source = "struct enum match for in impl";
+        let source = "struct enum match for in impl import";
         assert_eq!(
             lex_ok(source),
             vec![
@@ -849,6 +853,22 @@ mod tests {
                 Token::KwFor,
                 Token::KwIn,
                 Token::KwImpl,
+                Token::KwImport,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn import_takes_precedence_over_identifiers() {
+        // `import` is a keyword only when it stands alone; a prefixed or
+        // suffixed identifier keeps its spelling.
+        assert_eq!(
+            lex_ok("imports import_ imported"),
+            vec![
+                Token::Ident("imports"),
+                Token::Ident("import_"),
+                Token::Ident("imported"),
                 Token::Eof,
             ]
         );
@@ -1014,6 +1034,7 @@ mod tests {
             (Token::KwFor, "`for`"),
             (Token::KwIn, "`in`"),
             (Token::KwImpl, "`impl`"),
+            (Token::KwImport, "`import`"),
             (Token::Assign, "`=`"),
             (Token::AddAssign, "`+=`"),
             (Token::SubAssign, "`-=`"),

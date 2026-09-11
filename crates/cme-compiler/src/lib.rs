@@ -1515,6 +1515,112 @@ mod tests {
     }
 
     #[test]
+    fn parses_import_statements() {
+        // §2.3: a `self`-rooted import names a module of the current mod's
+        // tree; any other root names a host schema namespace.
+        for (source, expected) in [
+            (
+                "import self.gamemode.rules",
+                vec!["self", "gamemode", "rules"],
+            ),
+            ("import engine.graphics", vec!["engine", "graphics"]),
+            ("import self.main", vec!["self", "main"]),
+        ] {
+            let (stmts, errors) = parse_program_parts(&format!("{source}\n"));
+            assert!(errors.is_empty(), "{source:?}: {errors:#?}");
+            match &stmts[0].kind {
+                StmtKind::Import { path } => {
+                    assert_eq!(
+                        path,
+                        &expected
+                            .iter()
+                            .map(|segment| segment.to_string())
+                            .collect::<Vec<_>>(),
+                        "{source:?}"
+                    );
+                }
+                other => panic!("{source:?}: expected an import, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn imports_coexist_with_declarations() {
+        // Imports are ordinary top-level statements: they can precede,
+        // follow, and sit between declarations, and the checker treats
+        // them as transparent (§10.3 resolution belongs to the loader).
+        let source = "import self.util\nint f() {\n    return 1\n}\nimport engine.graphics\n";
+        let outcome = crate::parse_source(source);
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        assert_eq!(outcome.statements.len(), 3);
+        assert!(matches!(
+            &outcome.statements[0].kind,
+            StmtKind::Import { .. }
+        ));
+        assert!(matches!(
+            &outcome.statements[2].kind,
+            StmtKind::Import { .. }
+        ));
+        assert!(crate::check::check(&outcome.statements).is_empty());
+    }
+
+    #[test]
+    fn import_path_needs_two_segments() {
+        let (stmts, errors) = parse_program_parts("import engine\nint main() {\n    return 0\n}\n");
+        assert!(
+            errors.iter().any(|error| error
+                .message()
+                .contains("an import path needs at least two segments")),
+            "{errors:#?}"
+        );
+        assert!(matches!(
+            stmts.first().map(|stmt| &stmt.kind),
+            Some(StmtKind::Invalid { .. })
+        ));
+        // The following declaration survives recovery.
+        assert_eq!(stmts.len(), 2);
+    }
+
+    #[test]
+    fn import_segments_must_be_identifiers() {
+        // A keyword does not lex as an identifier, so it cannot be a
+        // segment; a trailing dot before the line end is the same shape.
+        for source in ["import self.match\n", "import engine.\n", "import self.\n"] {
+            let (_, errors) = parse_program_parts(source);
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message().contains("expected a path segment")),
+                "{source:?}: {errors:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_requires_a_path() {
+        let (_, errors) = parse_program_parts("import\nint main() {\n    return 0\n}\n");
+        assert!(
+            errors.iter().any(|error| error
+                .message()
+                .contains("expected a module path after `import`")),
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
+    fn nested_import_is_rejected_like_a_nested_declaration() {
+        let source = "void f() {\n    import self.util\n}\n";
+        let outcome = crate::parse_source(source);
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        let errors = crate::check::check(&outcome.statements);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].to_string(),
+            "imports are only allowed at top level"
+        );
+    }
+
+    #[test]
     fn three_segment_paths_parse_as_path_calls() {
         let source = "int main() {\n    return engine.gamemode.InitGame(4)\n}\n";
         let (stmts, errors) = parse_program_parts(source);

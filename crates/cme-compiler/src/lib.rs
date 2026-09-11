@@ -17,6 +17,8 @@ pub mod check;
 pub mod diagnostics;
 pub mod lexer;
 pub mod mega;
+/// Multi-file mod support (§10): manifest, discovery, assembly.
+pub mod mods;
 pub mod parser;
 pub mod validate;
 pub use diagnostics::{Diagnostic, DiagnosticKind, ParseOutcome};

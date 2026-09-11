@@ -68,6 +68,8 @@ fn validate_statement(statement: &Stmt, diagnostics: &mut Vec<Diagnostic>) {
             }
         }
         StmtKind::Block(block) => validate_block(block, diagnostics),
+        // An import declares no executable code (§2.3): nothing to validate.
+        StmtKind::Import { .. } => {}
         StmtKind::Invalid { .. } => {}
     }
 }

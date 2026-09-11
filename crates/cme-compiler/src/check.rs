@@ -220,6 +220,10 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
                 checker.register_impl(target, members, statement.span);
                 impl_members.push(index);
             }
+            // Resolution against the mod tree belongs to the mod loader
+            // (§10.3); an unresolvable import is reported there, so the
+            // checker treats the statement as transparent.
+            StmtKind::Import { .. } => {}
             // Already reported at parse level; never cascaded here.
             StmtKind::Invalid { .. } => {}
             _ => checker.report(
@@ -873,6 +877,11 @@ impl Checker {
             // as a nested function.
             StmtKind::ImplDecl { .. } => {
                 self.report("impl blocks are only allowed at top level", stmt.span);
+            }
+            // Imports are top-level declarations (§2.3); a nested one cannot
+            // take part in mod resolution.
+            StmtKind::Import { .. } => {
+                self.report("imports are only allowed at top level", stmt.span);
             }
             StmtKind::VarDecl { ty, name, expr } => {
                 // §2.16: the initializer is typed before the name exists,

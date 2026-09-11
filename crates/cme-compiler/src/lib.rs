@@ -2567,6 +2567,9 @@ mod tests {
                 }
             }
             StmtKind::StructDecl { .. } | StmtKind::EnumDecl { .. } => {}
+            // An import binds no source expressions; only its own span
+            // matters (already audited by the caller).
+            StmtKind::Import { .. } => {}
             StmtKind::Invalid { .. } => panic!("clean basic.cm must not contain Invalid"),
         }
     }

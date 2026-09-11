@@ -656,11 +656,17 @@ impl<'env, 'a> Runner<'env, 'a> {
                 "type declarations are not executable statements",
                 stmt.span,
             )),
-            // Only reachable through a hand-built tree: the parser produces
-            // impl blocks at top level only, where registration consumes
-            // them before execution (§10.4).
+            // Only reachable through a hand-built (unchecked) tree: the
+            // parser produces impl blocks at top level only, where
+            // registration consumes them before execution (§10.4).
             StmtKind::ImplDecl { .. } => Err(InterpError::new(
                 "impl blocks are only allowed at top level",
+                stmt.span,
+            )),
+            // Imports carry no executable code (§2.3); the checker rejects a
+            // nested one, and top-level imports never reach execution.
+            StmtKind::Import { .. } => Err(InterpError::new(
+                "imports are only allowed at top level",
                 stmt.span,
             )),
             StmtKind::Invalid { .. } => Err(InterpError::new(

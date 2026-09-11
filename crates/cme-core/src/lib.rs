@@ -475,6 +475,17 @@ pub mod ast {
             target: Vec<String>,
             members: Vec<Stmt>,
         },
+        /// An import statement (§2.3, §10.3): `import self.gamemode.rules`.
+        /// The path is the dot-separated segment list; a `self` first
+        /// segment names a module of the current mod's internal tree, any
+        /// other root names a host-provided schema namespace. Imports are
+        /// top-level declarations: resolution against the mod tree belongs
+        /// to the mod loader, so the checker and interpreter treat the
+        /// statement as transparent, and an import nested in a body is
+        /// rejected like any other misplaced declaration.
+        Import {
+            path: Vec<String>,
+        },
         If {
             cond: Expr,
             then_branch: Block,

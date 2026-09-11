@@ -1,6 +1,6 @@
 # CME — Checkmate Engine
 
-CME is a statically typed, embeddable scripting language implemented in Rust. The full whitepaper language surface parses, type-checks, and runs end to end on the tree-walking interpreter, and the §8 megaprogramming system (grammar-driven `magic` macros with a packrat pattern engine and compile-time function evaluation) is implemented at the source-text level with its own `cme expand` command. The bytecode VM, AOT compiler, and host schema system remain future work.
+CME is a statically typed, embeddable scripting language implemented in Rust. The full whitepaper language surface parses, type-checks, and runs end to end on the tree-walking interpreter, the §8 megaprogramming system (grammar-driven `magic` macros with a packrat pattern engine and compile-time function evaluation) is implemented at the source-text level with its own `cme expand` command, and multi-file mods (§10) load, link, and run from a `mod.toml` + `src/` tree. The bytecode VM, AOT compiler, and host schema system remain future work.
 
 ## Current Status
 
@@ -21,7 +21,7 @@ Files that declare or invoke `magic` are expanded automatically before `check`/`
 cargo run --features cli -- expand magic.cm
 ```
 
-This writes `magic_expanded.cm` side by side with the original — pure Checkmate, every magic invocation replaced by its generated code — and then parses and checks that file. Add `--provenance` to annotate each root magic site with a `// @ magic(name) src:line:col` comment; without the flag the output is byte-deterministic.
+This writes `magic_expanded.cm` side by side with the original — pure Checkmate, every magic invocation replaced by its generated code — and then parses and checks that file. Add `--provenance` to annotate each root magic site with a `// @ magic(name) src:line:col` comment; without the flag the output is byte-deterministic. Expansion runs per file inside a mod too: each module's megaprograms expand before the mod links into one program.
 
 ## Workspace
 
@@ -30,10 +30,10 @@ The repository is a Cargo workspace with focused crates:
 | Crate | Purpose | Status |
 | --- | --- | --- |
 | `cme-core` | Shared AST and language data models | Full language surface |
-| `cme-compiler` | Lexer, parser, diagnostics, validator, type checker, `parse_source`, and the `mega` megaprogram subsystem | Working front-end for the full surface plus §8 megaprogramming |
+| `cme-compiler` | Lexer, parser, diagnostics, validator, type checker, `parse_source`, the `mega` megaprogram subsystem, and the `mods` multi-file mod loader | Working front-end for the full surface plus §8 megaprogramming and §10 mods |
 | `cme-interp` | Interpreter | Working tree-walking interpreter (full surface) |
 | `cme-runtime` | Runtime services and built-ins | Placeholder |
-| `cme` | Facade package and optional CLI | Working lex/ast/check/run/expand toolchain |
+| `cme` | Facade package and optional CLI | Working lex/ast/check/run/expand toolchain; check/ast/run accept mod directories |
 
 The root `cme` package exposes workspace crates through optional `core`, `compiler`, `interp`, and `runtime` features. Enabling `cli` enables all of them. The default build intentionally exposes no root APIs.
 

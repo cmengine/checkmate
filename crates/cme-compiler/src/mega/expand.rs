@@ -69,6 +69,29 @@ pub fn expand_source_with(
     run_on_expansion_stack(move || expand_source_inner(&owned, options))
 }
 
+/// Cheap pre-check for embedders: does this source mention the megaprogram
+/// subsystem at all (`magic` or `grammar` as a standalone word)? Expansion
+/// is only worth running when the answer is yes — a plain source is
+/// returned unchanged by the pipeline, but skipping the pass entirely keeps
+/// the no-megaprogram path allocation-free. This is the same gate the CLI
+/// applies before `check`/`run`/`ast`; it is a scan, not a parse, so a
+/// source that merely mentions `magic` in a comment still pays one
+/// expansion pass that finds nothing and returns the text unchanged.
+pub fn mentions_megaprogram(source: &str) -> bool {
+    let mut word = String::new();
+    for c in source.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            if word == "magic" || word == "grammar" {
+                return true;
+            }
+            word.clear();
+        }
+    }
+    word == "magic" || word == "grammar"
+}
+
 /// Stack budget of the dedicated expansion thread. Deeply nested rule
 /// invocations cost kilobytes of stack per level (the packrat frames are
 /// wide); running the pipeline on its own thread gives matching a fixed,
@@ -1257,6 +1280,20 @@ fn compile_macros(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_megaprogram_spots_standalone_words_only() {
+        assert!(mentions_megaprogram("magic(name) { 1 }"));
+        assert!(mentions_megaprogram("grammar g { }"));
+        assert!(mentions_megaprogram("int x = 1\n// magic\n"));
+        // Substrings of larger identifiers do not count.
+        assert!(!mentions_megaprogram("int magical = 1"));
+        assert!(!mentions_megaprogram("int grammarian = 1"));
+        assert!(!mentions_megaprogram("int x = 1"));
+        assert!(!mentions_megaprogram(""));
+        // A trailing word without a terminator still counts.
+        assert!(mentions_megaprogram("int y = 1\nmagic"));
+    }
 
     /// The Task 3 acceptance shape: a JSON object region expands to a
     /// `map<str, str>` literal with one entry per top-level field.

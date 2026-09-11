@@ -167,7 +167,7 @@ fn mod_command(command: &str, mod_root: &Path, display_root: &str) -> Result<(),
     // declarations resolved before linking); expansion diagnostics render
     // against the module's ORIGINAL text, like single-file mode.
     for index in 0..modules.len() {
-        if !mentions_megaprogram(&modules[index].source) {
+        if !cme_compiler::mega::expand::mentions_megaprogram(&modules[index].source) {
             continue;
         }
         let source = modules[index].source.clone();
@@ -347,30 +347,11 @@ fn render_runtime_error(
     }
 }
 
-/// Cheap word-boundary pre-check: does the file even mention `magic` or
-/// `grammar`? A false positive just means `expand_source` runs and finds
-/// nothing (it returns the source unchanged).
-#[cfg(feature = "cli")]
-fn mentions_megaprogram(source: &str) -> bool {
-    let mut word = String::new();
-    for c in source.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            word.push(c);
-        } else {
-            if word == "magic" || word == "grammar" {
-                return true;
-            }
-            word.clear();
-        }
-    }
-    word == "magic" || word == "grammar"
-}
-
 /// Expands megaprograms when present. Used by `check|run|ast` so magic
 /// sources behave like their expansions.
 #[cfg(feature = "cli")]
 fn maybe_expand(source: &str) -> Result<String, CliError> {
-    if !mentions_megaprogram(source) {
+    if !cme_compiler::mega::expand::mentions_megaprogram(source) {
         return Ok(source.to_string());
     }
     let outcome = cme_compiler::mega::expand::expand_source(source)

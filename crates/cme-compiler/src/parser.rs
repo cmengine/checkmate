@@ -1381,10 +1381,14 @@ impl<'a, 'src> Parser<'a, 'src> {
         };
 
         let type_params = self.parse_decl_type_params();
-        if let Err(recovered) = &type_params {
-            // A broken parameter list invalidates the whole declaration.
-            let _ = recovered;
-            return self.invalid_declaration(struct_token);
+        if let Err(diagnostic) = type_params {
+            // A broken parameter list invalidates the whole declaration. The
+            // diagnostic is pushed HERE: the Invalid node's ErrorId must
+            // point at the real type-parameter message, not be fabricated
+            // from a list that never received it.
+            self.errors.push(diagnostic);
+            let error = ErrorId(self.errors.len() - 1);
+            return self.invalid_declaration(struct_token, error);
         }
         let type_params = type_params.unwrap();
 
@@ -1450,8 +1454,12 @@ impl<'a, 'src> Parser<'a, 'src> {
         };
 
         let type_params = self.parse_decl_type_params();
-        if type_params.is_err() {
-            return self.invalid_declaration(enum_token);
+        if let Err(diagnostic) = type_params {
+            // As in the struct path: the recovered diagnostic is pushed so
+            // the Invalid node's ErrorId names the real failure.
+            self.errors.push(diagnostic);
+            let error = ErrorId(self.errors.len() - 1);
+            return self.invalid_declaration(enum_token, error);
         }
         let type_params = type_params.unwrap();
 
@@ -1678,10 +1686,11 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     /// A declaration made unrecoverable by its parameter list: one Invalid
-    /// statement covering the skipped region.
-    fn invalid_declaration(&mut self, head: SpannedToken<'src>) -> Stmt {
+    /// statement covering the skipped region, carrying the `error` the
+    /// caller just recorded (pushing the diagnostic and passing its index
+    /// explicitly keeps the ErrorId pointing at the real message).
+    fn invalid_declaration(&mut self, head: SpannedToken<'src>, error: ErrorId) -> Stmt {
         let end = self.skip_to_statement_end(self.peek().span.end);
-        let error = ErrorId(self.errors.len().saturating_sub(1));
         Stmt {
             span: Span::new(head.span.start, end),
             kind: StmtKind::Invalid { error },

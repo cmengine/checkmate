@@ -45,8 +45,8 @@ mod tests {
     use crate::diagnostics::Diagnostic;
     use cme_core::Span;
     use cme_core::ast::{
-        BinaryOp, Block, CompoundOp, Expr, ExprKind, LValue, PrimitiveType, Stmt, StmtKind, Type,
-        UnaryOp,
+        BinaryOp, Block, CallArg, CompoundOp, ErrorId, Expr, ExprKind, InterpPart, LValue,
+        PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
     };
 
     fn expr(kind: ExprKind) -> Expr {
@@ -2670,6 +2670,143 @@ mod tests {
         let (stmts, errors) = parse_program_parts(source);
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(stmts.len(), 1);
+    }
+
+    /// Collects the ErrorId of every `Invalid` node in the tree —
+    /// statements and expressions, nested blocks included — so tests can
+    /// assert that each one resolves through `ParseOutcome::error`.
+    fn collect_error_ids(statements: &[Stmt], out: &mut Vec<ErrorId>) {
+        fn expr_ids(expr: &Expr, out: &mut Vec<ErrorId>) {
+            match &expr.kind {
+                ExprKind::Invalid { error } => out.push(*error),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    expr_ids(lhs, out);
+                    expr_ids(rhs, out);
+                }
+                ExprKind::Unary { expr, .. }
+                | ExprKind::Paren { expr }
+                | ExprKind::Try { expr } => expr_ids(expr, out),
+                ExprKind::Call { args, .. } | ExprKind::VariantCall { args, .. } => {
+                    for arg in args {
+                        match arg {
+                            CallArg::Positional(expr) | CallArg::Named { expr, .. } => {
+                                expr_ids(expr, out)
+                            }
+                        }
+                    }
+                }
+                ExprKind::PathCall { args, .. } => {
+                    for arg in args {
+                        match arg {
+                            CallArg::Positional(expr) | CallArg::Named { expr, .. } => {
+                                expr_ids(expr, out)
+                            }
+                        }
+                    }
+                }
+                ExprKind::ArrayLit { elements } => elements.iter().for_each(|e| expr_ids(e, out)),
+                ExprKind::MapLit { entries } => {
+                    for (key, value) in entries {
+                        expr_ids(key, out);
+                        expr_ids(value, out);
+                    }
+                }
+                ExprKind::Index { obj, index } => {
+                    expr_ids(obj, out);
+                    expr_ids(index, out);
+                }
+                ExprKind::Field { obj, .. } => expr_ids(obj, out),
+                ExprKind::Match { scrutinee, arms } => {
+                    expr_ids(scrutinee, out);
+                    for arm in arms {
+                        expr_ids(&arm.body, out);
+                    }
+                }
+                ExprKind::Interpolated { parts } => {
+                    for part in parts {
+                        if let InterpPart::Expr(expr) = part {
+                            expr_ids(expr, out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for statement in statements {
+            match &statement.kind {
+                StmtKind::Invalid { error } => out.push(*error),
+                StmtKind::VarDecl { expr, .. } => expr_ids(expr, out),
+                StmtKind::Assign { expr, .. } | StmtKind::CompoundAssign { expr, .. } => {
+                    expr_ids(expr, out)
+                }
+                StmtKind::Expression { expr } => expr_ids(expr, out),
+                StmtKind::Return { value: Some(expr) } => expr_ids(expr, out),
+                StmtKind::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } => {
+                    expr_ids(cond, out);
+                    collect_error_ids(&then_branch.stmts, out);
+                    if let Some(else_stmt) = else_branch {
+                        collect_error_ids(std::slice::from_ref(else_stmt), out);
+                    }
+                }
+                StmtKind::While { cond, body } => {
+                    expr_ids(cond, out);
+                    collect_error_ids(&body.stmts, out);
+                }
+                StmtKind::For { iterable, body, .. } => {
+                    expr_ids(iterable, out);
+                    collect_error_ids(&body.stmts, out);
+                }
+                StmtKind::Match { scrutinee, arms } => {
+                    expr_ids(scrutinee, out);
+                    for arm in arms {
+                        collect_error_ids(&arm.body.stmts, out);
+                    }
+                }
+                StmtKind::Block(block) => collect_error_ids(&block.stmts, out),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn struct_with_broken_type_params_keeps_its_diagnostic() {
+        // A broken `<` list invalidates the whole declaration, and the
+        // recovered diagnostic used to be DISCARDED: parse_source reported
+        // nothing for the struct, and the Invalid node carried a dangling
+        // ErrorId — out of range, a latent panic for any consumer that
+        // indexes instead of using ParseOutcome::error.
+        let outcome = crate::parse_source("struct Bad<\nint x = 1\n");
+        assert!(!outcome.is_clean());
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.message().starts_with("expected a type parameter name")),
+            "{:?}",
+            outcome.diagnostics
+        );
+        let mut ids = Vec::new();
+        collect_error_ids(&outcome.statements, &mut ids);
+        assert!(!ids.is_empty());
+        for id in ids {
+            assert!(outcome.error(id).is_some(), "dangling ErrorId({:?})", id);
+        }
+
+        // The enum path had the same shape.
+        let outcome = crate::parse_source("enum Bad<\nint x = 1\n");
+        assert!(!outcome.is_clean());
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.message().starts_with("expected a type parameter name")),
+            "{:?}",
+            outcome.diagnostics
+        );
     }
 
     #[test]

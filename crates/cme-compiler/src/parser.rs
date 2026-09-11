@@ -78,11 +78,15 @@ impl<'a, 'src> Parser<'a, 'src> {
     }
 
     /// Enters one level of recursion. Exceeding the nesting limit is a
-    /// clean parse error, never a stack overflow.
+    /// clean parse error, never a stack overflow. A failed entry restores
+    /// the counter: otherwise every remaining statement of a recoverable
+    /// parse would inherit the leaked depth and cascade "too deep" reports
+    /// long after the genuinely deep construct ended.
     fn enter(&mut self) -> Result<(), Diagnostic> {
         self.depth += 1;
         if self.depth > MAX_NESTING_DEPTH {
             let span = self.peek().span;
+            self.depth -= 1;
             return Err(Diagnostic::parse("expression nesting is too deep", span));
         }
         Ok(())
@@ -396,6 +400,72 @@ impl<'a, 'src> Parser<'a, 'src> {
                 break;
             }
             end = end.max(token.span.end);
+            self.advance();
+        }
+        end
+    }
+
+    /// Consumes the remaining arms of an `else if` chain structurally:
+    /// each arm is `[if] (condition)` skipped by paren balance and a body
+    /// skipped by brace balance (or one tolerant line when no block
+    /// follows). No recursion and no condition parsing — this is the
+    /// recovery path for chains cut by the nesting guard, so a chain of any
+    /// length collapses into one `Invalid` statement.
+    fn skip_deep_chain(&mut self, mut end: usize) -> usize {
+        loop {
+            if self.at(Token::LParen) {
+                end = self.skip_balanced(end, Token::LParen, Token::RParen);
+            }
+            let save = self.pos;
+            self.skip_newlines();
+            if self.at(Token::LBrace) {
+                end = self.skip_balanced(end, Token::LBrace, Token::RBrace);
+            } else {
+                self.pos = save;
+                end = self.skip_to_statement_end(end);
+            }
+            let save = self.pos;
+            self.skip_newlines();
+            if !self.at(Token::KwElse) {
+                self.pos = save;
+                break;
+            }
+            self.advance();
+            end = end.max(self.tokens[self.pos - 1].span.end);
+            if !self.at(Token::KwIf) {
+                // A final `else` arm: the loop head consumes its body, then
+                // the chain is over.
+                continue;
+            }
+            self.advance();
+            end = end.max(self.tokens[self.pos - 1].span.end);
+        }
+        end
+    }
+
+    /// Consumes a balanced `open … close` token region (nesting counted),
+    /// leaving the cursor just past the matching `close` (or at `Eof`).
+    /// Token-level: string and comment contents are inside single tokens,
+    /// so embedded braces or parentheses cannot confuse the count.
+    fn skip_balanced(&mut self, mut end: usize, open: Token<'_>, close: Token<'_>) -> usize {
+        let mut depth = 0usize;
+        loop {
+            let token = self.peek().token;
+            if token == Token::Eof {
+                break;
+            }
+            if token == open {
+                depth += 1;
+            } else if token == close {
+                depth -= 1;
+                end = end.max(self.peek().span.end);
+                self.advance();
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            end = end.max(self.peek().span.end);
             self.advance();
         }
         end
@@ -926,7 +996,30 @@ impl<'a, 'src> Parser<'a, 'src> {
         let (cond, cond_ok) = self.parse_condition_parens();
         if !cond_ok {
             let error = ErrorId(self.errors.len().saturating_sub(1));
-            let end = self.recover_to_next_statement(self.peek().span.end);
+            let mut end = self.recover_to_next_statement(self.peek().span.end);
+            // A failed arm may be part of an `else if` chain: every further
+            // arm still belongs to this one statement, so the tail joins the
+            // same Invalid instead of cascading one orphan-`else` diagnostic
+            // per remaining arm. The failed arm's own body (a block that
+            // already lost its header to the line recovery) is left to the
+            // ordinary statement parser; the structural consumer below
+            // starts at the next `else`.
+            let save = self.pos;
+            self.skip_newlines();
+            if self.at(Token::KwElse) {
+                self.advance();
+                end = end.max(self.tokens[self.pos - 1].span.end);
+                if self.at(Token::KwIf) {
+                    self.advance();
+                    end = end.max(self.tokens[self.pos - 1].span.end);
+                }
+                let end = self.skip_deep_chain(end);
+                return Stmt {
+                    span: Span::new(if_token.span.start, end),
+                    kind: StmtKind::Invalid { error },
+                };
+            }
+            self.pos = save;
             return Stmt {
                 span: Span::new(if_token.span.start, end),
                 kind: StmtKind::Invalid { error },
@@ -948,18 +1041,105 @@ impl<'a, 'src> Parser<'a, 'src> {
         let open_brace = self.advance().span.start;
         let then_branch = self.parse_block_body(open_brace);
 
-        let else_branch = if self.at(Token::KwElse) {
+        // The `else if` chain is collected ITERATIVELY and folded into a
+        // right-nested else_branch from the tail: chain length costs no
+        // parser stack, so a same-line chain of any length parses without
+        // overflowing (§7.5 — the parser never panics; boom.cm contract).
+        // The arm count is still capped at MAX_NESTING_DEPTH, because the
+        // validator, checker, and interpreter recurse over the finished
+        // tree and must meet the same bound block nesting obeys; a longer
+        // chain is cut with one clean diagnostic covering the skipped tail.
+        //
+        // One collected arm: `else if (cond) { … }`.
+        struct ChainArm {
+            else_start: usize,
+            cond: Expr,
+            block: Block,
+        }
+        // The seed of the fold: a final `else { … }` block, an Invalid arm,
+        // or nothing.
+        let mut seed: Option<Box<Stmt>> = None;
+        let mut seed_end = 0usize;
+        let mut arms: Vec<ChainArm> = Vec::new();
+        loop {
+            if !self.at(Token::KwElse) {
+                break;
+            }
             let else_token = self.advance();
             if self.at(Token::KwIf) {
                 let else_if = self.advance();
-                Some(Box::new(self.parse_if_statement(else_if)))
+                if arms.len() >= MAX_NESTING_DEPTH {
+                    // The cut arm starts here at its condition, so the rest
+                    // of the chain can be consumed structurally: one clean
+                    // diagnostic covers every remaining arm.
+                    let end = self.skip_deep_chain(else_if.span.end);
+                    let error = self.record("statement nesting is too deep", else_if.span);
+                    seed = Some(Box::new(Stmt {
+                        span: Span::new(else_token.span.start, end),
+                        kind: StmtKind::Invalid { error },
+                    }));
+                    seed_end = end;
+                    break;
+                }
+                let (arm_cond, arm_cond_ok) = self.parse_condition_parens();
+                if !arm_cond_ok {
+                    let error = ErrorId(self.errors.len().saturating_sub(1));
+                    let mut end = self.recover_to_next_statement(self.peek().span.end);
+                    let save = self.pos;
+                    self.skip_newlines();
+                    if self.at(Token::KwElse) {
+                        self.advance();
+                        end = end.max(self.tokens[self.pos - 1].span.end);
+                        if self.at(Token::KwIf) {
+                            self.advance();
+                            end = end.max(self.tokens[self.pos - 1].span.end);
+                        }
+                        let end = self.skip_deep_chain(end);
+                        seed = Some(Box::new(Stmt {
+                            span: Span::new(else_token.span.start, end),
+                            kind: StmtKind::Invalid { error },
+                        }));
+                        seed_end = end;
+                        break;
+                    }
+                    self.pos = save;
+                    seed = Some(Box::new(Stmt {
+                        span: Span::new(else_token.span.start, end),
+                        kind: StmtKind::Invalid { error },
+                    }));
+                    seed_end = end;
+                    break;
+                }
+                if !self.at(Token::LBrace) {
+                    let other = *self.peek();
+                    let end = self.skip_to_statement_end(other.span.end);
+                    let error = self.record(
+                        format!("expected `{{`, but found {}", other.token.describe()),
+                        other.span,
+                    );
+                    seed = Some(Box::new(Stmt {
+                        span: Span::new(else_token.span.start, end),
+                        kind: StmtKind::Invalid { error },
+                    }));
+                    seed_end = end;
+                    break;
+                }
+                let arm_open = self.advance().span.start;
+                let block = self.parse_block_body(arm_open);
+                arms.push(ChainArm {
+                    else_start: else_token.span.start,
+                    cond: arm_cond,
+                    block,
+                });
             } else if self.at(Token::LBrace) {
-                let open_brace = self.advance().span.start;
-                let block = self.parse_block_body(open_brace);
+                let else_open = self.advance().span.start;
+                let block = self.parse_block_body(else_open);
                 // The wrapping statement covers the `else` keyword through
                 // the block's closing brace.
                 let span = Span::new(else_token.span.start, block.span.end);
-                Some(Box::new(Stmt::new(StmtKind::Block(block), span)))
+                seed = Some(Box::new(Stmt::new(StmtKind::Block(block), span)));
+                seed_end = span.end;
+                break;
             } else {
                 let other = *self.peek();
                 let end = self.skip_to_statement_end(other.span.end);
@@ -970,14 +1150,32 @@ impl<'a, 'src> Parser<'a, 'src> {
                     ),
                     other.span,
                 );
-                Some(Box::new(Stmt {
+                seed = Some(Box::new(Stmt {
                     span: Span::new(other.span.start, end),
                     kind: StmtKind::Invalid { error },
-                }))
+                }));
+                seed_end = end;
+                break;
             }
-        } else {
-            None
-        };
+        }
+
+        // Fold from the tail: the innermost arm's else_branch is the seed,
+        // and every arm outward wraps the chain built so far.
+        let mut else_branch = seed;
+        let mut tail_end = seed_end;
+        for arm in arms.into_iter().rev() {
+            let block_end = arm.block.span.end;
+            let span = Span::new(arm.else_start, block_end.max(tail_end));
+            else_branch = Some(Box::new(Stmt::new(
+                StmtKind::If {
+                    cond: arm.cond,
+                    then_branch: arm.block,
+                    else_branch,
+                },
+                span,
+            )));
+            tail_end = span.end;
+        }
 
         let end = self.tokens[self.pos - 1].span.end;
         Stmt::new(

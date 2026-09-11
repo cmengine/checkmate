@@ -2423,6 +2423,46 @@ mod tests {
     }
 
     #[test]
+    fn deep_else_if_chain_fails_with_a_clean_diagnostic() {
+        // A same-line `else if` chain used to recurse per arm without going
+        // through `parse_statement`, so 10,000 arms overflowed the stack
+        // and aborted the process (§7.5). The chain is now collected
+        // iteratively (no recursion), and the arm cap cuts it with ONE
+        // clean diagnostic covering the skipped remainder — never the
+        // cascade of orphan-`else` errors, and never a crash.
+        let arms = 10_000;
+        let mut source = String::from("int f() {\nint x = 0\nif (x == 1) {\nx += 1\n}");
+        for _ in 0..arms {
+            source.push_str(" else if (x == 1) {\nx += 1\n}");
+        }
+        source.push_str("\nreturn x\n}\n");
+        let (_, errors) = parse_program_parts(&source);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].to_string(), "statement nesting is too deep");
+
+        // The same holds for a chain whose arms span multiple lines.
+        let mut source = String::from("int f() {\nint x = 0\nif (x == 1) {");
+        for _ in 0..arms {
+            source.push_str("\nx += 1\n} else if (x == 1) {");
+        }
+        source.push_str("\nx += 1\n}\nreturn x\n}\n");
+        let (_, errors) = parse_program_parts(&source);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].to_string(), "statement nesting is too deep");
+
+        // A long but in-budget chain still parses cleanly, so the cap does
+        // not misfire on legitimate generated code.
+        let mut source = String::from("int f() {\nint x = 0\nif (x == 1) {\nx += 1\n}");
+        for _ in 0..100 {
+            source.push_str(" else if (x == 1) {\nx += 1\n}");
+        }
+        source.push_str("\nreturn x\n}\n");
+        let (stmts, errors) = parse_program_parts(&source);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
     fn oversized_operator_chains_fail_cleanly() {
         // A 40k-term addition chain is a 40k-deep left tree for every
         // downstream recursive pass; the parser bounds it per statement.

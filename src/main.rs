@@ -7,11 +7,16 @@ use cme_core::ast::StmtKind;
 #[cfg(feature = "cli")]
 use cme_interp::{InterpError, Interpreter, Value};
 #[cfg(feature = "cli")]
+use std::path::{Path, PathBuf};
+#[cfg(feature = "cli")]
 use std::process::ExitCode;
 #[cfg(feature = "cli")]
 const USAGE: &str = "Usage: cme <lex|ast|check|run|expand> <file.cm> [--provenance]\
+     \n       cme <check|ast|run> <mod_dir | path/to/mod.toml>\
      \n  (--provenance is an `expand` option: it annotates each root magic site \
-       with `// @ magic(name) src:line:col)`";
+       with `// @ magic(name) src:line:col`)\
+     \n  a mod directory holds a mod.toml and a src/ tree (WHITEPAPER §10); \
+       lex and expand stay single-file commands";
 
 #[cfg(feature = "cli")]
 enum CliError {
@@ -19,6 +24,10 @@ enum CliError {
     Io(String),
     Compiler(Vec<Diagnostic>, String),
     Runtime(InterpError, String),
+    /// Mod-build failures, carried as fully rendered `file:line:col`
+    /// messages (each diagnostic is re-anchored to its own module before
+    /// reporting, so no raw virtual-text spans leak out).
+    Mod(Vec<String>),
 }
 
 #[cfg(feature = "cli")]
@@ -37,6 +46,12 @@ fn run() -> Result<(), CliError> {
             )));
         }
     };
+
+    // A directory (or a path ending in mod.toml) selects mod mode: the
+    // unit of compilation is the whole §10 mod tree.
+    if let Some(mod_root) = resolve_mod_root(path) {
+        return mod_command(command, &mod_root.root, &mod_root.display);
+    }
 
     let source = std::fs::read_to_string(path)
         .map_err(|error| CliError::Io(format!("failed to read {path}: {error}")))?;
@@ -60,7 +75,10 @@ fn run() -> Result<(), CliError> {
         }
         "ast" => {
             let outcome = cme_compiler::parse_source(&source);
-            let errors = outcome.diagnostics;
+            let mut errors = outcome.diagnostics;
+            errors.extend(cme_compiler::mods::standalone_import_diagnostics(
+                &outcome.statements,
+            ));
             let ast = outcome.statements;
 
             println!("{ast:#?}");
@@ -69,6 +87,9 @@ fn run() -> Result<(), CliError> {
         "check" => {
             let outcome = cme_compiler::parse_source(&source);
             let mut errors = outcome.diagnostics;
+            errors.extend(cme_compiler::mods::standalone_import_diagnostics(
+                &outcome.statements,
+            ));
             errors.extend(cme_compiler::check::check(&outcome.statements));
             render_diagnostics(errors, &source)
         }
@@ -77,6 +98,252 @@ fn run() -> Result<(), CliError> {
         _ => Err(CliError::Usage(format!(
             "unknown command: {command}\n{USAGE}"
         ))),
+    }
+}
+
+/// The resolved root of a mod: where to load from and how to prefix module
+/// paths in diagnostics (`my_mod/src/main.cm:3:1`).
+#[cfg(feature = "cli")]
+struct ModRoot {
+    root: PathBuf,
+    display: String,
+}
+
+/// A path argument selects mod mode when it is a directory (a mod tree) or
+/// a file literally named `mod.toml` (the manifest itself). Everything
+/// else keeps the single-file workflow.
+#[cfg(feature = "cli")]
+fn resolve_mod_root(path: &str) -> Option<ModRoot> {
+    let candidate = Path::new(path);
+    if candidate.is_dir() {
+        let display = path.trim_end_matches('/');
+        return Some(ModRoot {
+            root: candidate.to_path_buf(),
+            display: if display.is_empty() {
+                ".".to_string()
+            } else {
+                display.to_string()
+            },
+        });
+    }
+    if candidate.is_file() && candidate.file_name().is_some_and(|name| name == "mod.toml") {
+        let parent = candidate.parent().unwrap_or(Path::new(""));
+        let (root, display) = if parent.as_os_str().is_empty() {
+            (PathBuf::from("."), ".".to_string())
+        } else {
+            (parent.to_path_buf(), parent.display().to_string())
+        };
+        return Some(ModRoot { root, display });
+    }
+    None
+}
+
+/// The mod pipeline for `check|ast|run` (§10): load the mod, expand each
+/// module's megaprograms, assemble the virtual program, check it, and —
+/// for `run` — invoke `main`. Every diagnostic is re-anchored to the
+/// module it came from before reporting.
+#[cfg(feature = "cli")]
+fn mod_command(command: &str, mod_root: &Path, display_root: &str) -> Result<(), CliError> {
+    if matches!(command, "lex" | "expand") {
+        return Err(CliError::Usage(format!(
+            "`{command}` works on a single .cm file; a mod directory accepts \
+             check, ast, and run\n{USAGE}"
+        )));
+    }
+
+    let loaded = cme_compiler::mods::load_mod(mod_root);
+    if !loaded.issues.is_empty() {
+        return Err(CliError::Mod(
+            loaded
+                .issues
+                .iter()
+                .map(|issue| render_mod_issue(issue, display_root))
+                .collect(),
+        ));
+    }
+
+    let mut modules = loaded.modules;
+    // Megaprogram expansion stays per file (magics are module-scope
+    // declarations resolved before linking); expansion diagnostics render
+    // against the module's ORIGINAL text, like single-file mode.
+    for index in 0..modules.len() {
+        if !mentions_megaprogram(&modules[index].source) {
+            continue;
+        }
+        let source = modules[index].source.clone();
+        let outcome = cme_compiler::mega::expand::expand_source(&source).map_err(|errors| {
+            CliError::Mod(render_module_diagnostics(
+                &errors,
+                index,
+                &modules,
+                &source,
+                display_root,
+            ))
+        })?;
+        modules[index].source = outcome.expanded;
+    }
+
+    let program = cme_compiler::mods::assemble(&modules);
+    let mut failures = render_assembled_diagnostics(&program, &modules, display_root);
+    let check_errors = cme_compiler::check::check(&program.statements);
+    if !check_errors.is_empty() {
+        // Checker diagnostics live in virtual-text coordinates too: run
+        // them through the same re-anchoring.
+        failures.extend(render_located_diagnostics(
+            &check_errors,
+            &program.ranges,
+            &modules,
+            display_root,
+        ));
+    }
+    if !failures.is_empty() {
+        return Err(CliError::Mod(failures));
+    }
+
+    match command {
+        // The compile gate above is the whole `check` command: a clean mod
+        // prints nothing and exits successfully.
+        "check" => Ok(()),
+        "ast" => {
+            println!("{:#?}", program.statements);
+            Ok(())
+        }
+        "run" => {
+            // §2.1: the host picks the entry point; `main` stays the CLI
+            // convention, and any module may provide it.
+            let has_main = program.statements.iter().any(
+                |stmt| matches!(&stmt.kind, StmtKind::FuncDecl { name, .. } if name == "main"),
+            );
+            if !has_main {
+                return Err(CliError::Usage(format!(
+                    "no `main` function to run in mod {display_root}"
+                )));
+            }
+            let interpreter = Interpreter::new(&program.statements);
+            match interpreter.invoke("main", &[]) {
+                Ok(value) => {
+                    if !matches!(value, Value::Void) {
+                        println!("{value}");
+                    }
+                    Ok(())
+                }
+                Err(error) => Err(CliError::Mod(vec![render_runtime_error(
+                    &error,
+                    &program,
+                    &modules,
+                    display_root,
+                )])),
+            }
+        }
+        _ => unreachable!("lex/expand are rejected above"),
+    }
+}
+
+/// Renders a mod-level issue (manifest or structure defect).
+#[cfg(feature = "cli")]
+fn render_mod_issue(issue: &cme_compiler::mods::ModIssue, display_root: &str) -> String {
+    let location = match (&issue.file, issue.line) {
+        (Some(file), Some(line)) => format!("{display_root}/{file}:{line}: "),
+        (Some(file), None) => format!("{display_root}/{file}: "),
+        (None, _) => String::new(),
+    };
+    format!("{location}{}", issue.message)
+}
+
+/// Renders expansion diagnostics against their module's original text.
+#[cfg(feature = "cli")]
+fn render_module_diagnostics(
+    diagnostics: &[Diagnostic],
+    module_index: usize,
+    modules: &[cme_compiler::mods::LoadedModule],
+    original_source: &str,
+    display_root: &str,
+) -> Vec<String> {
+    let module = &modules[module_index];
+    let path = format!("{display_root}/{}", module.display_path);
+    let layout = SourceLayout::new(original_source);
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            render_message_indexed(
+                diagnostic.message(),
+                diagnostic.span(),
+                original_source,
+                &path,
+                &layout,
+            )
+        })
+        .collect()
+}
+
+/// Renders assembled-program diagnostics (parse, import resolution, and
+/// checker output), each re-anchored from virtual-text coordinates to its
+/// owning module's own text.
+#[cfg(feature = "cli")]
+fn render_located_diagnostics(
+    diagnostics: &[Diagnostic],
+    ranges: &[cme_compiler::mods::ModuleRange],
+    modules: &[cme_compiler::mods::LoadedModule],
+    display_root: &str,
+) -> Vec<String> {
+    let layouts: Vec<SourceLayout> = modules
+        .iter()
+        .map(|module| SourceLayout::new(&module.source))
+        .collect();
+    diagnostics
+        .iter()
+        .filter_map(|diagnostic| {
+            let (owner, local) = cme_compiler::mods::attribute_span(ranges, diagnostic.span())?;
+            let index = ranges.iter().position(|range| std::ptr::eq(range, owner))?;
+            let path = format!("{display_root}/{}", owner.display_path);
+            Some(render_message_indexed(
+                diagnostic.message(),
+                local,
+                &modules[index].source,
+                &path,
+                &layouts[index],
+            ))
+        })
+        .collect()
+}
+
+/// `render_located_diagnostics` specialized to an assembled program.
+#[cfg(feature = "cli")]
+fn render_assembled_diagnostics(
+    program: &cme_compiler::mods::AssembledProgram,
+    modules: &[cme_compiler::mods::LoadedModule],
+    display_root: &str,
+) -> Vec<String> {
+    render_located_diagnostics(&program.diagnostics, &program.ranges, modules, display_root)
+}
+
+/// Renders a runtime error against the module that was executing when it
+/// happened.
+#[cfg(feature = "cli")]
+fn render_runtime_error(
+    error: &InterpError,
+    program: &cme_compiler::mods::AssembledProgram,
+    modules: &[cme_compiler::mods::LoadedModule],
+    display_root: &str,
+) -> String {
+    match cme_compiler::mods::attribute_span(&program.ranges, error.span) {
+        Some((owner, local)) => {
+            let index = program
+                .ranges
+                .iter()
+                .position(|range| std::ptr::eq(range, owner))
+                .unwrap_or(0);
+            let path = format!("{display_root}/{}", owner.display_path);
+            let layout = SourceLayout::new(&modules[index].source);
+            render_message_indexed(
+                &error.message,
+                local,
+                &modules[index].source,
+                &path,
+                &layout,
+            )
+        }
+        None => error.message.clone(),
     }
 }
 
@@ -163,6 +430,9 @@ fn expanded_path_for(path: &str) -> String {
 fn run_program(source: &str, path: &str) -> Result<(), CliError> {
     let outcome = cme_compiler::parse_source(source);
     let mut errors = outcome.diagnostics;
+    errors.extend(cme_compiler::mods::standalone_import_diagnostics(
+        &outcome.statements,
+    ));
     errors.extend(cme_compiler::check::check(&outcome.statements));
     // Never run broken code: refuse before invoking anything.
     render_diagnostics(errors, source)?;
@@ -340,6 +610,12 @@ fn main() -> ExitCode {
         Err(CliError::Runtime(error, source)) => {
             let rendered = render_message_at(&error.message, error.span, &source, &source_path);
             eprintln!("error: {rendered}");
+            ExitCode::FAILURE
+        }
+        Err(CliError::Mod(lines)) => {
+            for line in lines {
+                eprintln!("error: {line}");
+            }
             ExitCode::FAILURE
         }
     }

@@ -818,8 +818,11 @@ impl engine.gamemode {
         )
     }
 
-    void OnTick(GameState state, float deltaTime) {
+    GameState OnTick(GameState state, float deltaTime) {
         state.score += 1
+        // Value semantics (§2.13): the mutation is observable only through
+        // the returned value, so the caller reassigns.
+        return state
     }
 }
 
@@ -851,8 +854,8 @@ int checkImpls() {
     failures += expect(state.score == 100)
     failures += expect(state.active == true)
 
-    engine.gamemode.OnTick(state, 0.016)
-    failures += expect(state.score == 100)
+    state = engine.gamemode.OnTick(state, 0.016)
+    failures += expect(state.score == 101)
 
     return failures
 }

@@ -2153,8 +2153,12 @@ mod tests {
 
     #[test]
     fn host_style_path_impl_members_execute() {
-        let source = "struct GameConfig {\n    int startingScore\n}\nstruct GameState {\n    int score\n}\nimpl engine.gamemode {\n    GameState InitGame(GameConfig config) {\n        return GameState(score: config.startingScore)\n    }\n    void OnTick(GameState state) {\n        state.score += 1\n    }\n}\nint main() {\nGameConfig config = GameConfig(startingScore: 100)\nGameState state = engine.gamemode.InitGame(config)\nengine.gamemode.OnTick(state)\nreturn state.score\n}\n";
-        assert_eq!(ok_full(source), Value::Int(100));
+        // §10.4 + §2.13: a member that updates its state parameter returns
+        // the updated value (a void member's mutation would be silently
+        // lost — the checker now errors on exactly that shape), and the
+        // caller reassigns to observe it.
+        let source = "struct GameConfig {\n    int startingScore\n}\nstruct GameState {\n    int score\n}\nimpl engine.gamemode {\n    GameState InitGame(GameConfig config) {\n        return GameState(score: config.startingScore)\n    }\n    GameState OnTick(GameState state) {\n        state.score += 1\n        return state\n    }\n}\nint main() {\nGameConfig config = GameConfig(startingScore: 100)\nGameState state = engine.gamemode.InitGame(config)\nstate = engine.gamemode.OnTick(state)\nreturn state.score\n}\n";
+        assert_eq!(ok_full(source), Value::Int(101));
     }
 
     #[test]

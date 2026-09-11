@@ -624,6 +624,179 @@ impl Checker {
             };
             let display = format!("{joined}.{name}");
             self.check_function_body(&display, &sig, body);
+            self.check_impl_member_lost_mutations(name, &sig, body);
+        }
+    }
+
+    /// The §10.4 TODO the whitepaper itself carries: an impl member body
+    /// that mutates a value-copied parameter and drops the change —
+    /// "`cme` has to error here". The host caller's state silently does
+    /// not update (§2.13 value semantics), and unlike a script-internal
+    /// call site the loss is invisible at every caller.
+    ///
+    /// Scope, deliberately precise: the member returns `void` — nothing a
+    /// void member computes can escape, so ANY mutation of a structured
+    /// parameter (struct, enum, array, map) is definitionally lost. A
+    /// non-void member's mutation may feed its result instead
+    /// (`c.value -= 1; return c.value + counter.sumTo(c)` reads the local
+    /// clone deliberately), and primitives plus `str` have no interior to
+    /// mutate — a lost rebinding there is an ordinary dead store, not
+    /// silent state loss. The conservative cut keeps the diagnostic free
+    /// of false positives while pinning the exact shape the whitepaper
+    /// annotates.
+    fn check_impl_member_lost_mutations(&mut self, member: &str, sig: &FnSig, body: &Block) {
+        if sig.return_ty != Ty::Void {
+            return;
+        }
+        let reportable: Vec<&str> = sig
+            .params
+            .iter()
+            .filter(|(_, ty)| {
+                matches!(
+                    ty,
+                    Ty::Struct(_, _) | Ty::Enum(_, _) | Ty::Array(_) | Ty::Map(_, _)
+                )
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if reportable.is_empty() {
+            return;
+        }
+
+        let mut returned: Vec<String> = Vec::new();
+        let mut mutations: Vec<(String, Span)> = Vec::new();
+        Self::collect_impl_member_mutation_facts(
+            &body.stmts,
+            &reportable,
+            &mut returned,
+            &mut mutations,
+        );
+
+        for (name, span) in mutations {
+            if !returned.contains(&name) {
+                self.report(
+                    format!(
+                        "impl member `{member}` mutates parameter `{name}`, but the change is \
+                         lost when the call returns (§2.13 value semantics); return the updated \
+                         state instead of mutating in place"
+                    ),
+                    span,
+                );
+            }
+        }
+    }
+
+    /// One recursive walk collecting both facts the lost-mutation rule
+    /// needs: the first mutation site per reportable parameter root, and
+    /// every reportable parameter the body returns bare (or wrapped).
+    fn collect_impl_member_mutation_facts(
+        statements: &[Stmt],
+        reportable: &[&str],
+        returned: &mut Vec<String>,
+        mutations: &mut Vec<(String, Span)>,
+    ) {
+        for statement in statements {
+            match &statement.kind {
+                StmtKind::Assign { target, .. } | StmtKind::CompoundAssign { target, .. } => {
+                    if let Some(root) = Self::lvalue_root(target)
+                        && reportable.contains(&root)
+                        && !mutations.iter().any(|(name, _)| name == root)
+                    {
+                        mutations.push((root.to_string(), statement.span));
+                    }
+                }
+                StmtKind::Return { value: Some(expr) } => {
+                    if let Some(name) = Self::returned_param(expr, reportable)
+                        && !returned.iter().any(|n| n == name)
+                    {
+                        returned.push(name.to_string());
+                    }
+                }
+                StmtKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::collect_impl_member_mutation_facts(
+                        &then_branch.stmts,
+                        reportable,
+                        returned,
+                        mutations,
+                    );
+                    if let Some(else_stmt) = else_branch {
+                        Self::collect_impl_member_mutation_facts(
+                            std::slice::from_ref(else_stmt),
+                            reportable,
+                            returned,
+                            mutations,
+                        );
+                    }
+                }
+                StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
+                    Self::collect_impl_member_mutation_facts(
+                        &body.stmts,
+                        reportable,
+                        returned,
+                        mutations,
+                    );
+                }
+                StmtKind::Match { arms, .. } => {
+                    for arm in arms {
+                        Self::collect_impl_member_mutation_facts(
+                            &arm.body.stmts,
+                            reportable,
+                            returned,
+                            mutations,
+                        );
+                    }
+                }
+                StmtKind::Block(block) => {
+                    Self::collect_impl_member_mutation_facts(
+                        &block.stmts,
+                        reportable,
+                        returned,
+                        mutations,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The root name of an assignment target chain (`state.score[0]` →
+    /// `state`).
+    fn lvalue_root(lvalue: &LValue) -> Option<&str> {
+        match lvalue {
+            LValue::Var { name } => Some(name),
+            LValue::Field { base, .. } | LValue::Index { base, .. } => Self::lvalue_root(base),
+        }
+    }
+
+    /// Whether a returned expression hands a reportable parameter back to
+    /// the caller: a bare `return state`, or the parameter as the sole
+    /// payload of a constructor call (`return Ok(state)`,
+    /// `return Some(state)`).
+    fn returned_param<'a>(expr: &'a Expr, reportable: &[&'a str]) -> Option<&'a str> {
+        match &expr.kind {
+            ExprKind::Ident(name) if reportable.contains(&name.as_str()) => Some(name.as_str()),
+            // `Ok(state)` / `Err(state)` / `Some(state)`: the built-in
+            // constructors parse as plain calls (the checker disambiguates
+            // them from user functions), and they carry the parameter back
+            // to the caller just like a bare return.
+            ExprKind::Call { name, args }
+                if BUILTIN_CONSTRUCTORS.contains(&name.as_str()) && args.len() == 1 =>
+            {
+                match &args[0] {
+                    CallArg::Positional(value) => match &value.kind {
+                        ExprKind::Ident(pname) if reportable.contains(&pname.as_str()) => {
+                            Some(pname.as_str())
+                        }
+                        _ => None,
+                    },
+                    CallArg::Named { .. } => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -3522,6 +3695,36 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    fn impl_member_mutating_a_parameter_without_returning_it_is_reported() {
+        // §10.4's own annotated TODO: `OnTick` mutates `state.score` and
+        // drops the change — "cme has to error here". Under §2.13 value
+        // semantics the host caller's state never updates, and the loss is
+        // invisible at the call site.
+        let source = "struct GameState {\n    int score\n}\nimpl engine.gamemode {\n    void OnTick(GameState state, float deltaTime) {\n        state.score = state.score + 1\n        // Changes lost here because nothing is returned\n    }\n}\n";
+        assert_error(
+            source,
+            "impl member `OnTick` mutates parameter `state`, but the change is lost when the call returns",
+            span_of(source, "state.score = state.score + 1"),
+        );
+    }
+
+    #[test]
+    fn impl_member_returning_the_mutated_parameter_is_clean() {
+        // §2.13's reassignment idiom: the mutation is only observable when
+        // the member hands the parameter back. Wrapped forms count too
+        // (result-returning interface members), and mutating a primitive
+        // parameter is an ordinary dead store, not silent state loss.
+        let source = "struct GameState {\n    int score\n}\nimpl engine.gamemode {\n    GameState OnTick(GameState state, float deltaTime) {\n        if (deltaTime > 1.0) {\n            state.score = state.score + 1\n        }\n        return state\n    }\n}\n";
+        assert!(check_full(source).is_empty());
+
+        let wrapped = "struct GameState {\n    int score\n}\nimpl engine.gamemode {\n    result<GameState, str> OnTick(GameState state, float deltaTime) {\n        state.score += 1\n        return Ok(state)\n    }\n}\n";
+        assert!(check_full(wrapped).is_empty());
+
+        let primitive = "impl engine.gamemode {\n    void Tick(float deltaTime) {\n        deltaTime = deltaTime * 2.0\n    }\n}\n";
+        assert!(check_full(primitive).is_empty());
+    }
+
+    #[test]
     fn impl_members_on_a_struct_check_clean() {
         let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        return c.value\n    }\n}\nint main() {\ncounter c = counter(value: 41)\nreturn counter.peek(c)\n}\n";
         assert!(check_full(source).is_empty());
@@ -3611,7 +3814,10 @@ mod tests {
 
     #[test]
     fn impl_member_bodies_are_checked_like_function_bodies() {
-        // Missing return inside a member, under the qualified name.
+        // Missing return inside a member, under the qualified name. (The
+        // member is non-void, so a structured-parameter mutation here may
+        // feed its result — the §10.4 lost-mutation diagnostic scopes
+        // itself to void members, where nothing can escape.)
         let source = "struct counter {\n    int value\n}\nimpl counter {\n    int peek(counter c) {\n        c.value += 1\n    }\n}\n";
         assert_error(
             source,

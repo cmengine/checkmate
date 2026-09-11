@@ -188,8 +188,15 @@ pub fn string_len(source: &str, pos: usize, profile: &LexProfile) -> Option<usiz
                 match next {
                     // An escaped character pairs with the backslash; an
                     // escaped line break still breaks a single-line string.
+                    // The pair advances past BOTH characters and skips the
+                    // ordinary single-char advance below — falling through
+                    // skipped one byte too many, so `"\\"` never reached its
+                    // closing quote and the scanner read a string the lexer
+                    // accepts as unterminated (caught by the differential
+                    // lexer test below).
                     Some(escaped) if escaped != '\n' && escaped != '\r' => {
                         cursor += 1 + escaped.len_utf8();
+                        continue;
                     }
                     _ => return None,
                 }
@@ -654,4 +661,154 @@ fn skip_rule_declaration(text: &str, cursor: &mut usize, profile: &LexProfile) {
 fn offset_span(span: Span, offset: usize) -> Span {
     let start = (span.start + offset).min(span.end);
     Span::new(start, start)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::{SpannedToken, Token, lex_with_errors};
+
+    /// S3 differential pin: the mega subsystem's Checkmate-level scanner
+    /// (`checkmate_scan_profile` + `comment_len`/`string_len`) and the main
+    /// lexer (`lexer.rs`) each define what a Checkmate comment/string IS.
+    /// For LEXICALLY VALID source they must agree exactly — every string
+    /// the scanner finds is exactly one StrLit token, every comment the
+    /// scanner finds is token-transparent — otherwise the scanner balances
+    /// regions differently than the text will later lex. The walk below
+    /// runs both over the same corpus and asserts identical extents, so
+    /// any future change to one side's rules that the other does not
+    /// mirror fails here immediately.
+    ///
+    /// Deliberate divergence, documented rather than pinned: for INVALID
+    /// escape pairs the scanner pairs any backslash with any non-newline
+    /// character (balancing robustness — a rejected pair must not make the
+    /// scanner treat the closing quote as ordinary text and swallow code),
+    /// while the lexer fails the token and its recovery resyncs. Broken
+    /// source produces errors on both paths; only valid source must agree.
+    #[test]
+    fn scanner_and_lexer_agree_on_string_and_comment_extents() {
+        let corpus: Vec<String> = vec![
+            "int x = 5".into(),
+            "// line comment\nint y = 6".into(),
+            "/* block */ int z = 7".into(),
+            "/***/ int w = 8".into(),
+            "str s = \"hello world\"".into(),
+            "str s = \"a // not a comment\"".into(),
+            "str s = \"a /* not */ comment\"".into(),
+            "str t = \"quote \\\" inside\"".into(),
+            "str t = \"escapes \\n\\t\\\\ ok\"".into(),
+            "// it's \"quoted\" in a comment\nint a = 1".into(),
+            "/* braces { } parens ( ) */ int b = 2".into(),
+            "str c = \"{ } magic() { } braces\"".into(),
+            "int d = 1\n/* never closed and the rest is comment".into(),
+            "a // trailing comment with \"quotes\" and /* markers */\nb".into(),
+            "/* multi\nline\ncomment */ int e = 3".into(),
+        ];
+        let profile = checkmate_scan_profile();
+
+        for source in &corpus {
+            // Newline tokens are layout: the scanner sees them as skip-set
+            // characters, so the walk treats them the same way.
+            let (all_tokens, _) = lex_with_errors(source);
+            let tokens: Vec<SpannedToken> = all_tokens
+                .into_iter()
+                .filter(|t| !matches!(t.token, Token::Newline))
+                .collect();
+            let starts: Vec<usize> = tokens.iter().map(|t| t.span.start).collect();
+            let str_spans: Vec<(usize, usize)> = tokens
+                .iter()
+                .filter_map(|t| match t.token {
+                    Token::StrLit(_) => Some((t.span.start, t.span.end)),
+                    _ => None,
+                })
+                .collect();
+            let mut token_index = 0usize;
+            let mut pos = 0usize;
+            let bytes = source.as_bytes();
+            let mut string_extents = 0usize;
+            let mut comment_extents = 0usize;
+            loop {
+                // Scanner whitespace == lexer whitespace (` \t\r\n`; the
+                // corpus avoids \f, which only the lexer skips).
+                while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\r' | b'\n') {
+                    pos += 1;
+                }
+                if pos >= bytes.len() {
+                    break;
+                }
+                if let Some(len) = comment_len(source, pos, &profile) {
+                    // Token transparency: nothing lexes inside a comment.
+                    let end = pos + len;
+                    for &start in &starts {
+                        assert!(
+                            start <= pos || start >= end,
+                            "{source:?}: token starts at {start} inside comment [{pos}, {end})"
+                        );
+                    }
+                    comment_extents += 1;
+                    pos = end;
+                    continue;
+                }
+                if let Some(len) = string_len(source, pos, &profile) {
+                    let end = pos + len;
+                    // The scanner's string must be exactly one StrLit token.
+                    assert!(
+                        token_index < tokens.len()
+                            && tokens[token_index].span.start == pos
+                            && tokens[token_index].span.end == end
+                            && matches!(tokens[token_index].token, Token::StrLit(_)),
+                        "{source:?}: scanner string [{pos}, {end}) is not one StrLit token \
+                         (next token: {:?})",
+                        tokens
+                            .get(token_index)
+                            .map(|t: &SpannedToken| (t.token, t.span)),
+                    );
+                    string_extents += 1;
+                    token_index += 1;
+                    pos = end;
+                    continue;
+                }
+                // Otherwise a token must start exactly here.
+                assert!(
+                    token_index < tokens.len() && tokens[token_index].span.start == pos,
+                    "{source:?}: no lexer token starts at {pos} where the scanner sees code"
+                );
+                pos = tokens[token_index].span.end;
+                token_index += 1;
+            }
+            // The inverse direction: every StrLit token was consumed by the
+            // walk as a scanner string (no StrLit left unvisited).
+            assert_eq!(
+                string_extents,
+                str_spans.len(),
+                "{source:?}: scanner found {string_extents} strings, lexer {str_spans:?}"
+            );
+            let _ = comment_extents;
+        }
+    }
+
+    /// The escape sets that DO agree: every accepted-escape string lexes,
+    /// and the scanner's extent equals the token's.
+    #[test]
+    fn accepted_escape_strings_agree_between_scanner_and_lexer() {
+        let profile = checkmate_scan_profile();
+        for literal in [
+            "\"n\"",
+            "\"t\"",
+            "\"\\\\\"",
+            "\"\\\"\"",
+            "\"a\\nb\"",
+            "\"\\t\\\\z\"",
+        ] {
+            let (tokens, errors) = crate::lexer::lex_with_errors(literal);
+            assert!(errors.is_empty(), "{literal:?} must lex: {errors:?}");
+            let str_token = tokens
+                .iter()
+                .find(|t| matches!(t.token, Token::StrLit(_)))
+                .unwrap_or_else(|| panic!("{literal:?} must contain a StrLit"));
+            let scanner_len = string_len(literal, 0, &profile)
+                .unwrap_or_else(|| panic!("{literal:?}: scanner must see a string"));
+            assert_eq!(scanner_len, str_token.span.end - str_token.span.start);
+        }
+    }
 }

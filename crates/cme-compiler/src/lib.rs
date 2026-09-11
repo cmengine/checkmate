@@ -2627,6 +2627,52 @@ mod tests {
     }
 
     #[test]
+    fn else_on_its_own_line_attaches_to_the_if() {
+        // `else` is a continuation keyword, not a statement head: after the
+        // closing brace, newline tokens are layout, so the multi-line form
+        // parses as one if statement instead of a cascading pair of
+        // "expected a type or assignment target" errors.
+        let source = "if (x) {\nreturn 1\n}\nelse {\nreturn 2\n}";
+        let ast = parse_statement_ok(source);
+        match &ast.kind {
+            StmtKind::If { else_branch, .. } => {
+                let else_stmt = else_branch.as_deref().expect("an else branch");
+                assert!(matches!(else_stmt.kind, StmtKind::Block(_)));
+            }
+            other => panic!("expected an if statement, got {other:?}"),
+        }
+
+        // `else if` arms attach the same way, including blank lines between
+        // arms (comments are lexer-transparent, so they change nothing).
+        let source = "if (x) {\nx = 1\n}\n\n// a comment on its own line\nelse if (y) {\nx = 2\n}\nelse {\nx = 3\n}";
+        let ast = parse_statement_ok(source);
+        match &ast.kind {
+            StmtKind::If { else_branch, .. } => {
+                let else_if = else_branch.as_deref().expect("an else-if arm");
+                match &else_if.kind {
+                    StmtKind::If { else_branch, .. } => {
+                        let else_stmt = else_branch.as_deref().expect("the final else");
+                        assert!(matches!(else_stmt.kind, StmtKind::Block(_)));
+                    }
+                    other => panic!("expected a nested if, got {other:?}"),
+                }
+            }
+            other => panic!("expected an if statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn newlines_still_separate_statements_when_no_else_follows() {
+        // The newline lookahead must not eat statement boundaries: after an
+        // if statement with no else, the next line is its own statement and
+        // no "expected end of statement" noise appears.
+        let source = "int f() {\nif (x) {\nx = 1\n}\nx = 2\nreturn x\n}\n";
+        let (stmts, errors) = parse_program_parts(source);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
     fn block_span_reaches_eof_when_closing_brace_is_missing() {
         let (stmts, errors) = parse_program_parts("int f() {\nreturn 1\n");
         assert!(!errors.is_empty());

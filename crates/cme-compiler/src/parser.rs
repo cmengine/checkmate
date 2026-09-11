@@ -1062,7 +1062,16 @@ impl<'a, 'src> Parser<'a, 'src> {
         let mut seed_end = 0usize;
         let mut arms: Vec<ChainArm> = Vec::new();
         loop {
+            // `else` is a continuation keyword, not a statement head: it
+            // attaches to the `if` across a line break, matching every
+            // mainstream C-like language (§14's regular-syntax goal).
+            // Newlines are consumed only when they are actually followed
+            // by `else`; otherwise the cursor is restored so every other
+            // statement boundary keeps its significance (§A.8).
+            let save = self.pos;
+            self.skip_newlines();
             if !self.at(Token::KwElse) {
+                self.pos = save;
                 break;
             }
             let else_token = self.advance();

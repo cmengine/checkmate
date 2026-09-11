@@ -23,11 +23,10 @@ use std::collections::{HashMap, HashSet};
 
 use cme_core::Span;
 use cme_core::magic::{
-    Accessor, Capture, CaptureKind, CtxBinOp, CtxExpr, FragKind, LexProfile, PatElem, PatKind,
-    Pattern, TextKind,
+    Capture, CaptureKind, CtxExpr, FragKind, LexProfile, PatElem, PatKind, Pattern, TextKind,
 };
 
-use crate::mega::cteval::{self, CtEngine};
+use crate::mega::cteval::CtEngine;
 
 /// One compiled grammar: profile plus rules.
 #[derive(Debug, Clone, Default)]
@@ -151,7 +150,7 @@ enum Continuation<'p> {
 }
 
 /// A line/column map over the region (§8.3.5 column arithmetic: tab = 8).
-struct LineMap {
+pub(crate) struct LineMap {
     col_of: Vec<usize>,
     /// One-based line index per char position.
     line_of: Vec<usize>,
@@ -160,7 +159,7 @@ struct LineMap {
 }
 
 impl LineMap {
-    fn build(chars: &[char]) -> Self {
+    pub(crate) fn build(chars: &[char]) -> Self {
         let mut col_of = Vec::with_capacity(chars.len());
         let mut line_of = Vec::with_capacity(chars.len());
         let mut line_ends = Vec::new();
@@ -207,11 +206,11 @@ impl LineMap {
         }
     }
 
-    fn col(&self, pos: usize) -> usize {
+    pub(crate) fn col(&self, pos: usize) -> usize {
         self.col_of.get(pos).copied().unwrap_or(0)
     }
 
-    fn line(&self, pos: usize) -> usize {
+    pub(crate) fn line(&self, pos: usize) -> usize {
         self.line_of.get(pos).copied().unwrap_or(0)
     }
 
@@ -1091,10 +1090,19 @@ impl<'a> Matcher<'a> {
                 })
             }
             PatKind::Where { cond } => {
-                if self.eval(cond, env) == Some(CtxVal::Bool(true)) {
+                use crate::mega::ctxeval::{self, CtxVal};
+                let mut host = MatcherCondHost {
+                    matcher: self,
+                    env,
+                    shadowed: Vec::new(),
+                };
+                if ctxeval::eval(cond, &mut host) == Some(CtxVal::Bool(true)) {
                     Some(Out::empty(pos))
                 } else {
-                    self.note_failure(pos, format!("constraint failed: {}", ctx_summary(cond)));
+                    self.note_failure(
+                        pos,
+                        format!("constraint failed: {}", ctxeval::ctx_summary(cond)),
+                    );
                     None
                 }
             }
@@ -1511,7 +1519,15 @@ impl<'a> Matcher<'a> {
         let mut context_pairs: Vec<(String, Capture)> = Vec::new();
         for field in &rule.context {
             let value = match ctx.iter().find(|(name, _)| name == &field.name) {
-                Some((_, expression)) => self.eval_or_capture(expression, env),
+                Some((_, expression)) => {
+                    use crate::mega::ctxeval;
+                    let mut host = MatcherCondHost {
+                        matcher: self,
+                        env,
+                        shadowed: Vec::new(),
+                    };
+                    ctxeval::eval_or_capture(expression, &mut host)
+                }
                 None => match &field.default {
                     Some(_) => Capture {
                         kind: CaptureKind::Opt(None),
@@ -2841,288 +2857,59 @@ impl<'a> Matcher<'a> {
     }
 
     // -- `where` evaluation -------------------------------------------------
+}
 
-    fn eval(&mut self, expression: &CtxExpr, env: &mut Env) -> Option<CtxVal> {
-        match expression {
-            CtxExpr::Str(value) => Some(CtxVal::Str(value.clone())),
-            CtxExpr::Int(value) => Some(CtxVal::Int(*value)),
-            CtxExpr::Float(value) => Some(CtxVal::Float(*value)),
-            CtxExpr::Bool(value) => Some(CtxVal::Bool(*value)),
-            CtxExpr::Capture { path, accessor } => {
-                let capture = self.lookup(path, env)?;
-                self.apply_accessor(capture, accessor)
-            }
-            CtxExpr::Bin(op, lhs, rhs) => {
-                // §A.5 short-circuiting carries into the condition language:
-                // `&&`/`||` evaluate the right side only when it can matter,
-                // so a guard may protect a quantifier over an absent list.
-                let lhs = self.eval(lhs, env)?;
-                if *op == CtxBinOp::And && lhs == CtxVal::Bool(false)
-                    || *op == CtxBinOp::Or && lhs == CtxVal::Bool(true)
-                {
-                    return Some(lhs);
-                }
-                let rhs = self.eval(rhs, env)?;
-                eval_bin(op.clone(), &lhs, &rhs)
-            }
-            CtxExpr::Not(inner) => match self.eval(inner, env)? {
-                CtxVal::Bool(value) => Some(CtxVal::Bool(!value)),
-                _ => None,
-            },
-            CtxExpr::SomeIn { var, list, cond } => {
-                let items = self.eval_list(list, env)?;
-                for item in items {
-                    let saved = env.scope.clone();
-                    env.scope.insert(var.clone(), item);
-                    let hit = self.eval(cond, env) == Some(CtxVal::Bool(true));
-                    env.scope = saved;
-                    if hit {
-                        return Some(CtxVal::Bool(true));
-                    }
-                }
-                Some(CtxVal::Bool(false))
-            }
-            CtxExpr::AllIn { var, list, cond } => {
-                let items = self.eval_list(list, env)?;
-                let mut all = true;
-                for item in items {
-                    let saved = env.scope.clone();
-                    env.scope.insert(var.clone(), item);
-                    if self.eval(cond, env) != Some(CtxVal::Bool(true)) {
-                        all = false;
-                    }
-                    env.scope = saved;
-                }
-                Some(CtxVal::Bool(all))
-            }
-            CtxExpr::Present { path } => {
-                let present = match self.lookup(path, env) {
-                    Some(capture) => capture.is_present(),
-                    None => false,
-                };
-                Some(CtxVal::Bool(present))
-            }
-            CtxExpr::Call { path, args } => self.eval_ct_call(path, args, env),
-        }
-    }
+/// The condition-evaluation host the matcher offers to [`ctxeval`]: capture
+/// paths resolve against the match environment's scope, quantifier bindings
+/// shadow it for one iteration, and `.line`/`.col` come from the region's
+/// line map (the matcher has real source positions, so template-position
+/// conditions can match them exactly).
+struct MatcherCondHost<'m, 'a, 'e> {
+    matcher: &'m mut Matcher<'a>,
+    env: &'e mut Env,
+    /// Values shadowed by quantifier bindings, restored by pop_binding.
+    shadowed: Vec<(String, Option<Capture>)>,
+}
 
-    /// A compile-time call in a condition position (§8.5): `@fn(…)` against
-    /// the file's own pure functions, or a `cm.*` builtin. In `cm.parse` the
-    /// first argument is a rule path (a capture-shaped path in the condition
-    /// syntax).
-    fn eval_ct_call(&mut self, path: &[String], args: &[CtxExpr], env: &mut Env) -> Option<CtxVal> {
-        if path.is_empty() {
-            self.note_failure(0, "empty compile-time call path");
-            return None;
-        }
-        let Some(engine) = self.ct else {
-            self.note_failure(
-                0,
-                format!(
-                    "compile-time function `{}` needs the §8.5 evaluator",
-                    path.join(".")
-                ),
-            );
-            return None;
-        };
-        let is_cm_parse = path.len() == 2 && path[0] == "cm" && path[1] == "parse";
-        let mut captures = Vec::new();
-        for (index, arg) in args.iter().enumerate() {
-            if is_cm_parse
-                && index == 0
-                && let CtxExpr::Capture { path: rule, .. } = arg
-            {
-                captures.push(Capture {
-                    kind: CaptureKind::Text(TextKind::Raw),
-                    matched: rule.join("."),
-                    span: Span::missing(0),
-                });
-                continue;
-            }
-            captures.push(self.eval_or_capture(arg, env));
-        }
-        match engine.call(path, &captures) {
-            Ok(result) => ct_value_to_ctx_val(result.value),
-            Err(message) => {
-                self.note_failure(0, message);
-                None
-            }
-        }
-    }
-
-    fn eval_or_capture(&mut self, expression: &CtxExpr, env: &mut Env) -> Capture {
-        match self.eval(expression, env) {
-            Some(CtxVal::Str(value)) => Capture {
-                kind: CaptureKind::Text(TextKind::Raw),
-                matched: value,
-                span: Span::missing(0),
-            },
-            Some(CtxVal::Int(value)) => Capture {
-                kind: CaptureKind::Int(value),
-                matched: value.to_string(),
-                span: Span::missing(0),
-            },
-            Some(CtxVal::Float(value)) => Capture {
-                kind: CaptureKind::Float(value),
-                matched: format!("{value}"),
-                span: Span::missing(0),
-            },
-            Some(CtxVal::Bool(value)) => Capture {
-                kind: CaptureKind::Text(TextKind::Raw),
-                matched: value.to_string(),
-                span: Span::missing(0),
-            },
-            Some(CtxVal::Capture(capture)) => capture,
-            None => Capture {
-                kind: CaptureKind::Opt(None),
-                matched: String::new(),
-                span: Span::missing(0),
-            },
-        }
-    }
-
-    fn eval_list(&mut self, expression: &CtxExpr, env: &mut Env) -> Option<Vec<Capture>> {
-        match self.eval(expression, env)? {
-            CtxVal::Capture(capture) => match capture.kind {
-                CaptureKind::List(items) => Some(items),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// Resolves a capture path against the current scope, unwrapping one
-    /// `Opt` layer per navigation step. Record navigation prefers field
-    /// names; any capture falls back to a trailing accessor keyword
-    /// (`w.line`, `xs.length`, plan §1.4.4).
-    fn lookup(&self, path: &[String], env: &Env) -> Option<Capture> {
-        let mut current = env.scope.get(&path[0]).cloned()?;
-        for (index, segment) in path[1..].iter().enumerate() {
-            if let CaptureKind::Opt(Some(inner)) = current.kind {
-                current = *inner;
-            }
-            match &current.kind {
-                CaptureKind::Record { fields, .. } => {
-                    match fields.iter().find(|(name, _)| name == segment) {
-                        Some((_, capture)) => current = capture.clone(),
-                        // Field lookup first; a trailing accessor keyword is
-                        // the fallback (plan §1.4.4).
-                        None => {
-                            let last = index + 2 == path.len();
-                            if last {
-                                current = self.accessor_capture(current, segment)?;
-                            } else {
-                                return None;
-                            }
-                        }
-                    }
-                }
-                // A non-record capture can only be followed by an accessor
-                // keyword in the path's final position.
-                _ => {
-                    let last = index + 2 == path.len();
-                    if last {
-                        current = self.accessor_capture(current, segment)?;
-                    } else {
-                        return None;
-                    }
-                }
-            }
-        }
-        Some(current)
-    }
-
-    /// Applies one trailing accessor to a capture (§8.3.4, plan §1.4.4).
-    /// `.line`/`.col` map the capture's start span back to a char index and
-    /// read the region's line/column map (one-based, §8.3.5 column
-    /// arithmetic); captures without a resolvable span report 0.
-    fn apply_accessor(&self, capture: Capture, accessor: &Option<Accessor>) -> Option<CtxVal> {
-        match accessor {
-            None => Some(CtxVal::Capture(capture)),
-            // `.matched` trims edge whitespace (plan §1.4.4): indent blocks
-            // and skip-run edges would otherwise leak `\n    ` prefixes.
-            Some(Accessor::Matched) => Some(CtxVal::Str(capture.matched().trim().to_string())),
-            Some(Accessor::Length) => {
-                let length = match capture.kind {
-                    CaptureKind::List(items) => items.len(),
-                    CaptureKind::Record { fields, .. } => fields.len(),
-                    _ => 0,
-                };
-                Some(CtxVal::Int(length as i64))
-            }
-            Some(Accessor::Line) => Some(CtxVal::Int(self.capture_line(&capture) as i64)),
-            Some(Accessor::Col) => Some(CtxVal::Int(self.capture_col(&capture) as i64)),
-            // `.span` (§8.3.4): the capture's span as `start:end` byte
-            // offsets — an opaque, equality-comparable token. plan §1.4.9
-            // accepts and ignores span arguments to the `cm.*` API; the text
-            // form also lets conditions compare positions for identity.
-            Some(Accessor::Span) => Some(CtxVal::Str(format!(
-                "{}:{}",
-                capture.span.start, capture.span.end
-            ))),
-        }
-    }
-
-    /// Path-navigation fallback: applies an accessor named by the path's
-    /// final segment (`.matched`, `.length`, `.line`, `.col`).
-    fn accessor_capture(&self, capture: Capture, segment: &str) -> Option<Capture> {
-        let accessor = match segment {
-            "matched" => Accessor::Matched,
-            "length" => Accessor::Length,
-            "line" => Accessor::Line,
-            "col" => Accessor::Col,
-            "span" => Accessor::Span,
-            _ => return None,
-        };
-        match self.apply_accessor(capture, &Some(accessor))? {
-            CtxVal::Str(value) => Some(Capture {
-                kind: CaptureKind::Text(TextKind::Raw),
-                matched: value,
-                span: Span::missing(0),
-            }),
-            CtxVal::Int(value) => Some(Capture {
-                kind: CaptureKind::Int(value),
-                matched: value.to_string(),
-                span: Span::missing(0),
-            }),
-            CtxVal::Capture(capture) => Some(capture),
-            _ => None,
-        }
-    }
-
-    /// The region-relative char index of a capture's start, if its span
-    /// points inside this region (spans are absolute; byte offsets within the
-    /// region are sorted, so the search is binary).
-    fn capture_char_index(&self, capture: &Capture) -> Option<usize> {
-        if capture.span.start < self.region.base {
-            return None;
-        }
-        let relative = capture.span.start - self.region.base;
-        let offsets = &self.region.byte_offsets;
-        let index = offsets
-            .binary_search(&relative)
-            .unwrap_or_else(|next| if next == 0 { usize::MAX } else { next - 1 });
-        if index == usize::MAX {
-            None
-        } else {
-            Some(index)
-        }
+impl crate::mega::ctxeval::CondHost for MatcherCondHost<'_, '_, '_> {
+    fn lookup(&self, path: &[String]) -> Option<Capture> {
+        let head = self.env.scope.get(&path[0]).cloned()?;
+        crate::mega::ctxeval::navigate(head, &path[1..], self)
     }
 
     fn capture_line(&self, capture: &Capture) -> usize {
-        self.capture_char_index(capture)
-            .map(|index| self.lines.line(index))
-            .unwrap_or(0)
+        capture_line_in(capture, self.matcher.region, &self.matcher.lines)
     }
 
     fn capture_col(&self, capture: &Capture) -> usize {
-        // Column arithmetic is zero-based internally; accessors report the
-        // one-based visual column of the capture's first character.
-        // `col_of` stores the column AFTER consuming the char, which for a
-        // content character is its one-based visual column already.
-        self.capture_char_index(capture)
-            .map(|index| self.lines.col(index))
-            .unwrap_or(0)
+        capture_col_in(capture, self.matcher.region, &self.matcher.lines)
+    }
+
+    fn push_binding(&mut self, name: &str, value: Capture) {
+        self.shadowed
+            .push((name.to_string(), self.env.scope.get(name).cloned()));
+        self.env.scope.insert(name.to_string(), value);
+    }
+
+    fn pop_binding(&mut self) {
+        if let Some((name, previous)) = self.shadowed.pop() {
+            match previous {
+                Some(value) => {
+                    self.env.scope.insert(name, value);
+                }
+                None => {
+                    self.env.scope.remove(&name);
+                }
+            }
+        }
+    }
+
+    fn note_failure(&mut self, message: String) {
+        self.matcher.note_failure(0, message);
+    }
+
+    fn engine(&self) -> Option<&CtEngine<'_>> {
+        self.matcher.ct
     }
 }
 
@@ -3156,6 +2943,45 @@ fn chars_start_with(chars: &[char], pos: usize, needle: &str) -> bool {
         }
     }
     true
+}
+
+/// The region-relative char index of a capture's start, if its span points
+/// inside `region` (spans are absolute; byte offsets within the region are
+/// sorted, so the search is binary). Free function: the template
+/// elaborator's condition host shares the exact mapping so `.line`/`.col`
+/// evaluate identically in both positions.
+pub(crate) fn capture_char_index(capture: &Capture, region: &MatchRegion) -> Option<usize> {
+    if capture.span.start < region.base {
+        return None;
+    }
+    let relative = capture.span.start - region.base;
+    let offsets = &region.byte_offsets;
+    let index = offsets
+        .binary_search(&relative)
+        .unwrap_or_else(|next| if next == 0 { usize::MAX } else { next - 1 });
+    if index == usize::MAX {
+        None
+    } else {
+        Some(index)
+    }
+}
+
+/// The one-based source line of a capture's start within `region`
+/// (0 when the span does not resolve).
+pub(crate) fn capture_line_in(capture: &Capture, region: &MatchRegion, lines: &LineMap) -> usize {
+    capture_char_index(capture, region)
+        .map(|index| lines.line(index))
+        .unwrap_or(0)
+}
+
+/// The one-based visual column of a capture's start within `region`
+/// (0 when the span does not resolve). Column arithmetic is zero-based
+/// internally; `col_of` stores the column AFTER consuming the char, which
+/// for a content character is its one-based visual column already.
+pub(crate) fn capture_col_in(capture: &Capture, region: &MatchRegion, lines: &LineMap) -> usize {
+    capture_char_index(capture, region)
+        .map(|index| lines.col(index))
+        .unwrap_or(0)
 }
 
 fn comment_len_at(
@@ -3196,113 +3022,6 @@ fn comment_len_at(
             hit?
         }
     })
-}
-
-/// Converts a compile-time result into a condition value: scalars keep
-/// their kind, everything else bridges back into a capture.
-fn ct_value_to_ctx_val(value: cme_interp::Value) -> Option<CtxVal> {
-    match value {
-        cme_interp::Value::Bool(value) => Some(CtxVal::Bool(value)),
-        cme_interp::Value::Str(value) => Some(CtxVal::Str(value)),
-        cme_interp::Value::Int(value) => Some(CtxVal::Int(value)),
-        cme_interp::Value::Float(value) => Some(CtxVal::Float(value)),
-        other => match cteval::value_to_capture(&other) {
-            Ok(capture) => Some(CtxVal::Capture(capture)),
-            Err(_) => None,
-        },
-    }
-}
-
-/// A `where`-language value.
-#[derive(Debug, Clone, PartialEq)]
-enum CtxVal {
-    Str(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Capture(Capture),
-}
-
-/// A capture in a scalar position: its number, or its trimmed matched text.
-fn coerce_scalar(value: &CtxVal) -> CtxVal {
-    match value {
-        CtxVal::Capture(capture) => match &capture.kind {
-            CaptureKind::Int(value) => CtxVal::Int(*value),
-            CaptureKind::Float(value) => CtxVal::Float(*value),
-            _ => CtxVal::Str(capture.matched().trim().to_string()),
-        },
-        other => other.clone(),
-    }
-}
-
-fn eval_bin(op: CtxBinOp, lhs: &CtxVal, rhs: &CtxVal) -> Option<CtxVal> {
-    let result = match op {
-        CtxBinOp::And => match (lhs, rhs) {
-            (CtxVal::Bool(a), CtxVal::Bool(b)) => Some(*a && *b),
-            _ => None,
-        },
-        CtxBinOp::Or => match (lhs, rhs) {
-            (CtxVal::Bool(a), CtxVal::Bool(b)) => Some(*a || *b),
-            _ => None,
-        },
-        CtxBinOp::Eq | CtxBinOp::Ne => {
-            // A bare capture compares by its scalar value (the trimmed
-            // matched text, or its number) — this makes `close == name`
-            // work when both sides are captures (§8.3.4).
-            let lhs = coerce_scalar(lhs);
-            let rhs = coerce_scalar(rhs);
-            let equal = match (&lhs, &rhs) {
-                (CtxVal::Str(a), CtxVal::Str(b)) => a == b,
-                (CtxVal::Int(a), CtxVal::Int(b)) => a == b,
-                (CtxVal::Float(a), CtxVal::Float(b)) => a == b,
-                (CtxVal::Bool(a), CtxVal::Bool(b)) => a == b,
-                _ => return None,
-            };
-            Some(if op == CtxBinOp::Eq { equal } else { !equal })
-        }
-        CtxBinOp::Lt | CtxBinOp::Le | CtxBinOp::Gt | CtxBinOp::Ge => {
-            use std::cmp::Ordering;
-            let ordering = match (lhs, rhs) {
-                (CtxVal::Int(a), CtxVal::Int(b)) => a.cmp(b),
-                (CtxVal::Float(a), CtxVal::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-                _ => return None,
-            };
-            Some(match op {
-                CtxBinOp::Lt => ordering == Ordering::Less,
-                CtxBinOp::Le => ordering != Ordering::Greater,
-                CtxBinOp::Gt => ordering == Ordering::Greater,
-                _ => ordering != Ordering::Less,
-            })
-        }
-    };
-    result.map(CtxVal::Bool)
-}
-
-fn ctx_summary(expression: &CtxExpr) -> String {
-    match expression {
-        CtxExpr::Capture { path, .. } => path.join("."),
-        CtxExpr::Bin(op, lhs, rhs) => {
-            let symbol = match op {
-                CtxBinOp::Eq => "==",
-                CtxBinOp::Ne => "!=",
-                CtxBinOp::Lt => "<",
-                CtxBinOp::Le => "<=",
-                CtxBinOp::Gt => ">",
-                CtxBinOp::Ge => ">=",
-                CtxBinOp::And => "&&",
-                CtxBinOp::Or => "||",
-            };
-            format!("{} {} {}", ctx_summary(lhs), symbol, ctx_summary(rhs))
-        }
-        CtxExpr::Not(inner) => format!("!{}", ctx_summary(inner)),
-        CtxExpr::Present { path } => format!("present({})", path.join(".")),
-        CtxExpr::Str(value) => format!("\"{value}\""),
-        CtxExpr::Int(value) => value.to_string(),
-        CtxExpr::Float(value) => value.to_string(),
-        CtxExpr::Bool(value) => value.to_string(),
-        CtxExpr::SomeIn { .. } | CtxExpr::AllIn { .. } => "quantified condition".to_string(),
-        CtxExpr::Call { path, .. } => format!("{}(…)", path.join(".")),
-    }
 }
 
 /// Whether a continuation can still consume content: an `Elems` chain with

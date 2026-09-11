@@ -8,6 +8,7 @@
 //! code. That text-level contract is what makes `cme expand` possible.
 
 pub mod cteval;
+pub mod ctxeval;
 pub mod ctxexpr;
 pub mod expand;
 pub mod matcher;

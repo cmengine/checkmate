@@ -242,6 +242,7 @@ fn expand_source_inner(
                             root,
                             invocation.span,
                             Some(&engine),
+                            Some(&region),
                         ),
                         Err(failure) => Err(vec![region_failure_diagnostic(
                             invocation,
@@ -263,6 +264,7 @@ fn expand_source_inner(
                             binds,
                             invocation.span,
                             Some(&engine),
+                            Some(&region),
                         ),
                         Err(failure) => Err(vec![region_failure_diagnostic(
                             invocation,

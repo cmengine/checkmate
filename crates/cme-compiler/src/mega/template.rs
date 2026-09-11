@@ -20,12 +20,12 @@
 use crate::diagnostics::Diagnostic;
 use cme_core::Span;
 use cme_core::magic::{
-    Accessor, Capture, CaptureKind, CtxBinOp, CtxExpr, Template, TextKind, TmplNode, TmplStrPart,
-    TmplValue,
+    Accessor, Capture, CaptureKind, CtxExpr, Template, TextKind, TmplNode, TmplStrPart, TmplValue,
 };
 
 use super::cteval::{self, CtEngine};
 use super::ctxexpr;
+use super::matcher::MatchRegion;
 use super::profile::{parse_string_literal, skip_ws_and_comments};
 use cme_interp::Value;
 
@@ -892,25 +892,34 @@ pub fn elaborate(
     root_name: &str,
     root: Capture,
     source_span: Span,
-    ct: Option<&CtEngine>,
+    ct: Option<&CtEngine<'_>>,
+    region: Option<&MatchRegion<'_>>,
 ) -> Result<String, Vec<Diagnostic>> {
     elaborate_seeded(
         template,
         vec![(root_name.to_string(), root)],
         source_span,
         ct,
+        region,
     )
 }
 
 /// [`elaborate`] with several seeded captures — the INLINE entry-point shape
 /// (§8.1): every top-level pattern bind is visible under its own name
 /// (`$model`, `$effort`, `$prompt`).
+///
+/// `region` is the invocation region the captures were matched against;
+/// when present, `.line`/`.col` accessors in conditions resolve against it
+/// with the same mapping the matcher's `where` evaluator uses — identical
+/// expressions evaluate identically in both positions.
 pub fn elaborate_seeded(
     template: &Template,
     lets: Vec<(String, Capture)>,
     source_span: Span,
-    ct: Option<&CtEngine>,
+    ct: Option<&CtEngine<'_>>,
+    region: Option<&MatchRegion<'_>>,
 ) -> Result<String, Vec<Diagnostic>> {
+    let lines = region.map(|region| crate::mega::matcher::LineMap::build(&region.chars));
     let mut elaborator = Elaborator {
         out: String::new(),
         enclosures: Vec::new(),
@@ -921,6 +930,8 @@ pub fn elaborate_seeded(
         diagnostics: Vec::new(),
         source_span,
         ct,
+        region,
+        lines,
     };
     elaborator.nodes(&template.nodes);
     if elaborator.diagnostics.is_empty() {
@@ -943,6 +954,11 @@ struct Elaborator<'e> {
     source_span: Span,
     /// The compile-time evaluator backing `@`-calls and `cm.*` (§8.5).
     ct: Option<&'e CtEngine<'e>>,
+    /// The invocation region the captures were matched against, when the
+    /// caller has it: the source-position half of `.line`/`.col`.
+    region: Option<&'e MatchRegion<'e>>,
+    /// The region's line map, built once per elaboration.
+    lines: Option<crate::mega::matcher::LineMap>,
 }
 
 impl<'e> Elaborator<'e> {
@@ -1033,15 +1049,15 @@ impl<'e> Elaborator<'e> {
                     // §8.4's where filter: an item whose condition is not
                     // truthy emits nothing (and consumes no join slot).
                     let keep = match filter {
-                        Some(cond) => match self.eval(cond) {
-                            Some(value) => matches!(value, CtxVal::Bool(true)),
-                            None => {
+                        Some(cond) => {
+                            let hit = self.eval_bool(cond, "each filter did not evaluate");
+                            if hit.is_none() {
                                 self.scopes.pop();
                                 self.out = saved_out;
-                                self.error("each filter did not evaluate");
                                 return;
                             }
-                        },
+                            hit == Some(true)
+                        }
                         None => true,
                     };
                     self.scopes.pop();
@@ -1071,12 +1087,8 @@ impl<'e> Elaborator<'e> {
                 otherwise,
                 ..
             } => {
-                let hit = match self.eval(cond) {
-                    Some(value) => matches!(value, CtxVal::Bool(true)),
-                    None => {
-                        self.error("condition did not evaluate");
-                        return;
-                    }
+                let Some(hit) = self.eval_bool(cond, "condition did not evaluate") else {
+                    return;
                 };
                 if hit {
                     self.nodes(&then.nodes);
@@ -1125,7 +1137,7 @@ impl<'e> Elaborator<'e> {
                 Err(message) => self.error(message),
             },
             TmplNode::Require { cond, message, .. } => {
-                if self.eval(cond) != Some(CtxVal::Bool(true)) {
+                if self.eval_condition(cond) != Some(crate::mega::ctxeval::CtxVal::Bool(true)) {
                     // §8.3.4: the failure anchors at the referenced capture's
                     // span — the real matched text in the user's region, not
                     // the template.
@@ -1175,7 +1187,11 @@ impl<'e> Elaborator<'e> {
 
     /// Resolves call arguments to captures and invokes the compile-time
     /// evaluator. Shared by splices, `let` bindings, and nested call args.
-    fn eval_call(&self, path: &[String], args: &[TmplValue]) -> Result<cteval::CtResult, String> {
+    fn eval_call(
+        &mut self,
+        path: &[String],
+        args: &[TmplValue],
+    ) -> Result<cteval::CtResult, String> {
         let Some(engine) = self.ct else {
             return Err(format!(
                 "compile-time function `{}` needs the §8.5 evaluator",
@@ -1209,12 +1225,15 @@ impl<'e> Elaborator<'e> {
         }
     }
 
-    fn resolve(&self, path: &[String], accessor: Option<Accessor>) -> Result<Capture, String> {
+    fn resolve(&mut self, path: &[String], accessor: Option<Accessor>) -> Result<Capture, String> {
         let capture = self.lookup(path)?;
-        apply(capture, accessor)
+        use crate::mega::ctxeval;
+        let host = ConditionHost { elaborator: self };
+        ctxeval::apply_accessor_to_capture(&capture, accessor.as_ref(), &host)
+            .ok_or_else(|| "cannot apply the accessor".to_string())
     }
 
-    fn resolve_value(&self, value: &TmplValue) -> Result<Capture, String> {
+    fn resolve_value(&mut self, value: &TmplValue) -> Result<Capture, String> {
         match value {
             TmplValue::Capture { path } => self.lookup(path),
             TmplValue::Interp { parts } => {
@@ -1279,15 +1298,18 @@ impl<'e> Elaborator<'e> {
     /// Path resolution: innermost scopes' `let` bindings first, then each
     /// scope's current element's fields (bare `$field`), then outer scopes.
     fn lookup(&self, path: &[String]) -> Result<Capture, String> {
+        use crate::mega::ctxeval;
+        let host = PositionRefHost { elaborator: self };
         let head = &path[0];
         for scope in self.scopes.iter().rev() {
             if let Some((_, capture)) = scope.lets.iter().rev().find(|(name, _)| name == head) {
-                return navigate(capture.clone(), &path[1..]);
+                return ctxeval::navigate(capture.clone(), &path[1..], &host)
+                    .ok_or_else(|| format!("unknown capture `${}`", path.join(".")));
             }
             if let Some(element) = &scope.element
-                && navigate(element.clone(), path).is_ok()
+                && let Some(found) = ctxeval::navigate(element.clone(), path, &host)
             {
-                return navigate(element.clone(), path);
+                return Ok(found);
             }
         }
         Err(format!("unknown capture `${}`", path.join(".")))
@@ -1354,188 +1376,122 @@ impl<'e> Elaborator<'e> {
         }
     }
 
-    // -- condition evaluation (mirrors the matcher's `where` evaluator) -----
+    // -- condition evaluation ------------------------------------------------
 
-    fn eval(&mut self, expression: &CtxExpr) -> Option<CtxVal> {
-        match expression {
-            CtxExpr::Str(value) => Some(CtxVal::Str(value.clone())),
-            CtxExpr::Int(value) => Some(CtxVal::Int(*value)),
-            CtxExpr::Float(value) => Some(CtxVal::Float(*value)),
-            CtxExpr::Bool(value) => Some(CtxVal::Bool(*value)),
-            CtxExpr::Capture { path, accessor } => {
-                let capture = self.lookup(path).ok()?;
-                apply(capture, accessor.clone()).ok().map(CtxVal::Capture)
-            }
-            CtxExpr::Bin(op, lhs, rhs) => {
-                // §A.5 short-circuiting, as in the matcher's evaluator.
-                let lhs = self.eval(lhs)?;
-                if *op == CtxBinOp::And && lhs == CtxVal::Bool(false)
-                    || *op == CtxBinOp::Or && lhs == CtxVal::Bool(true)
-                {
-                    return Some(lhs);
-                }
-                let rhs = self.eval(rhs)?;
-                eval_bin(op.clone(), &lhs, &rhs)
-            }
-            CtxExpr::Not(inner) => match self.eval(inner)? {
-                CtxVal::Bool(value) => Some(CtxVal::Bool(!value)),
-                _ => None,
-            },
-            CtxExpr::SomeIn { var, list, cond } => {
-                let items = self.eval_list(list)?;
-                for item in items {
-                    self.scopes.push(Scope {
-                        lets: vec![(var.clone(), item)],
-                        element: None,
-                    });
-                    let hit = self.eval(cond) == Some(CtxVal::Bool(true));
-                    self.scopes.pop();
-                    if hit {
-                        return Some(CtxVal::Bool(true));
-                    }
-                }
-                Some(CtxVal::Bool(false))
-            }
-            CtxExpr::AllIn { var, list, cond } => {
-                let items = self.eval_list(list)?;
-                let mut all = true;
-                for item in items {
-                    self.scopes.push(Scope {
-                        lets: vec![(var.clone(), item)],
-                        element: None,
-                    });
-                    if self.eval(cond) != Some(CtxVal::Bool(true)) {
-                        all = false;
-                    }
-                    self.scopes.pop();
-                }
-                Some(CtxVal::Bool(all))
-            }
-            CtxExpr::Present { path } => {
-                let present = self
-                    .lookup(path)
-                    .map(|capture| capture.is_present())
-                    .unwrap_or(false);
-                Some(CtxVal::Bool(present))
-            }
-            CtxExpr::Call { path, args } => {
-                // A compile-time call in a condition position: resolve the
-                // condition-language arguments into captures, invoke the
-                // engine, and convert the result back into a value.
-                let result = (|| {
-                    let engine = self.ct?;
-                    let mut captures = Vec::new();
-                    for arg in args {
-                        captures.push(ctx_val_to_capture(self.eval(arg)?));
-                    }
-                    engine.call(path, &captures).ok()
-                })();
-                match result {
-                    Some(result) => ctx_val_from_value(result.value),
-                    None => {
-                        self.error("condition call did not evaluate");
-                        None
-                    }
-                }
-            }
-        }
+    /// Evaluates a `[when]` guard / `require` condition / `[each … where]`
+    /// filter through the shared condition evaluator (§8.3.4). The
+    /// elaborator's host resolves capture paths against the template
+    /// scopes and reports real source positions when the invocation
+    /// region is available.
+    fn eval_condition(&mut self, cond: &CtxExpr) -> Option<crate::mega::ctxeval::CtxVal> {
+        use crate::mega::ctxeval;
+        let mut host = ConditionHost { elaborator: self };
+        ctxeval::eval(cond, &mut host)
     }
 
-    fn eval_list(&mut self, expression: &CtxExpr) -> Option<Vec<Capture>> {
-        match self.eval(expression)? {
-            CtxVal::Capture(capture) => match capture.kind {
-                CaptureKind::List(items) => Some(items),
-                _ => None,
-            },
-            _ => None,
+    fn eval_bool(&mut self, cond: &CtxExpr, on_failure: &str) -> Option<bool> {
+        match self.eval_condition(cond) {
+            Some(crate::mega::ctxeval::CtxVal::Bool(value)) => Some(value),
+            Some(_) => {
+                self.error(on_failure);
+                None
+            }
+            None => {
+                self.error(on_failure);
+                None
+            }
         }
     }
 }
 
-fn navigate(capture: Capture, segments: &[String]) -> Result<Capture, String> {
-    let mut current = capture;
-    for (index, segment) in segments.iter().enumerate() {
-        if let CaptureKind::Opt(Some(inner)) = current.kind {
-            current = *inner;
-        }
-        match &current.kind {
-            CaptureKind::Record { fields, .. } => {
-                match fields.iter().find(|(name, _)| name == segment) {
-                    Some((_, capture)) => current = capture.clone(),
-                    // Field lookup first; a trailing accessor keyword
-                    // (`.matched`, `.length`, …) is the fallback (plan
-                    // §1.4.4 — every capture exposes these).
-                    None => {
-                        let last = index + 1 == segments.len();
-                        if let Some(accessor) = accessor_keyword(segment).filter(|_| last) {
-                            return apply(current, Some(accessor));
-                        }
-                        return Err(format!("no field `{segment}` on the capture"));
-                    }
-                }
-            }
-            // Non-record captures (lists, text, …) expose only their
-            // trailing accessors: `$item.children.length`.
-            _ => {
-                let last = index + 1 == segments.len();
-                if let Some(accessor) = accessor_keyword(segment).filter(|_| last) {
-                    return apply(current, Some(accessor));
-                }
-                return Err(format!("cannot navigate into `{segment}`"));
-            }
-        }
-    }
-    Ok(current)
+/// The condition-evaluation host the elaborator offers to [`ctxeval`]:
+/// capture paths resolve against the template scopes, quantifier bindings
+/// push a scope, and `.line`/`.col` resolve against the invocation region's
+/// line map when the caller supplied it — the same mapping the matcher's
+/// `where` evaluator uses.
+struct ConditionHost<'e, 'a> {
+    elaborator: &'a mut Elaborator<'e>,
 }
 
-/// The accessor named by a path segment, if it is one of the keywords.
-fn accessor_keyword(segment: &str) -> Option<Accessor> {
-    match segment {
-        "matched" => Some(Accessor::Matched),
-        "length" => Some(Accessor::Length),
-        "line" => Some(Accessor::Line),
-        "col" => Some(Accessor::Col),
-        "span" => Some(Accessor::Span),
-        _ => None,
+impl crate::mega::ctxeval::CondHost for ConditionHost<'_, '_> {
+    fn lookup(&self, path: &[String]) -> Option<Capture> {
+        self.elaborator.lookup(path).ok()
+    }
+
+    fn capture_line(&self, capture: &Capture) -> usize {
+        match (&self.elaborator.region, &self.elaborator.lines) {
+            (Some(region), Some(lines)) => {
+                crate::mega::matcher::capture_line_in(capture, region, lines)
+            }
+            _ => 0,
+        }
+    }
+
+    fn capture_col(&self, capture: &Capture) -> usize {
+        match (&self.elaborator.region, &self.elaborator.lines) {
+            (Some(region), Some(lines)) => {
+                crate::mega::matcher::capture_col_in(capture, region, lines)
+            }
+            _ => 0,
+        }
+    }
+
+    fn push_binding(&mut self, name: &str, value: Capture) {
+        self.elaborator.scopes.push(Scope {
+            lets: vec![(name.to_string(), value)],
+            element: None,
+        });
+    }
+
+    fn pop_binding(&mut self) {
+        self.elaborator.scopes.pop();
+    }
+
+    fn note_failure(&mut self, message: String) {
+        self.elaborator.error(message);
+    }
+
+    fn engine(&self) -> Option<&CtEngine<'_>> {
+        self.elaborator.ct
     }
 }
 
-fn apply(capture: Capture, accessor: Option<Accessor>) -> Result<Capture, String> {
-    match accessor {
-        None => Ok(capture),
-        // `.matched` trims edge whitespace (plan §1.4.4).
-        Some(Accessor::Matched) => Ok(Capture {
-            kind: CaptureKind::Text(TextKind::Raw),
-            matched: capture.matched().trim().to_string(),
-            span: capture.span,
-        }),
-        Some(Accessor::Length) => {
-            let length = match capture.kind {
-                CaptureKind::List(items) => items.len() as i64,
-                CaptureKind::Record { fields, .. } => fields.len() as i64,
-                _ => 0,
-            };
-            Ok(Capture {
-                kind: CaptureKind::Int(length),
-                matched: length.to_string(),
-                span: capture.span,
-            })
+/// The read-only variant of [`ConditionHost`] for paths that cannot reach
+/// quantifier bindings: `lookup`/`navigate` only resolve captures and apply
+/// position accessors, all immutable.
+struct PositionRefHost<'e, 'a> {
+    elaborator: &'a Elaborator<'e>,
+}
+
+impl crate::mega::ctxeval::CondHost for PositionRefHost<'_, '_> {
+    fn lookup(&self, path: &[String]) -> Option<Capture> {
+        self.elaborator.lookup(path).ok()
+    }
+
+    fn capture_line(&self, capture: &Capture) -> usize {
+        match (&self.elaborator.region, &self.elaborator.lines) {
+            (Some(region), Some(lines)) => {
+                crate::mega::matcher::capture_line_in(capture, region, lines)
+            }
+            _ => 0,
         }
-        // Real source-line mapping lands with Task 4's diagnostics work.
-        Some(Accessor::Line) | Some(Accessor::Col) => Ok(Capture {
-            kind: CaptureKind::Int(0),
-            matched: "0".to_string(),
-            span: capture.span,
-        }),
-        // `.span` (§8.3.4): the capture's span as `start:end` byte offsets —
-        // the same opaque, equality-comparable token form the matcher's
-        // `where` evaluator produces (plan §1.4.9: span arguments to the
-        // `cm.*` API are accepted and ignored at the text level).
-        Some(Accessor::Span) => Ok(Capture {
-            kind: CaptureKind::Text(TextKind::Raw),
-            matched: format!("{}:{}", capture.span.start, capture.span.end),
-            span: capture.span,
-        }),
+    }
+
+    fn capture_col(&self, capture: &Capture) -> usize {
+        match (&self.elaborator.region, &self.elaborator.lines) {
+            (Some(region), Some(lines)) => {
+                crate::mega::matcher::capture_col_in(capture, region, lines)
+            }
+            _ => 0,
+        }
+    }
+
+    fn push_binding(&mut self, _name: &str, _value: Capture) {}
+
+    fn pop_binding(&mut self) {}
+
+    fn engine(&self) -> Option<&CtEngine<'_>> {
+        self.elaborator.ct
     }
 }
 
@@ -1552,114 +1508,6 @@ pub(crate) fn escape_checkmate(text: &str) -> String {
         }
     }
     out
-}
-
-/// A capture in a scalar position: its number, or its trimmed matched text.
-fn coerce_scalar(value: &CtxVal) -> CtxVal {
-    match value {
-        CtxVal::Capture(capture) => match &capture.kind {
-            CaptureKind::Int(value) => CtxVal::Int(*value),
-            CaptureKind::Float(value) => CtxVal::Float(*value),
-            _ => CtxVal::Str(capture.matched().trim().to_string()),
-        },
-        other => other.clone(),
-    }
-}
-
-fn eval_bin(op: CtxBinOp, lhs: &CtxVal, rhs: &CtxVal) -> Option<CtxVal> {
-    let result = match op {
-        CtxBinOp::And => match (lhs, rhs) {
-            (CtxVal::Bool(a), CtxVal::Bool(b)) => Some(*a && *b),
-            _ => None,
-        },
-        CtxBinOp::Or => match (lhs, rhs) {
-            (CtxVal::Bool(a), CtxVal::Bool(b)) => Some(*a || *b),
-            _ => None,
-        },
-        CtxBinOp::Eq | CtxBinOp::Ne => {
-            // A bare capture compares by its scalar value (the trimmed
-            // matched text, or its number) — this makes `close == name`
-            // work when both sides are captures (§8.3.4).
-            let lhs = coerce_scalar(lhs);
-            let rhs = coerce_scalar(rhs);
-            let equal = match (&lhs, &rhs) {
-                (CtxVal::Str(a), CtxVal::Str(b)) => a == b,
-                (CtxVal::Int(a), CtxVal::Int(b)) => a == b,
-                (CtxVal::Float(a), CtxVal::Float(b)) => a == b,
-                (CtxVal::Bool(a), CtxVal::Bool(b)) => a == b,
-                _ => return None,
-            };
-            Some(if op == CtxBinOp::Eq { equal } else { !equal })
-        }
-        CtxBinOp::Lt | CtxBinOp::Le | CtxBinOp::Gt | CtxBinOp::Ge => {
-            use std::cmp::Ordering;
-            let ordering = match (lhs, rhs) {
-                (CtxVal::Int(a), CtxVal::Int(b)) => a.cmp(b),
-                (CtxVal::Float(a), CtxVal::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-                _ => return None,
-            };
-            Some(match op {
-                CtxBinOp::Lt => ordering == Ordering::Less,
-                CtxBinOp::Le => ordering != Ordering::Greater,
-                CtxBinOp::Gt => ordering == Ordering::Greater,
-                _ => ordering != Ordering::Less,
-            })
-        }
-    };
-    result.map(CtxVal::Bool)
-}
-
-/// A condition value in the elaborator (mirrors the matcher's evaluator).
-#[derive(Debug, Clone, PartialEq)]
-enum CtxVal {
-    Str(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Capture(Capture),
-}
-
-/// Converts a condition value into a capture for `@`-call arguments in
-/// condition positions.
-fn ctx_val_to_capture(value: CtxVal) -> Capture {
-    match value {
-        CtxVal::Bool(value) => Capture {
-            kind: CaptureKind::Text(TextKind::Raw),
-            matched: value.to_string(),
-            span: Span::missing(0),
-        },
-        CtxVal::Str(value) => Capture {
-            kind: CaptureKind::Text(TextKind::Raw),
-            matched: value,
-            span: Span::missing(0),
-        },
-        CtxVal::Int(value) => Capture {
-            kind: CaptureKind::Int(value),
-            matched: value.to_string(),
-            span: Span::missing(0),
-        },
-        CtxVal::Float(value) => Capture {
-            kind: CaptureKind::Float(value),
-            matched: format!("{value}"),
-            span: Span::missing(0),
-        },
-        CtxVal::Capture(capture) => capture,
-    }
-}
-
-/// Converts a compile-time result into a condition value: scalars keep
-/// their kind, everything else bridges back into a capture.
-fn ctx_val_from_value(value: Value) -> Option<CtxVal> {
-    match value {
-        Value::Bool(value) => Some(CtxVal::Bool(value)),
-        Value::Str(value) => Some(CtxVal::Str(value)),
-        Value::Int(value) => Some(CtxVal::Int(value)),
-        Value::Float(value) => Some(CtxVal::Float(value)),
-        other => match cteval::value_to_capture(&other) {
-            Ok(capture) => Some(CtxVal::Capture(capture)),
-            Err(_) => None,
-        },
-    }
 }
 
 fn value_kind_name(value: &Value) -> &'static str {
@@ -1717,7 +1565,46 @@ mod tests {
         let match_region = MatchRegion::new(region, 0, region);
         let root = match_entry(&set, 0, &pattern, &match_region, None)
             .map_err(|failure| vec![Diagnostic::parse(failure.message, Span::missing(0))])?;
-        elaborate(&template, "root", root, Span::missing(0), None)
+        // The harness passes the region, so position accessors evaluate
+        // with the same mapping the matcher uses.
+        elaborate(
+            &template,
+            "root",
+            root,
+            Span::missing(0),
+            None,
+            Some(&match_region),
+        )
+    }
+
+    #[test]
+    fn template_position_line_accessor_matches_matcher_position_values() {
+        // The two condition evaluators had diverged: `.line`/`.col` were
+        // real in a pattern `where` but hard-coded 0 in template positions,
+        // so `[when x.line > 3]` silently compared against 0. The shared
+        // evaluator resolves positions against the invocation region, so a
+        // second-line capture reports line 2 in a `[when]` guard too.
+        // Flow profile: the skipper crosses the line break, and the
+        // position mapping still reports the capture's real line.
+        let out = elaborate_with(
+            &[("two", "rule two { $word first $word second }")],
+            "test.two as root",
+            "[when $root.second.line == 2 { secondOnLine2 } else { notLine2 }]",
+            "abc\ndef",
+        )
+        .unwrap();
+        assert_eq!(out.trim(), "secondOnLine2");
+
+        // A first-line capture reports line 1, and the column matches the
+        // matcher's one-based visual column.
+        let out = elaborate_with(
+            &[("two", "rule two { $word first $word second }")],
+            "test.two as root",
+            "[when $root.first.line == 1 && $root.first.col == 1 { start } else { other }]",
+            "abc\ndef",
+        )
+        .unwrap();
+        assert_eq!(out.trim(), "start");
     }
 
     #[test]

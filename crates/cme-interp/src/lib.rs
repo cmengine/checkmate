@@ -65,6 +65,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Instant;
 
 use cme_core::Span;
 use cme_core::ast::{
@@ -72,10 +73,13 @@ use cme_core::ast::{
     StmtKind, Type, UnaryOp,
 };
 
-/// The call-depth limit. A fixed constant per the current spec (§5.5 allows
-/// host-configurable limits only in the future Engine API); native Rust
-/// recursion is guarded by it, so runaway recursion terminates with a clean
-/// [`InterpError`] instead of a stack overflow.
+/// The call-depth bound. [`MAX_CALL_DEPTH`] is the interpreter default; a
+/// host embedding the interpreter can lower it per interpreter via
+/// [`Interpreter::with_call_depth_limit`] (WHITEPAPER §5.5, §13.1).
+/// Native Rust recursion is guarded by it, so runaway recursion terminates
+/// with a clean [`InterpError`] instead of a stack overflow. A host running
+/// programs that legitimately recurse near [`MAX_CALL_DEPTH`] must provide
+/// adequate native stack (a dedicated thread), or configure a lower limit.
 pub const MAX_CALL_DEPTH: usize = 1024;
 
 /// A runtime value. Plain Rust types by design: no `Rc`, no copy-on-write —
@@ -204,6 +208,93 @@ impl Value {
             Value::Map(_) => "map".into(),
         }
     }
+
+    /// The `int` payload, or `None` for any other kind. The scalar
+    /// accessors let hosts unpack results without pattern-matching the
+    /// whole enum (WHITEPAPER §13.1).
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Value::Int(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The `float` payload, or `None` for any other kind.
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Value::Float(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The `bool` payload, or `None` for any other kind.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The `str` payload, or `None` for any other kind.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Str(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The array elements, or `None` for any other kind.
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Value::Array(elements) => Some(elements),
+            _ => None,
+        }
+    }
+
+    /// The map entries in insertion order, or `None` for any other kind.
+    pub fn as_map(&self) -> Option<&[(Value, Value)]> {
+        match self {
+            Value::Map(entries) => Some(entries),
+            _ => None,
+        }
+    }
+
+    /// True for the absence value a `void` function returns.
+    pub fn is_void(&self) -> bool {
+        matches!(self, Value::Void)
+    }
+}
+
+/// Host-side conversions: building call arguments from plain Rust values
+/// without hand-constructing variants (WHITEPAPER §13.1).
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Value::Int(value)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::Float(value)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Value::Bool(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Value::Str(value.to_string())
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Value::Str(value)
+    }
 }
 
 /// A runtime error: what went wrong, and where. Terminates the invocation
@@ -216,7 +307,32 @@ impl Value {
 pub struct InterpError {
     pub message: String,
     pub span: Span,
+    /// Coarse classification used by embedding layers (WHITEPAPER §5.5, §13):
+    /// limit-family failures surface differently from ordinary runtime
+    /// failures so hosts can report budget exhaustion distinctly.
+    kind: InterpErrorKind,
     control: Option<Box<Value>>,
+}
+
+/// The coarse failure family of an [`InterpError`].
+///
+/// - [`InterpErrorKind::Runtime`] — everything the language itself treats as
+///   a runtime failure: overflow, division by zero, out-of-bounds indexing,
+///   a missing map key, a checker-shape violation raised defensively.
+/// - [`InterpErrorKind::Budget`] — the §5.5 fuel meter reached zero.
+/// - [`InterpErrorKind::Deadline`] — a host-configured wall-clock deadline
+///   (§5.5) passed at a safepoint.
+/// - [`InterpErrorKind::CallDepth`] — the call-depth limit (§5.5) was hit.
+/// - [`InterpErrorKind::UnknownEntry`] — the host asked for a function or
+///   impl member the program does not declare (§2.1: hosts target specific
+///   entry points; a miss is a host-side mistake, reported defensively).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterpErrorKind {
+    Runtime,
+    Budget,
+    Deadline,
+    CallDepth,
+    UnknownEntry,
 }
 
 impl InterpError {
@@ -224,8 +340,61 @@ impl InterpError {
         Self {
             message: message.into(),
             span,
+            kind: InterpErrorKind::Runtime,
             control: None,
         }
+    }
+
+    /// A host-invoked entry point that does not exist (§2.1): the request
+    /// itself is the failure, so it classifies distinctly from script bugs.
+    fn unknown_entry(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            message: message.into(),
+            span,
+            kind: InterpErrorKind::UnknownEntry,
+            control: None,
+        }
+    }
+
+    /// The §5.5 fuel meter reached zero: one more operation was attempted
+    /// than the budget allows.
+    fn budget(span: Span) -> Self {
+        Self {
+            message: "fuel budget exhausted (§5.5: execution is metered by \
+                      operation count)"
+                .into(),
+            span,
+            kind: InterpErrorKind::Budget,
+            control: None,
+        }
+    }
+
+    /// A host-configured wall-clock deadline (§5.5) passed at a safepoint.
+    fn deadline(span: Span) -> Self {
+        Self {
+            message: "execution deadline exceeded (§5.5: the host's \
+                      wall-clock deadline passed at a safepoint)"
+                .into(),
+            span,
+            kind: InterpErrorKind::Deadline,
+            control: None,
+        }
+    }
+
+    /// The §5.5 call-depth limit: recursion outlived the configured bound.
+    fn call_depth(limit: usize, span: Span) -> Self {
+        Self {
+            message: format!("call depth limit of {limit} exceeded"),
+            span,
+            kind: InterpErrorKind::CallDepth,
+            control: None,
+        }
+    }
+
+    /// The failure family, for hosts that report budget exhaustion
+    /// differently from ordinary runtime failures (WHITEPAPER §5.5, §13).
+    pub fn kind(&self) -> InterpErrorKind {
+        self.kind
     }
 
     /// The `?` early-return signal (§2.8): the enclosing function returns
@@ -234,6 +403,7 @@ impl InterpError {
         Self {
             message: String::new(),
             span,
+            kind: InterpErrorKind::Runtime,
             control: Some(Box::new(value)),
         }
     }
@@ -269,6 +439,14 @@ pub struct Interpreter<'a> {
     /// a runaway `@`-function (an infinite loop, a memory bomb) terminates
     /// with a clean [`InterpError`] instead of hanging the compiler.
     fuel: Option<&'a Cell<u64>>,
+    /// The §5.5 call-depth bound: the maximum CME call frames a single
+    /// invocation may nest. Defaults to [`MAX_CALL_DEPTH`]; hosts embedding
+    /// the interpreter may lower it (WHITEPAPER §5.5, §13.1).
+    call_depth_limit: usize,
+    /// The §5.5 wall-clock deadline, when the host configures one: checked
+    /// at the same safepoints as fuel, so runaway execution ends with a
+    /// clean [`InterpError`] instead of holding the host forever.
+    deadline: Option<Instant>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -310,6 +488,8 @@ impl<'a> Interpreter<'a> {
             impls,
             host: None,
             fuel: None,
+            call_depth_limit: MAX_CALL_DEPTH,
+            deadline: None,
         }
     }
 
@@ -329,12 +509,32 @@ impl<'a> Interpreter<'a> {
         self
     }
 
+    /// Lowers the §5.5 call-depth bound below [`MAX_CALL_DEPTH`]. Hosts
+    /// embedding the interpreter use this to bound recursion tighter than
+    /// the interpreter default (WHITEPAPER §5.5, §13.1 `max_call_depth`);
+    /// a depth at or above [`MAX_CALL_DEPTH`] keeps the default.
+    pub fn with_call_depth_limit(mut self, limit: usize) -> Self {
+        if limit > 0 {
+            self.call_depth_limit = limit;
+        }
+        self
+    }
+
+    /// Attaches a §5.5 wall-clock deadline: once `deadline` has passed, the
+    /// next safepoint (every statement and expression evaluation) ends the
+    /// invocation with a clean deadline error. Real time is only observed
+    /// at safepoints — never asynchronously.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
     /// Invokes `name` with `args` (bound by value, cloned). Errors on an
     /// unknown function or an arity mismatch — defensively, since the
     /// checker normally guarantees both.
     pub fn invoke(&self, name: &str, args: &[Value]) -> Result<Value, InterpError> {
         let Some(&declaration) = self.functions.get(name) else {
-            return Err(InterpError::new(
+            return Err(InterpError::unknown_entry(
                 format!("unknown function `{name}`"),
                 Span::new(0, 0),
             ));
@@ -358,7 +558,7 @@ impl<'a> Interpreter<'a> {
             .get(target)
             .and_then(|registry| registry.get(member))
         else {
-            return Err(InterpError::new(
+            return Err(InterpError::unknown_entry(
                 format!("unknown impl member `{target}.{member}`"),
                 Span::new(0, 0),
             ));
@@ -376,6 +576,8 @@ impl<'a> Interpreter<'a> {
             impls: &self.impls,
             host: self.host,
             fuel: self.fuel,
+            call_depth_limit: self.call_depth_limit,
+            deadline: self.deadline,
             scopes: Vec::new(),
             depth: 0,
         }
@@ -407,24 +609,33 @@ struct Runner<'env, 'a> {
     impls: &'env HashMap<String, HashMap<String, &'a Stmt>>,
     host: Option<&'env dyn CtHost>,
     fuel: Option<&'env Cell<u64>>,
+    /// The configured §5.5 call-depth bound (the [`Interpreter`]'s, which
+    /// defaults to [`MAX_CALL_DEPTH`]).
+    call_depth_limit: usize,
+    /// The configured §5.5 wall-clock deadline, if any.
+    deadline: Option<Instant>,
     scopes: Vec<HashMap<String, Value>>,
     depth: usize,
 }
 
 impl<'env, 'a> Runner<'env, 'a> {
-    /// Charges one deterministic operation against the fuel meter (§5.5).
-    /// An operation attempted at zero remaining budget is a clean budget
-    /// error — never a hang, never wall-clock time, so compile-time
-    /// evaluation stays byte-reproducible across platforms.
-    fn spend_fuel(&mut self, span: Span) -> Result<(), InterpError> {
+    /// The §5.5 safepoint, charged by every statement and expression
+    /// evaluation: a wall-clock deadline is observed first (real time is
+    /// only ever read here — never asynchronously), then one deterministic
+    /// operation is charged against the fuel meter. A budget attempted at
+    /// zero remaining fuel, or after the deadline, is a clean [`InterpError`]
+    /// — never a hang, never a panic, so both compile-time evaluation and
+    /// host-driven execution stay bounded (§5.5).
+    fn check_budget(&mut self, span: Span) -> Result<(), InterpError> {
+        if let Some(deadline) = self.deadline
+            && Instant::now() >= deadline
+        {
+            return Err(InterpError::deadline(span));
+        }
         if let Some(fuel) = self.fuel {
             let remaining = fuel.get();
             if remaining == 0 {
-                return Err(InterpError::new(
-                    "compile-time fuel budget exhausted (§5.5: execution is \
-                     metered by operation count)",
-                    span,
-                ));
+                return Err(InterpError::budget(span));
             }
             fuel.set(remaining - 1);
         }
@@ -463,11 +674,8 @@ impl<'env, 'a> Runner<'env, 'a> {
                 call_span,
             ));
         }
-        if self.depth >= MAX_CALL_DEPTH {
-            return Err(InterpError::new(
-                format!("call depth limit of {MAX_CALL_DEPTH} exceeded"),
-                call_span,
-            ));
+        if self.depth >= self.call_depth_limit {
+            return Err(InterpError::call_depth(self.call_depth_limit, call_span));
         }
 
         self.depth += 1;
@@ -523,7 +731,7 @@ impl<'env, 'a> Runner<'env, 'a> {
     }
 
     fn exec_stmt(&mut self, stmt: &'a Stmt) -> Result<Flow, InterpError> {
-        self.spend_fuel(stmt.span)?;
+        self.check_budget(stmt.span)?;
         match &stmt.kind {
             // A call statement evaluates and discards its result — void or
             // not, silently (owner ruling).
@@ -716,7 +924,7 @@ impl<'env, 'a> Runner<'env, 'a> {
     }
 
     fn eval(&mut self, expr: &'a Expr) -> Result<Value, InterpError> {
-        self.spend_fuel(expr.span)?;
+        self.check_budget(expr.span)?;
         match &expr.kind {
             ExprKind::IntLit(value) => Ok(Value::Int(*value)),
             ExprKind::FloatLit(value) => Ok(Value::Float(*value)),
@@ -1705,7 +1913,7 @@ fn unary_symbol(op: UnaryOp) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{InterpError, Interpreter, MAX_CALL_DEPTH, Value};
+    use super::{InterpError, InterpErrorKind, Interpreter, MAX_CALL_DEPTH, Value};
     use cme_core::Span;
     use std::cell::Cell;
 
@@ -2217,11 +2425,10 @@ mod tests {
             .invoke("spin", &[])
             .expect_err("100 operations must not finish an infinite loop");
         assert!(
-            error
-                .message
-                .starts_with("compile-time fuel budget exhausted"),
+            error.message.starts_with("fuel budget exhausted"),
             "{error:?}"
         );
+        assert_eq!(error.kind(), InterpErrorKind::Budget);
 
         // The same meter on a bounded program runs to completion with the
         // correct result — it charges, it does not interfere.
@@ -2230,5 +2437,143 @@ mod tests {
         let fuel = Cell::new(1_000_000);
         let interpreter = Interpreter::new(&statements).with_fuel(&fuel);
         assert_eq!(interpreter.invoke("bounded", &[]), Ok(Value::Int(15)));
+    }
+
+    #[test]
+    fn error_kinds_classify_entry_misses_and_runtime_failures() {
+        // An unknown entry point is a host-side mistake (§2.1: hosts target
+        // specific entry points), classified apart from script failures.
+        let statements = parse_statements_for_interp("int main() {\nreturn 1\n}\n");
+        let interpreter = Interpreter::new(&statements);
+        let error = interpreter
+            .invoke("nope", &[])
+            .expect_err("unknown functions must fail");
+        assert_eq!(error.kind(), InterpErrorKind::UnknownEntry);
+
+        let error = interpreter
+            .invoke_member("engine.gamemode", "OnTick", &[])
+            .expect_err("unknown impl members must fail");
+        assert_eq!(error.kind(), InterpErrorKind::UnknownEntry);
+
+        // Ordinary script failures stay Runtime.
+        let source = "int main() {\nreturn 1 / 0\n}\n";
+        let outcome = cme_compiler::parse_source(source);
+        let interpreter = Interpreter::new(&outcome.statements);
+        let error = interpreter.invoke("main", &[]).unwrap_err();
+        assert_eq!(error.kind(), InterpErrorKind::Runtime);
+    }
+
+    #[test]
+    fn host_conversions_build_scalars_and_extractors_unpack_them() {
+        assert_eq!(Value::from(7i64), Value::Int(7));
+        assert_eq!(Value::from(0.5f64), Value::Float(0.5));
+        assert_eq!(Value::from(true), Value::Bool(true));
+        assert_eq!(Value::from("hi"), Value::Str("hi".into()));
+        assert_eq!(Value::from(String::from("hi")), Value::Str("hi".into()));
+
+        assert_eq!(Value::Int(-3).as_int(), Some(-3));
+        assert_eq!(Value::Int(-3).as_float(), None);
+        assert_eq!(Value::Float(1.5).as_float(), Some(1.5));
+        assert_eq!(Value::Bool(true).as_bool(), Some(true));
+        assert_eq!(Value::Str("s".into()).as_str(), Some("s"));
+        assert_eq!(Value::Str("s".into()).as_int(), None);
+        assert!(Value::Void.is_void());
+        assert!(!Value::Int(0).is_void());
+
+        // Non-scalar kinds never satisfy scalar accessors.
+        assert_eq!(
+            Value::Array(vec![Value::Int(1)]).as_array().unwrap()[0],
+            Value::Int(1)
+        );
+        assert_eq!(Value::Array(vec![]).as_int(), None);
+    }
+
+    #[test]
+    fn configured_call_depth_limit_bounds_recursion_tighter_than_the_default() {
+        // The depth check is the FIRST thing a call does after the arity
+        // check, so a limit of 1 stops the recursion after exactly one
+        // nested frame: main is already running, spin must not enter.
+        let source = "int spin(int n) {\nreturn spin(n)\n}\nint main() {\nreturn spin(1)\n}\n";
+        let statements = parse_statements_for_interp(source);
+        let interpreter = Interpreter::new(&statements).with_call_depth_limit(1);
+        let error = interpreter.invoke("main", &[]).unwrap_err();
+        assert_eq!(error.kind(), InterpErrorKind::CallDepth);
+        assert_eq!(error.message, "call depth limit of 1 exceeded");
+
+        // A limit of 0 is the unset sentinel: the default applies, so a
+        // bounded program still runs.
+        let bounded = "int id(int v) {\nreturn v\n}\nint main() {\nreturn id(3)\n}\n";
+        let statements = parse_statements_for_interp(bounded);
+        let interpreter = Interpreter::new(&statements).with_call_depth_limit(0);
+        assert_eq!(interpreter.invoke("main", &[]), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn the_default_depth_limit_is_unchanged_by_a_limit_at_the_maximum() {
+        // Configuring the builder with MAX_CALL_DEPTH itself must keep the
+        // interpreter's pinned default behavior: runaway recursion dies at
+        // the same limit with the same message. 1024 nested CME frames
+        // occupy several native Rust frames each in a debug build, so this
+        // runs on a dedicated thread with a generous stack — the depth
+        // guard, not the native stack, must be what stops the recursion.
+        let source = "int spin() {\nreturn spin()\n}\nint main() {\nreturn spin()\n}\n";
+        let handle = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let statements = parse_statements_for_interp(source);
+                Interpreter::new(&statements)
+                    .with_call_depth_limit(MAX_CALL_DEPTH)
+                    .invoke("main", &[])
+            })
+            .expect("spawn the default-limit thread");
+        let result = handle.join().expect("default-limit thread must not panic");
+        assert_eq!(
+            result.unwrap_err().message,
+            format!("call depth limit of {MAX_CALL_DEPTH} exceeded")
+        );
+    }
+
+    #[test]
+    fn a_low_depth_limit_runs_on_the_ordinary_test_stack() {
+        // A handful of nested CME frames fit anywhere — this pins that a
+        // lowered limit makes deep-recursion testing runnable without a
+        // big-stack thread.
+        let source = "int down(int n) {\nif (n <= 0) {\nreturn 0\n}\nreturn down(n - 1)\n}\nint main() {\nreturn down(4)\n}\n";
+        let statements = parse_statements_for_interp(source);
+        let interpreter = Interpreter::new(&statements).with_call_depth_limit(16);
+        assert_eq!(interpreter.invoke("main", &[]), Ok(Value::Int(0)));
+
+        let interpreter = Interpreter::new(&statements).with_call_depth_limit(4);
+        let error = interpreter.invoke("main", &[]).unwrap_err();
+        assert_eq!(error.kind(), InterpErrorKind::CallDepth);
+        assert_eq!(error.message, "call depth limit of 4 exceeded");
+    }
+
+    #[test]
+    fn an_expired_deadline_stops_at_the_first_safepoint() {
+        // The deadline has already passed: the very first statement's
+        // safepoint ends the invocation with a clean deadline error.
+        let source = "int spin() {\nint x = 0\nwhile (true) {\nx = x + 1\n}\nreturn x\n}\n";
+        let statements = parse_statements_for_interp(source);
+        let expired = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        let interpreter = Interpreter::new(&statements).with_deadline(expired);
+        let error = interpreter.invoke("spin", &[]).unwrap_err();
+        assert_eq!(error.kind(), InterpErrorKind::Deadline);
+        assert!(
+            error.message.starts_with("execution deadline exceeded"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_future_deadline_lets_bounded_work_finish() {
+        // A deadline 5 seconds out never fires on a bounded program: the
+        // check observes real time only at safepoints and must not
+        // interfere with ordinary execution.
+        let source = "int sum() {\nint total = 0\nfor (int i in [1, 2, 3, 4, 5, 6, 7]) {\ntotal = total + i\n}\nreturn total\n}\n";
+        let statements = parse_statements_for_interp(source);
+        let soon = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let interpreter = Interpreter::new(&statements).with_deadline(soon);
+        assert_eq!(interpreter.invoke("sum", &[]), Ok(Value::Int(28)));
     }
 }

@@ -33,6 +33,14 @@ pub struct Parser<'a, 'src> {
     /// an `Invalid` node is planted into the AST at the failure site, so the
     /// parser never stops and always produces the fullest possible tree.
     errors: Vec<Diagnostic>,
+    /// The index the parser's first diagnostic occupies in the list the
+    /// consumer assembles. `parse_source` prepends lex/strip diagnostics to
+    /// the parser's own list, so ErrorIds embedded in the AST must be
+    /// offset by that prefix to stay aligned with the combined list —
+    /// otherwise every AST error reference points at the wrong diagnostic
+    /// (the cme-core ErrorId contract: an index into the diagnostics list
+    /// produced WITH the AST).
+    error_base: usize,
     /// Current recursion depth (parenthesized/unary expression nesting,
     /// statement nesting, generic type nesting). Adversarially deep source
     /// must fail with a clean diagnostic instead of overflowing the stack —
@@ -71,9 +79,20 @@ impl<'a, 'src> Parser<'a, 'src> {
             tokens,
             pos: 0,
             errors: Vec::new(),
+            error_base: 0,
             depth,
             expr_ops,
             type_nodes,
+        }
+    }
+
+    /// A parser whose ErrorIds are offset by `error_base`: the consumer
+    /// (parse_source) prepends that many lex/strip diagnostics to the
+    /// parser's own list, and the AST's ids must index the combined list.
+    pub(crate) fn with_error_base(tokens: &'a [SpannedToken<'src>], error_base: usize) -> Self {
+        Self {
+            error_base,
+            ..Self::new(tokens)
         }
     }
 
@@ -111,9 +130,15 @@ impl<'a, 'src> Parser<'a, 'src> {
     /// Records a recoverable diagnostic and returns its index for embedding
     /// into an `Invalid` AST node.
     fn record(&mut self, message: impl Into<String>, span: Span) -> ErrorId {
-        let id = self.errors.len();
+        let id = ErrorId(self.error_base + self.errors.len());
         self.errors.push(Diagnostic::parse(message, span));
-        ErrorId(id)
+        id
+    }
+
+    /// The ErrorId of the most recently pushed diagnostic, offset by the
+    /// consumer's error base (see [`Self::with_error_base`]).
+    fn last_error_id(&self) -> ErrorId {
+        ErrorId(self.error_base + self.errors.len().saturating_sub(1))
     }
 
     /// Drains the diagnostics recorded so far. Useful alongside
@@ -503,7 +528,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 Expr {
                     span: Span::new(start, end),
                     kind: ExprKind::Invalid {
-                        error: ErrorId(self.errors.len() - 1),
+                        error: self.last_error_id(),
                     },
                 }
             }
@@ -826,7 +851,7 @@ impl<'a, 'src> Parser<'a, 'src> {
         let (params, params_ok) = self.parse_parameter_list();
         if !params_ok {
             let end = self.skip_to_statement_end(self.peek().span.end);
-            let error = ErrorId(self.errors.len().saturating_sub(1));
+            let error = self.last_error_id();
             return Stmt {
                 span: Span::new(start, end),
                 kind: StmtKind::Invalid { error },
@@ -995,7 +1020,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_if_statement(&mut self, if_token: SpannedToken<'src>) -> Stmt {
         let (cond, cond_ok) = self.parse_condition_parens();
         if !cond_ok {
-            let error = ErrorId(self.errors.len().saturating_sub(1));
+            let error = self.last_error_id();
             let mut end = self.recover_to_next_statement(self.peek().span.end);
             // A failed arm may be part of an `else if` chain: every further
             // arm still belongs to this one statement, so the tail joins the
@@ -1092,7 +1117,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 }
                 let (arm_cond, arm_cond_ok) = self.parse_condition_parens();
                 if !arm_cond_ok {
-                    let error = ErrorId(self.errors.len().saturating_sub(1));
+                    let error = self.last_error_id();
                     let mut end = self.recover_to_next_statement(self.peek().span.end);
                     let save = self.pos;
                     self.skip_newlines();
@@ -1200,7 +1225,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_while_statement(&mut self, while_token: SpannedToken<'src>) -> Stmt {
         let (cond, cond_ok) = self.parse_condition_parens();
         if !cond_ok {
-            let error = ErrorId(self.errors.len().saturating_sub(1));
+            let error = self.last_error_id();
             let end = self.recover_to_next_statement(self.peek().span.end);
             return Stmt {
                 span: Span::new(while_token.span.start, end),
@@ -1241,7 +1266,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             let missing = Expr {
                 span: Span::missing(other.span.start),
                 kind: ExprKind::Invalid {
-                    error: ErrorId(self.errors.len() - 1),
+                    error: self.last_error_id(),
                 },
             };
             return (missing, false);
@@ -1269,7 +1294,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 let missing = Expr {
                     span: Span::missing(self.peek().span.start),
                     kind: ExprKind::Invalid {
-                        error: ErrorId(self.errors.len() - 1),
+                        error: self.last_error_id(),
                     },
                 };
                 (missing, false)
@@ -1387,7 +1412,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             // point at the real type-parameter message, not be fabricated
             // from a list that never received it.
             self.errors.push(diagnostic);
-            let error = ErrorId(self.errors.len() - 1);
+            let error = self.last_error_id();
             return self.invalid_declaration(struct_token, error);
         }
         let type_params = type_params.unwrap();
@@ -1458,7 +1483,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             // As in the struct path: the recovered diagnostic is pushed so
             // the Invalid node's ErrorId names the real failure.
             self.errors.push(diagnostic);
-            let error = ErrorId(self.errors.len() - 1);
+            let error = self.last_error_id();
             return self.invalid_declaration(enum_token, error);
         }
         let type_params = type_params.unwrap();
@@ -2133,7 +2158,7 @@ impl<'a, 'src> Parser<'a, 'src> {
                 return Stmt {
                     span: Span::new(start.start, end),
                     kind: StmtKind::Invalid {
-                        error: ErrorId(self.errors.len() - 1),
+                        error: self.last_error_id(),
                     },
                 };
             }
@@ -2210,7 +2235,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_match_statement(&mut self, match_token: SpannedToken<'src>) -> Stmt {
         let (scrutinee, ok) = self.parse_condition_parens();
         if !ok {
-            let error = ErrorId(self.errors.len().saturating_sub(1));
+            let error = self.last_error_id();
             let end = self.recover_to_next_statement(self.peek().span.end);
             return Stmt {
                 span: Span::new(match_token.span.start, end),
@@ -2491,7 +2516,7 @@ impl<'a, 'src> Parser<'a, 'src> {
     fn parse_for_statement(&mut self, for_token: SpannedToken<'src>) -> Stmt {
         let recover = |parser: &mut Self| -> Stmt {
             let end = parser.skip_to_statement_end(parser.peek().span.end);
-            let error = ErrorId(parser.errors.len().saturating_sub(1));
+            let error = parser.last_error_id();
             Stmt {
                 span: Span::new(for_token.span.start, end),
                 kind: StmtKind::Invalid { error },

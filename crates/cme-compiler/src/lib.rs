@@ -30,7 +30,13 @@ pub fn parse_source(source: &str) -> ParseOutcome {
     let mut diagnostics: Vec<Diagnostic> = lex_errors.into_iter().map(Diagnostic::lex).collect();
     let (tokens, strip_errors) = parser::Parser::strip_insignificant_newlines_with_errors(tokens);
     diagnostics.extend(strip_errors);
-    let (statements, parse_errors) = parser::Parser::new(&tokens).parse_program_with_errors();
+    // The parser's ErrorIds must index the COMBINED list (lex + strip +
+    // parse), so they are offset by the prefix length — otherwise every
+    // AST error reference points at the wrong diagnostic whenever a lex
+    // or strip error precedes the parse errors.
+    let error_base = diagnostics.len();
+    let (statements, parse_errors) =
+        parser::Parser::with_error_base(&tokens, error_base).parse_program_with_errors();
     diagnostics.extend(parse_errors);
     ParseOutcome {
         statements,
@@ -42,7 +48,7 @@ pub fn parse_source(source: &str) -> ParseOutcome {
 mod tests {
     use super::lexer::{SpannedToken, Token, lex};
     use super::parser::Parser;
-    use crate::diagnostics::Diagnostic;
+    use crate::diagnostics::{Diagnostic, DiagnosticKind};
     use cme_core::Span;
     use cme_core::ast::{
         BinaryOp, Block, CallArg, CompoundOp, ErrorId, Expr, ExprKind, InterpPart, LValue,
@@ -2807,6 +2813,53 @@ mod tests {
             "{:?}",
             outcome.diagnostics
         );
+    }
+
+    #[test]
+    fn error_ids_stay_aligned_when_lex_errors_precede_parse_errors() {
+        // parse_source concatenates lex + strip + parse diagnostics into one
+        // list, but the parser's ErrorIds were zero-based into the parse
+        // sublist: with a lex error present, every AST error reference was
+        // shifted and pointed at the WRONG diagnostic (the line-1 lex error
+        // instead of the line-2 message). The parser's ids are now offset
+        // by the prefix count, so each Invalid node's id resolves through
+        // ParseOutcome::error to a diagnostic in its own stage.
+        let source = "infer a = @\nint b = <\n";
+        let outcome = crate::parse_source(source);
+        assert!(!outcome.is_clean());
+
+        let mut ids = Vec::new();
+        collect_error_ids(&outcome.statements, &mut ids);
+        assert!(!ids.is_empty());
+        for id in ids {
+            let diagnostic = outcome
+                .error(id)
+                .unwrap_or_else(|| panic!("dangling ErrorId({id:?})"));
+            assert!(
+                matches!(diagnostic.kind(), DiagnosticKind::Parse),
+                "ErrorId({id:?}) resolved to a non-parse diagnostic: {diagnostic}"
+            );
+        }
+
+        // The exact mapping from the finding: the line-2 declaration's
+        // Invalid names the `<` on its own line — not the line-1 `@`.
+        let line2 = outcome
+            .statements
+            .iter()
+            .find(|stmt| matches!(stmt.kind, StmtKind::VarDecl { .. }) && stmt.span.start >= 12)
+            .expect("the line-2 declaration stays in the tree");
+        let StmtKind::VarDecl { expr, .. } = &line2.kind else {
+            unreachable!()
+        };
+        let ExprKind::Invalid { error } = expr.kind else {
+            panic!("expected an Invalid initializer, got {:?}", expr.kind);
+        };
+        let message = outcome
+            .error(error)
+            .expect("the initializer's ErrorId resolves")
+            .message()
+            .to_string();
+        assert_eq!(message, "expected an expression, but found `<`");
     }
 
     #[test]

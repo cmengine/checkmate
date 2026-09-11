@@ -219,26 +219,24 @@ impl LineMap {
     /// `pos` (or the region length for the final line). The map stores
     /// after-terminator positions, so the search is strictly greater — a
     /// `pos` that exactly equals a stored end (a line start) belongs to the
-    /// NEXT line, whose end comes later.
+    /// NEXT line, whose end comes later. `line_ends` is built ascending, so
+    /// the scan is a binary search: `eol`/`indent`/transparent-line
+    /// machinery consults this at every line boundary, and a linear scan
+    /// made expansion quadratic in region size.
     fn line_end(&self, pos: usize) -> usize {
-        for end in &self.line_ends {
-            if *end > pos {
-                return *end;
-            }
+        let index = self.line_ends.partition_point(|&end| end <= pos);
+        if index < self.line_ends.len() {
+            self.line_ends[index]
+        } else {
+            self.col_of.len()
         }
-        self.col_of.len()
     }
 
     /// The char index just past the terminator ending the line at/after pos.
     fn next_line_start(&self, pos: usize) -> usize {
         // Strictly greater: when `pos` is itself a terminator, its line's
         // end already points at the next line's start (§8.3.5).
-        for end in &self.line_ends {
-            if *end > pos {
-                return *end;
-            }
-        }
-        self.col_of.len()
+        self.line_end(pos)
     }
 }
 
@@ -405,6 +403,15 @@ struct Matcher<'a> {
     /// Packrat memo (§8.7): rule results keyed by rule + position + match
     /// environment + continuation identity.
     memo: HashMap<MemoKey, Option<(Capture, usize)>>,
+    /// Parse-accept memo for parse-integrated extents (§8.3.6): a boundary's
+    /// parse outcome depends only on the captured text, the fragment kind,
+    /// and the delegating grammar (the only environment input of
+    /// `extent_capture`), so retried boundary candidates — every `oneof`
+    /// fall-through re-runs the extent search — reuse the first attempt's
+    /// result instead of re-parsing. Keyed by (start, end, grammar, fragment
+    /// identity); the pattern AST outlives the match, so its addresses are
+    /// stable identities.
+    extent_parse_memo: ExtentParseMemo,
     /// Rule invocations currently being matched; a re-entrant call against an
     /// in-progress entry fails immediately (§8.7's cycle-cut backstop).
     in_progress: HashSet<MemoKey>,
@@ -436,6 +443,10 @@ struct FailureRecord {
 /// (tail-bounded fragments inside a rule extend to the caller's boundary, so
 /// the same rule at the same position under a different continuation is a
 /// different match).
+/// One parse-integrated boundary's outcome: the delegated capture on
+/// accept, or the parse-failure message that diagnostic reporting needs.
+type ExtentParseMemo = HashMap<(usize, usize, usize, usize), Result<Option<Capture>, String>>;
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct MemoKey {
     grammar: usize,
@@ -578,6 +589,7 @@ impl<'a> Matcher<'a> {
             failures: Vec::new(),
             committed: Vec::new(),
             memo: HashMap::new(),
+            extent_parse_memo: HashMap::new(),
             in_progress: HashSet::new(),
             speculative: 0,
             ct,
@@ -2432,7 +2444,16 @@ impl<'a> Matcher<'a> {
             let tail_hit = self.tail_matches(end, &tail, env);
             env.scope = saved_scope;
             if tail_hit {
-                match self.extent_capture(start, end, kind, env) {
+                let key = (start, end, env.grammar, kind as *const FragKind as usize);
+                let outcome = match self.extent_parse_memo.get(&key) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let outcome = self.extent_capture(start, end, kind, env);
+                        self.extent_parse_memo.insert(key, outcome.clone());
+                        outcome
+                    }
+                };
+                match outcome {
                     Err(message) => furthest = Some((end, message)),
                     Ok(delegated) => return Some((end, delegated)),
                 }
@@ -3122,38 +3143,55 @@ fn body_value(out: &Out) -> Capture {
     }
 }
 
+/// True when the char slice at `pos` starts with `needle`'s characters.
+/// Operates on the region's existing `Vec<char>` — the skipper consults
+/// comment forms at every element boundary, so materializing the remaining
+/// region as a `String` per call made expansion quadratic in region size.
+fn chars_start_with(chars: &[char], pos: usize, needle: &str) -> bool {
+    let mut offset = pos;
+    for expected in needle.chars() {
+        match chars.get(offset) {
+            Some(c) if *c == expected => offset += 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
 fn comment_len_at(
     region: &MatchRegion<'_>,
     char_pos: usize,
     profile: &LexProfile,
 ) -> Option<usize> {
-    let text: String = region.chars[char_pos..].iter().collect();
+    let chars = &region.chars[char_pos..];
     let form = profile
         .comments
         .iter()
-        .filter(|form| text.starts_with(&form.opener))
+        .filter(|form| chars_start_with(chars, 0, &form.opener))
         .max_by_key(|form| form.opener.len())?;
-    let after = &text[form.opener.len()..];
+    let opener_chars = form.opener.chars().count();
+    let after = &chars[opener_chars..];
     Some(match &form.closer {
         None => {
             let chars_to_eol = after
-                .chars()
-                .take_while(|c| *c != '\n' && *c != '\r')
+                .iter()
+                .take_while(|c| **c != '\n' && **c != '\r')
                 .count();
-            form.opener.chars().count() + chars_to_eol
+            opener_chars + chars_to_eol
         }
         Some(closer) => {
             // An unterminated block comment is NOT transparent here; the
             // region scanner already rejected such regions.
-            let opener_len = form.opener.chars().count();
-            let mut scanned = String::new();
+            let closer_chars: Vec<char> = closer.chars().collect();
             let mut hit = None;
-            for (index, c) in after.chars().enumerate() {
-                scanned.push(c);
-                if scanned.ends_with(closer.as_str()) {
-                    hit = Some(opener_len + index + closer.chars().count());
-                    break;
+            'outer: for index in 0..after.len() {
+                for (offset, expected) in closer_chars.iter().enumerate() {
+                    if after.get(index + offset) != Some(expected) {
+                        continue 'outer;
+                    }
                 }
+                hit = Some(opener_chars + index + closer_chars.len());
+                break;
             }
             hit?
         }

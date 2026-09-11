@@ -458,3 +458,62 @@ fn cme_expand_writes_the_sidecar_file() {
     assert!(type_errors.is_empty());
     let _ = std::fs::remove_file(&sidecar);
 }
+
+/// The §8.7.2 complexity bound on plain grammars: matching a large region
+/// with a flow-oriented `each` + comments grammar is O(region), so a
+/// multi-thousand-word region expands well inside a generous wall-clock
+/// ceiling. Before the skipper's comment scan stopped materializing the
+/// remaining region as a `String` per boundary and the line map went
+/// binary, this shape was quadratic — 4× per doubling — and a region of
+/// this size took minutes.
+#[test]
+fn large_plain_regions_expand_in_linear_time() {
+    use std::time::Instant;
+
+    let words = 16_000;
+    let region = (0..words)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let comments = (0..400)
+        .map(|i| format!("# comment line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r##"
+grammar flow {{
+    skip [ ' ', '\t', '\r', '\n' ]
+    comment ( "#" )
+    rule file {{ each {{ word }} as ws }}
+    rule word {{ $word w }}
+}}
+
+magic grabWords(flow.file as f) {{
+    return 0
+}}
+
+int main() {{
+    magic(grabWords) {{
+{region}
+{comments}
+    }}
+    return 0
+}}
+"##
+    );
+
+    let started = Instant::now();
+    let outcome = cme_compiler::mega::expand::expand_source(&source)
+        .expect("a large plain region must expand");
+    let elapsed = started.elapsed();
+    assert!(
+        !outcome.expanded.contains("magic(grabWords)"),
+        "the invocation site was replaced by its template"
+    );
+    // Generous ceiling: linear expansion finishes in a fraction of a
+    // second even unoptimized; the old quadratic behavior exceeded it.
+    assert!(
+        elapsed.as_secs() < 15,
+        "expansion of a {words}-word region took {elapsed:?} — the quadratic skipper is back"
+    );
+}

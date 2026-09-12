@@ -726,9 +726,28 @@ fn render_message_indexed(
 }
 
 // This binary is only compiled if the user installs the CLI toolchain.
+/// The display path for `Compiler`/`Runtime` diagnostics: the file
+/// argument AFTER `--schema` pairs are consumed — the same positional
+/// layout `run` parses, so `cme check --schema s.cm x.cm` renders
+/// `x.cm:…`, not the literal `--schema` that `args().nth(2)` would name.
+#[cfg(feature = "cli")]
+fn rendered_source_path() -> String {
+    let mut positionals: Vec<String> = Vec::new();
+    let mut iter = std::env::args().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--schema" {
+            // Skip the flag's value too.
+            iter.next();
+            continue;
+        }
+        positionals.push(arg);
+    }
+    positionals.get(1).cloned().unwrap_or_default()
+}
+
 #[cfg(feature = "cli")]
 fn main() -> ExitCode {
-    let source_path = std::env::args().nth(2).unwrap_or_default();
+    let source_path = rendered_source_path();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Usage(message) | CliError::Io(message)) => {

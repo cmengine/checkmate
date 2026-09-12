@@ -237,3 +237,31 @@ fn run_with_schema_constructs_schema_types() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout.trim(), "7");
 }
+
+#[test]
+fn diagnostics_name_the_script_even_when_schema_precedes_it() {
+    // The display path is the file argument, resolved after `--schema`
+    // pairs are consumed — not raw args().nth(2), which is the literal
+    // `--schema` whenever the flag precedes the path.
+    let schema = TempFile::new("prefix_schema", GOOD_SCHEMA);
+    let program = TempFile::new(
+        "prefix_program",
+        "import engine.graphics\nint main() {\nint broken = engine.graphics.LoadTexture(42)\nreturn 0\n}\n",
+    );
+
+    let (code, _stdout, stderr) = cme(&["check", "--schema", schema.path(), program.path()]);
+    assert_ne!(code, 0);
+    let program_name = program
+        .path()
+        .rsplit('/')
+        .next()
+        .expect("a temp path with a file name");
+    assert!(
+        stderr.contains(program_name),
+        "the diagnostic names the script file: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--schema:"),
+        "no diagnostic may render the flag as the file name: {stderr}"
+    );
+}

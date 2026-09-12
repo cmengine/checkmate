@@ -46,7 +46,10 @@ use std::collections::BTreeMap;
 
 use cme_core::Span;
 use cme_core::ast::{FieldDef, Param, PrimitiveType, Type, VariantDecl};
-use cme_core::schema::{
+// The §9 data model lives in `cme-core` (the AST-ownership rule); this
+// module re-exports it so consumers of the front end need only
+// `cme_compiler::schema`.
+pub use cme_core::schema::{
     ContractKind, MemberRequirement, RequiresPath, SchemaContract, SchemaEnum, SchemaFile,
     SchemaItem, SchemaMember, SchemaStruct, Version, is_camel_case, is_pascal_case,
 };

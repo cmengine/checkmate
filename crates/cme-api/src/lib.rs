@@ -71,14 +71,28 @@
 
 pub use cme_compiler::Diagnostic;
 pub use cme_compiler::mods::{LoadedModule, ModManifest};
-pub use cme_interp::{InterpErrorKind, MAX_CALL_DEPTH, Value};
+/// The §9 schema surface, re-exported so hosts and generated bindings
+/// never need `cme-compiler` directly: schema types carry the contract,
+/// [`SchemaContext`] is the active grant a load is checked against, and
+/// [`parse_schema_file`] parses `.cm` schema files.
+pub use cme_compiler::schema::{
+    SchemaContext, SchemaFile, SchemaIssue, SchemaParseOutcome, SchemaSet, Version,
+    parse_schema_file,
+};
+pub use cme_core::schema::{
+    ContractKind, MemberRequirement, RequiresPath, SchemaContract, SchemaEnum, SchemaItem,
+    SchemaMember, SchemaStruct, is_camel_case, is_pascal_case,
+};
+pub use cme_interp::{CapabilityHost, InterpErrorKind, MAX_CALL_DEPTH, Value};
 
 mod context;
 mod engine;
 mod render;
 
 pub use context::{Context, ErrorKind, ExecutionError, ExecutionLimits};
-pub use engine::{CompileError, CompiledProgram, Engine, LoadError, ProgramKind};
+pub use engine::{
+    CapabilityProvider, CompileError, CompiledProgram, Engine, LoadError, ProgramKind, SchemaError,
+};
 
 #[cfg(test)]
 mod tests {

@@ -535,6 +535,28 @@ impl<'a> Interpreter<'a> {
         self
     }
 
+    /// Registers SUPPLEMENTARY type declarations — the schema boundary
+    /// types (§9.3) a host synthesizes from its registered schemas.
+    /// Scripts construct schema structs and enums exactly like local ones,
+    /// so the runtime needs their shapes; the supplement is scanned like
+    /// the program's own declarations, except that a program-local
+    /// declaration always wins (the checker rejects the collision
+    /// upstream anyway).
+    pub fn with_declarations(mut self, declarations: &'a [Stmt]) -> Self {
+        for statement in declarations {
+            match &statement.kind {
+                StmtKind::StructDecl { name, .. } => {
+                    self.structs.entry(name.as_str()).or_insert(statement);
+                }
+                StmtKind::EnumDecl { name, .. } => {
+                    self.enums.entry(name.as_str()).or_insert(statement);
+                }
+                _ => {}
+            }
+        }
+        self
+    }
+
     /// Attaches the §5.5 fuel meter: a deterministic operation count shared
     /// with the host (the compile-time evaluator). When the counter reaches
     /// zero, evaluation stops with a clean budget error — an infinite loop

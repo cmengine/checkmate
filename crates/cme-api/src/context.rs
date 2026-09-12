@@ -1,14 +1,18 @@
-//! Execution contexts: §5.5 limits per invocation and the host-visible
-//! error surface (WHITEPAPER §13).
+//! Execution contexts: §5.5 limits per invocation, the host-visible
+//! error surface, and capability dispatch (WHITEPAPER §13).
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cme_core::Span;
-use cme_interp::{InterpError, InterpErrorKind, Interpreter, MAX_CALL_DEPTH, Value};
+use cme_interp::{
+    CapabilityHost, InterpError, InterpErrorKind, Interpreter, MAX_CALL_DEPTH, Value,
+};
 
-use crate::engine::{CompiledProgram, render_runtime_error};
+use crate::engine::{CapabilityProvider, CompiledProgram, render_runtime_error};
 
 /// The §5.5 execution constraints a host imposes on invocations created
 /// from one context. Every field documents its own unset convention; the
@@ -151,17 +155,38 @@ impl std::error::Error for ExecutionError {}
 ///
 /// The context borrows its program (`create_context(&program, limits)`),
 /// which is what makes program-before-context lifetimes a compile-time
-/// guarantee.
-#[derive(Debug, Clone)]
+/// guarantee. Capability calls (§9) dispatch to the provider snapshot the
+/// context was created with.
+#[derive(Clone)]
 pub struct Context<'p> {
     program: &'p CompiledProgram,
     limits: ExecutionLimits,
+    providers: Arc<HashMap<String, Arc<dyn CapabilityProvider>>>,
+}
+
+impl<'p> fmt::Debug for Context<'p> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Context")
+            .field("program", &self.program)
+            .field("limits", &self.limits)
+            .field("capabilities", &self.providers.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl<'p> Context<'p> {
-    /// Creates a context; prefer [`Engine::create_context`].
-    pub fn new(program: &'p CompiledProgram, limits: ExecutionLimits) -> Context<'p> {
-        Context { program, limits }
+    /// Creates a context; prefer [`crate::Engine::create_context`].
+    pub fn new(
+        program: &'p CompiledProgram,
+        limits: ExecutionLimits,
+        providers: Arc<HashMap<String, Arc<dyn CapabilityProvider>>>,
+    ) -> Context<'p> {
+        Context {
+            program,
+            limits,
+            providers,
+        }
     }
 
     /// The program this context executes.
@@ -172,6 +197,13 @@ impl<'p> Context<'p> {
     /// The limits every invocation of this context runs under.
     pub fn limits(&self) -> &ExecutionLimits {
         &self.limits
+    }
+
+    /// Whether the program implements `target` — the check a generated
+    /// interface proxy (§9.6) performs at construction so a host cannot
+    /// silently call into an interface the program never implemented.
+    pub fn has_interface(&self, target: &str) -> bool {
+        self.program.interface_targets().iter().any(|t| t == target)
     }
 
     /// Invokes a top-level function by name with positional arguments
@@ -197,6 +229,8 @@ impl<'p> Context<'p> {
     /// Runs one invocation under this context's §5.5 limits: a fresh fuel
     /// cell and deadline per call, the depth bound configured once. The
     /// interpreter never escapes — contexts expose values, not frames.
+    /// Capability calls (§9) dispatch to the snapshot's providers through
+    /// the engine-agnostic [`CapabilityHost`] seam.
     fn run(
         &self,
         call: impl FnOnce(&Interpreter<'_>) -> Result<Value, InterpError>,
@@ -207,7 +241,11 @@ impl<'p> Context<'p> {
             .deadline_ms
             .map(|ms| Instant::now() + Duration::from_millis(ms));
 
-        let mut interpreter = Interpreter::new(self.program.statements());
+        let dispatch = ProviderDispatch {
+            providers: &self.providers,
+        };
+        let mut interpreter = Interpreter::new(self.program.statements())
+            .with_declarations(self.program.schema_declarations());
         if let Some(cell) = fuel.as_ref() {
             interpreter = interpreter.with_fuel(cell);
         }
@@ -215,6 +253,9 @@ impl<'p> Context<'p> {
             interpreter = interpreter.with_deadline(deadline);
         }
         interpreter = interpreter.with_call_depth_limit(self.limits.max_call_depth);
+        if !self.providers.is_empty() {
+            interpreter = interpreter.with_capabilities(&dispatch);
+        }
 
         call(&interpreter).map_err(|error| self.execution_error(error))
     }
@@ -239,5 +280,23 @@ impl<'p> Context<'p> {
             file,
             span,
         }
+    }
+}
+
+/// The bridge from the interpreter's [`CapabilityHost`] seam to the
+/// registered providers: `path` (`["engine", "graphics"]`) keys the
+/// provider table, the member dispatches inside it.
+struct ProviderDispatch<'a> {
+    providers: &'a HashMap<String, Arc<dyn CapabilityProvider>>,
+}
+
+impl<'a> CapabilityHost for ProviderDispatch<'a> {
+    fn call(&self, path: &[&str], member: &str, args: &[Value]) -> Result<Value, String> {
+        let qualified = path.join(".");
+        let provider = self
+            .providers
+            .get(&qualified)
+            .ok_or_else(|| format!("capability `{qualified}` is not registered"))?;
+        provider.call(member, args)
     }
 }

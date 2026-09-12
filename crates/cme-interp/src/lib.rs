@@ -2682,6 +2682,66 @@ mod tests {
         }
     }
 
+    /// The typed seam: a provider may hand back schema ENUMS and the
+    /// script matches on them — the value shapes, not interpreter
+    /// internals, are the whole contract any execution engine inherits.
+    struct EnumHost;
+
+    impl CapabilityHost for EnumHost {
+        fn call(&self, _path: &[&str], member: &str, _args: &[Value]) -> Result<Value, String> {
+            match member {
+                "NextEvent" => Ok(Value::Enum {
+                    name: "Event".to_string(),
+                    variant: "Scored".to_string(),
+                    payload: vec![Value::Int(25)],
+                }),
+                other => Err(format!("no member `{other}`")),
+            }
+        }
+    }
+
+    #[test]
+    fn capability_values_carry_schema_enums_into_scripts() {
+        let source = "\
+enum Event {
+    Started()
+    Scored(int points)
+}
+int main() {
+    Event event = engine.feed.NextEvent()
+    return match (event) {
+        Started() => 0
+        Scored(int points) => points * 2
+    }
+}
+";
+        let statements = parse_statements_for_interp(source);
+        let interpreter = Interpreter::new(&statements).with_capabilities(&EnumHost);
+        assert_eq!(interpreter.invoke("main", &[]), Ok(Value::Int(50)));
+    }
+
+    #[test]
+    fn capability_errors_report_the_member_and_path() {
+        let source = "\
+int main() {
+    engine.missing.Nope()
+    return 0
+}
+";
+        let statements = parse_statements_for_interp(source);
+        let host = CountingHost {
+            calls: std::cell::Cell::new(0),
+        };
+        let interpreter = Interpreter::new(&statements).with_capabilities(&host);
+        let error = interpreter.invoke("main", &[]).unwrap_err();
+        assert!(
+            error.message.contains("engine.missing"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("Nope"), "{}", error.message);
+    }
+
     #[test]
     fn capability_calls_dispatch_to_the_registered_host() {
         let source = "\

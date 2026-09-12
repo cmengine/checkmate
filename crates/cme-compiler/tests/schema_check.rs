@@ -609,3 +609,226 @@ impl engine.gamemode {
         diagnostic_messages(&diagnostics)
     );
 }
+
+// ---------------------------------------------------------------------------
+// §9.2 cross-namespace contracts (§9.4 over qualified requires paths)
+// ---------------------------------------------------------------------------
+
+/// Two namespaces, one requiring an interface of the other (§9.2: "Cross-
+/// schema interface dependencies use qualified paths: `interface hud
+/// requires ui.widgets`").
+const CROSS: &str = "
+schema engine v1.0.0
+
+interface hud requires ui.widgets {
+    since 1.0.0 void DrawHud()
+}
+
+capability overlay requires ui.widgets {
+    since 1.0.0 void Show(str text)
+}
+
+schema ui v1.2.0
+
+interface widgets {
+    since 1.0.0 void Layout(int slot)
+    since 1.2.0 optional void Blink(int slot)
+}
+";
+
+#[test]
+fn cross_namespace_requires_resolves_at_set_build() {
+    // CROSS holds both namespaces in one string; split on the second
+    // header and build one set: the qualified edge resolves into `ui`.
+    let (first, second) = CROSS.split_once("schema ui").expect("two headers");
+    let mut parsed = Vec::new();
+    for text in [first.to_string(), format!("schema ui{second}")] {
+        let outcome = parse_schema_file(&text);
+        assert!(
+            outcome.is_clean(),
+            "fixtures must parse: {:?}",
+            outcome.diagnostics
+        );
+        parsed.push(outcome.file.expect("file"));
+    }
+    let set = SchemaSet::build(parsed);
+    assert!(
+        set.is_ok(),
+        "the qualified cross-namespace edge must resolve"
+    );
+}
+
+#[test]
+fn implementing_an_interface_requires_the_cross_namespace_prerequisite() {
+    let context = cross_context();
+    // hud implemented, ui.widgets NOT: §9.4 rule 1 fails across namespaces.
+    let diagnostics = check_with("impl engine.hud {\nvoid DrawHud() {\n}\n}\n", &context);
+    let messages = diagnostic_messages(&diagnostics);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("engine.hud") && m.contains("ui.widgets")),
+        "the cross-namespace prerequisite must be demanded: {messages:?}"
+    );
+}
+
+#[test]
+fn the_cross_namespace_prerequisite_satisfies_the_rule() {
+    let context = cross_context();
+    // Both interfaces implemented: the mod passes §9.4 rule 1.
+    let diagnostics = check_with(
+        "impl engine.hud {\nvoid DrawHud() {\n}\n}\nimpl ui.widgets {\nvoid Layout(int slot) {\n}\n}\n",
+        &context,
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "both namespaces implemented: {:?}",
+        diagnostic_messages(&diagnostics)
+    );
+}
+
+#[test]
+fn a_capability_requires_its_cross_namespace_interface_before_calls() {
+    let context = cross_context();
+    // The overlay capability requires ui.widgets; calling Show without
+    // implementing the prerequisite is blocked (§9.4 rule 2).
+    let diagnostics = check_with(
+        "import engine.overlay\nint main() {\nengine.overlay.Show(\"hi\")\nreturn 0\n}\n",
+        &context,
+    );
+    let messages = diagnostic_messages(&diagnostics);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("engine.overlay") && m.contains("ui.widgets")),
+        "the capability call must demand the prerequisite: {messages:?}"
+    );
+
+    // With the prerequisite fully implemented, the call checks clean.
+    let diagnostics = check_with(
+        "import engine.overlay\nimpl ui.widgets {\nvoid Layout(int slot) {\n}\n}\nint main() {\nengine.overlay.Show(\"hi\")\nreturn 0\n}\n",
+        &context,
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "prerequisite satisfied: {:?}",
+        diagnostic_messages(&diagnostics)
+    );
+}
+
+#[test]
+fn requires_may_not_name_a_capability() {
+    const BAD: &str = "
+schema a v1.0.0
+
+interface broken requires b.helper {
+    since 1.0.0 void Go()
+}
+
+schema b v1.0.0
+
+capability helper {
+    since 1.0.0 void Do()
+}
+";
+    let (first, second) = BAD.split_once("schema b").expect("two headers");
+    let mut files = Vec::new();
+    for text in [first.to_string(), format!("schema b{second}")] {
+        let outcome = parse_schema_file(&text);
+        assert!(outcome.is_clean());
+        files.push(outcome.file.expect("file"));
+    }
+    let issues = SchemaSet::build(files).expect_err("a requires edge must name an INTERFACE");
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message.contains("a.broken") && issue.message.contains("b.helper")),
+        "the issue names the broken edge: {:?}",
+        issues.iter().map(|i| i.message.clone()).collect::<Vec<_>>()
+    );
+}
+
+/// Builds the CROSS fixture into a grant-all context (the split the other
+/// tests repeat).
+fn cross_context() -> SchemaContext {
+    let (first, second) = CROSS.split_once("schema ui").expect("two headers");
+    let mut files = Vec::new();
+    for text in [first.to_string(), format!("schema ui{second}")] {
+        let outcome = parse_schema_file(&text);
+        assert!(outcome.is_clean());
+        files.push(outcome.file.expect("file"));
+    }
+    let set = SchemaSet::build(files).expect("set");
+    SchemaContext::grant_all(set)
+}
+
+// ---------------------------------------------------------------------------
+// §9.4 completeness is version-aware (§9.5)
+// ---------------------------------------------------------------------------
+
+/// A prerequisite whose newest member is hidden at older targets: the
+/// requires-completeness rule must judge against VISIBLE members only.
+const GATING: &str = "
+schema gating v2.0.0
+
+interface base {
+    since 1.0.0 void Basic()
+    since 2.0.0 void Future()
+}
+
+interface derived requires base {
+    since 1.0.0 void Do()
+}
+";
+
+fn gating_context(version: &str) -> SchemaContext {
+    let outcome = parse_schema_file(GATING);
+    assert!(outcome.is_clean());
+    let set = SchemaSet::build(vec![outcome.file.expect("file")]).expect("set");
+    SchemaContext::grant_targets(set, vec![("gating".to_string(), version.to_string())])
+        .expect("valid target")
+}
+
+#[test]
+fn prerequisite_completeness_follows_the_target_version() {
+    // At target 1.0.0, base.Future (since 2.0.0) is HIDDEN: implementing
+    // the visible Basic satisfies the requires edge.
+    let diagnostics = check_with(
+        "impl gating.derived {\nvoid Do() {\n}\n}\nimpl gating.base {\nvoid Basic() {\n}\n}\n",
+        &gating_context("1.0.0"),
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "visible members complete at 1.0.0: {:?}",
+        diagnostic_messages(&diagnostics)
+    );
+
+    // At target 2.0.0 base.Future is visible and REQUIRED: the same shape
+    // now fails completeness — on the prerequisite, through requires.
+    let diagnostics = check_with(
+        "impl gating.derived {\nvoid Do() {\n}\n}\nimpl gating.base {\nvoid Basic() {\n}\n}\n",
+        &gating_context("2.0.0"),
+    );
+    let messages = diagnostic_messages(&diagnostics);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("gating.base") && m.contains("Future")),
+        "the newly visible member is demanded: {messages:?}"
+    );
+}
+
+#[test]
+fn an_unimplemented_prerequisite_fails_the_requires_rule() {
+    // §9.4 rule 1, the minimal negative: the derived interface is fully
+    // implemented, but the prerequisite has no impl at all.
+    let context = gating_context("2.0.0");
+    let diagnostics = check_with("impl gating.derived {\nvoid Do() {\n}\n}\n", &context);
+    let messages = diagnostic_messages(&diagnostics);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("gating.derived") && m.contains("gating.base")),
+        "requires fires when the prerequisite has no impl at all: {messages:?}"
+    );
+}

@@ -203,9 +203,9 @@ fn interface_proxies_call_into_the_script_with_types() {
         .expect("the program implements the interfaces");
 
     let context = engine.create_context(&program, cme_api::ExecutionLimits::default());
-    let proxy = EngineGamemodeProxy::new(&context).expect("the program implements gamemode");
-
-    // The §13.1 shape: the same proxy through the generic constructor.
+    // The direct constructor and the §13.1 generic one agree: both build
+    // the proxy over the same context.
+    let _ = EngineGamemodeProxy::new(&context).expect("the program implements gamemode");
     let proxy: EngineGamemodeProxy = context
         .get_interface()
         .expect("get_interface routes to InterfaceProxy::from_context");

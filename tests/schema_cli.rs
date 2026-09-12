@@ -36,6 +36,26 @@ impl Drop for TempFile {
     }
 }
 
+/// A schema fixture exercising the shapes codegen-c must render.
+const SCHEMA_FIXTURE: &str = "schema det v1.0.0\n\
+struct Handle {\n\
+int id\n\
+}\n\
+struct Item {\n\
+str name\n\
+Handle inner\n\
+}\n\
+enum Kind {\n\
+Off\n\
+Loaded(int amount)\n\
+}\n\
+capability cap {\n\
+since 1.0.0 Item Make(str label)\n\
+}\n\
+interface iface {\n\
+since 1.0.0 bool Ready()\n\
+}\n";
+
 fn cme(args: &[&str]) -> (i32, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_cme"))
         .args(args)
@@ -119,6 +139,26 @@ fn codegen_c_prints_a_header() {
     assert!(stdout.contains("#ifndef CME_SCHEMA_GEN_ENGINE_H"));
     assert!(stdout.contains("cme_engine_graphics_LoadTexture_fn"));
     assert!(stdout.contains("CME_ENGINE_GRAPHICS_REGISTER"));
+}
+
+#[test]
+fn codegen_c_output_is_byte_deterministic() {
+    // The schema file is the contract: two runs over the same file must
+    // produce byte-identical headers, so a host can commit one and diff it.
+    let schema = TempFile::new("det.cm", SCHEMA_FIXTURE);
+    let (code1, out1, _) = cme(&["codegen-c", schema.path()]);
+    let (code2, out2, _) = cme(&["codegen-c", schema.path()]);
+    assert_eq!((code1, code2), (0, 0), "codegen-c succeeds");
+    assert_eq!(out1, out2, "codegen-c must be deterministic");
+    assert!(
+        out1.contains("CME_SCHEMA_DET_VERSION"),
+        "the header metadata renders"
+    );
+    assert!(out1.contains("char* name;"), "str fields render");
+    assert!(
+        out1.contains("strcmp(variant_name, \"Loaded\")"),
+        "enum unpack renders"
+    );
 }
 
 #[test]

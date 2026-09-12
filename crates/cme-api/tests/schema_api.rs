@@ -371,3 +371,226 @@ fn conversion_errors_are_ordinary_runtime_errors() {
     };
     assert_eq!(error.render(), "expected TextureHandle");
 }
+
+// ---------------------------------------------------------------------------
+// The engine-agnostic seam (§9, §13.1): providers dispatch identically
+// whichever execution engine sits underneath — the tree walker today, the
+// bytecode VM / LLVM AOT (§5) tomorrow — because both sides only share
+// `CapabilityHost` + `Value`.
+// ---------------------------------------------------------------------------
+
+/// The same provider logic, expressed through cme-interp's raw
+/// `CapabilityHost` seam (what a different execution engine would call
+/// through): it must behave EXACTLY like the `Context` path.
+struct SeamProvider;
+
+impl cme_interp::CapabilityHost for SeamProvider {
+    fn call(&self, path: &[&str], member: &str, args: &[Value]) -> Result<Value, String> {
+        assert_eq!(path, &["engine", "graphics"]);
+        match member {
+            "LoadTexture" => {
+                let Value::Str(path) = &args[0] else {
+                    return Err("LoadTexture expects a str path".to_string());
+                };
+                Ok(Value::Struct {
+                    name: "TextureHandle".to_string(),
+                    fields: vec![("id".to_string(), Value::Int(path.len() as i64))],
+                })
+            }
+            other => Err(format!("seam provider does not implement `{other}`")),
+        }
+    }
+}
+
+#[test]
+fn the_raw_interpreter_seam_and_the_context_dispatch_identically() {
+    let program_text = "import engine.graphics\n\
+         int main() {\n\
+         \x20TextureHandle tex = engine.graphics.LoadTexture(\"hero.png\")\n\
+         \x20return tex.id\n\
+         }\n";
+
+    // Path 1: the raw interpreter with a capability host attached — the
+    // shape ANY future execution engine reuses.
+    let outcome = cme_compiler::parse_source(program_text);
+    assert!(outcome.is_clean(), "the fixture parses");
+    let schema_outcome = cme_compiler::schema::parse_schema_file(ENGINE_SCHEMA);
+    assert!(schema_outcome.is_clean());
+    let set = cme_compiler::schema::SchemaSet::build(vec![schema_outcome.file.expect("file")])
+        .expect("set");
+    let context_schema = cme_compiler::schema::SchemaContext::grant_all(set);
+    let declarations = cme_compiler::schema::declaration_statements(&context_schema);
+    let interpreter = cme_interp::Interpreter::new(&outcome.statements)
+        .with_declarations(&declarations)
+        .with_capabilities(&SeamProvider);
+    let raw = interpreter
+        .invoke("main", &[])
+        .expect("the seam dispatches");
+    assert_eq!(raw, Value::Int(8));
+
+    // Path 2: the same program through Engine/Context, provider logic
+    // equivalent — the host-visible result must not differ.
+    let mut engine = engine_with_schema();
+    engine
+        .register_capability(
+            "engine.graphics",
+            Arc::new(GraphicsProvider {
+                loads: AtomicUsize::new(0),
+            }),
+        )
+        .expect("registers");
+    let program = engine.load_source(program_text).expect("loads");
+    let context = engine.create_context(&program, ExecutionLimits::default());
+    let api = context.invoke("main", &[]).expect("the context dispatches");
+    assert_eq!(api, raw);
+}
+
+#[test]
+fn a_mod_with_a_manifest_dispatches_capability_calls_to_providers() {
+    // The §10 mod shape of the same contract: [schemas] narrows the grant,
+    // the capability call inside a module file dispatches, and the impl
+    // member the host enters stays invocable.
+    let root = std::env::temp_dir().join(format!("cme_schema_mod_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("mod tree");
+    std::fs::write(
+        root.join("mod.toml"),
+        "name = \"schema_mod\"\nversion = \"1.0.0\"\ncheckmate_version = \"0.2.0\"\n\n[schemas]\nengine = \"1.2.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        root.join("src/main.cm"),
+        "import engine.graphics\n\
+         impl engine.gamemode {\n\
+         \x20GameState InitGame(GameConfig config) {\n\
+         \x20\x20return GameState(score: config.score, active: config.active)\n\
+         \x20}\n\
+         \x20void OnTick(GameState state, float deltaTime) {\n\
+         \x20}\n\
+         }\n\
+         int main() {\n\
+         \x20TextureHandle tex = engine.graphics.LoadTexture(\"poster\")\n\
+         \x20engine.graphics.DrawTexture(tex, Vec2(x: 0.0, y: 0.0))\n\
+         \x20return tex.id\n\
+         }\n",
+    )
+    .expect("main module");
+
+    let mut engine = engine_with_schema();
+    engine
+        .register_capability(
+            "engine.graphics",
+            Arc::new(GraphicsProvider {
+                loads: AtomicUsize::new(0),
+            }),
+        )
+        .expect("registers");
+
+    let program = engine.load_mod(&root).expect("the mod loads");
+    let context = engine.create_context(&program, ExecutionLimits::default());
+    assert_eq!(
+        context.invoke("main", &[]),
+        Ok(Value::Int("poster".len() as i64))
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_mod_calling_a_capability_without_a_provider_fails_the_load() {
+    // The provider-presence gate covers mods too — a call the host cannot
+    // dispatch is a compile-time failure of the load, not a runtime one.
+    let root = std::env::temp_dir().join(format!("cme_schema_mod_noprov_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("mod tree");
+    std::fs::write(
+        root.join("mod.toml"),
+        "name = \"noprov\"\nversion = \"1.0.0\"\ncheckmate_version = \"0.2.0\"\n\n[schemas]\nengine = \"1.0.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(
+        root.join("src/main.cm"),
+        "import engine.graphics\nint main() {\nengine.graphics.DrawTexture(TextureHandle(id: 1), Vec2(x: 0.0, y: 0.0))\nreturn 0\n}\n",
+    )
+    .expect("main module");
+
+    let engine = engine_with_schema();
+    let error = engine.load_mod(&root).expect_err("no provider registered");
+    assert!(
+        error
+            .messages()
+            .iter()
+            .any(|m| m.contains("engine.graphics") && m.contains("provider")),
+        "the load names the missing provider: {:?}",
+        error.messages()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_host_side_handle_implements_the_proxy_trait_over_the_value_seam() {
+    // The proxy surface is not reserved for the macro: ANY host handle
+    // built on Context + Value (i.e. the engine-agnostic seam) implements
+    // InterfaceProxy and plugs into get_interface. A future execution
+    // engine behind Context would serve this call unchanged.
+    struct OnTickHandle<'a, 'p> {
+        context: &'a cme_api::Context<'p>,
+    }
+
+    impl<'a, 'p> cme_api::InterfaceProxy<'a, 'p> for OnTickHandle<'a, 'p> {
+        fn from_context(context: &'a cme_api::Context<'p>) -> Result<Self, ExecutionError> {
+            if !context.has_interface("engine.gamemode") {
+                return Err(ExecutionError {
+                    kind: cme_api::ErrorKind::UnknownEntry,
+                    message: "engine.gamemode is not implemented".to_string(),
+                    line: 0,
+                    column: 0,
+                    file: None,
+                    span: None,
+                });
+            }
+            Ok(OnTickHandle { context })
+        }
+    }
+
+    impl<'a, 'p> OnTickHandle<'a, 'p> {
+        fn on_tick(&self, state: Value, delta: f64) -> Result<Value, ExecutionError> {
+            self.context
+                .invoke_member("engine.gamemode", "OnTick", &[state, Value::Float(delta)])
+        }
+    }
+
+    let engine = engine_with_schema();
+    let program = engine
+        .load_source(
+            "impl engine.gamemode {\n\
+             \x20GameState InitGame(GameConfig config) {\n\
+             \x20\x20return GameState(score: config.score, active: config.active)\n\
+             \x20}\n\
+             \x20void OnTick(GameState state, float deltaTime) {\n\
+             \x20}\n\
+             }\n",
+        )
+        .expect("loads");
+    let context = engine.create_context(&program, ExecutionLimits::default());
+
+    let handle: OnTickHandle = context.get_interface().expect("implements");
+    let state = Value::Struct {
+        name: "GameState".to_string(),
+        fields: vec![
+            ("score".to_string(), Value::Int(1)),
+            ("active".to_string(), Value::Bool(true)),
+        ],
+    };
+    assert_eq!(handle.on_tick(state, 0.5), Ok(Value::Void));
+
+    // The guard fires for programs without the interface.
+    let other = engine
+        .load_source("int main() {\nreturn 0\n}\n")
+        .expect("loads");
+    let context = engine.create_context(&other, ExecutionLimits::default());
+    let error = match context.get_interface::<OnTickHandle>() {
+        Err(error) => error,
+        Ok(_) => panic!("the guard must fail for a program without the interface"),
+    };
+    assert_eq!(error.kind, cme_api::ErrorKind::UnknownEntry);
+}

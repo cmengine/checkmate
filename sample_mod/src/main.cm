@@ -1,0 +1,5 @@
+import self.help.pls
+
+str main() {
+    return whatsTheBestNumber() + ""
+}

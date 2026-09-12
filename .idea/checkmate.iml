@@ -8,6 +8,12 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/cme-runtime/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/rust_host/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/rust_host/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cme-api/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cme-api/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cme-ffi/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cme-ffi/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

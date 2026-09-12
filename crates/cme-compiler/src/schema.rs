@@ -553,7 +553,7 @@ impl SchemaParser {
                 self.skip_newlines();
                 continue;
             }
-            match self.parse_member(&name, &members) {
+            match self.parse_member(&name, kind, &members) {
                 Some(member) => {
                     last_end = Some(member.span.end);
                     members.push(member);
@@ -605,8 +605,16 @@ impl SchemaParser {
 
     /// One contract member:
     /// `since X.Y.Z`? `optional`? (`suspend` rejected) TYPE Name(params) —
-    /// newline-delimited (§9.1).
-    fn parse_member(&mut self, contract: &str, existing: &[SchemaMember]) -> Option<SchemaMember> {
+    /// newline-delimited (§9.1). `kind` decides whether `optional` is
+    /// legal: §9.5 defines it for INTERFACE members a mod may skip;
+    /// capability members are host-provided, so the flag has no meaning
+    /// there and is rejected.
+    fn parse_member(
+        &mut self,
+        contract: &str,
+        kind: ContractKind,
+        existing: &[SchemaMember],
+    ) -> Option<SchemaMember> {
         let start = self.peek().span.start;
         let mut since = Version::ZERO;
         if self.at_ident("since") {
@@ -625,7 +633,16 @@ impl SchemaParser {
         }
         let mut requirement = MemberRequirement::Required;
         if self.at_ident("optional") {
+            let optional_span = self.peek().span;
             self.bump();
+            if kind == ContractKind::Capability {
+                self.record(
+                    "`optional` is an interface-member concept (§9.5): a mod may skip an \
+                     optional interface function, but a capability member is provided by \
+                     the host and must always exist — drop `optional` here",
+                    optional_span,
+                );
+            }
             requirement = MemberRequirement::Optional;
         }
         if self.at_ident("suspend") {
@@ -1283,6 +1300,29 @@ impl SchemaSet {
         let set = SchemaSet { namespaces: sorted };
         for file in set.namespaces.clone() {
             for contract in file.contracts() {
+                // §9.5: a member's `since` tag places it on the schema's own
+                // version timeline. A member introduced AFTER the version the
+                // schema declares can never be visible (no target may exceed
+                // the schema's own version), so it is a schema-authoring bug:
+                // the version bump was forgotten.
+                for member in &contract.members {
+                    if member.since > file.version {
+                        issues.push(SchemaIssue {
+                            message: format!(
+                                "{} `{}.{}` member `{}` is tagged `since {}`, but the schema \
+                                 declares v{} — a member cannot be introduced after the \
+                                 schema version that carries it (§9.5)",
+                                contract.kind.keyword(),
+                                file.namespace,
+                                contract.name,
+                                member.name,
+                                member.since,
+                                file.version
+                            ),
+                            namespace: Some(file.namespace.clone()),
+                        });
+                    }
+                }
                 let Some(requires) = &contract.requires else {
                     continue;
                 };

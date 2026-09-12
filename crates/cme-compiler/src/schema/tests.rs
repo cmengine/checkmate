@@ -383,3 +383,63 @@ fn comments_and_layout_are_accepted() {
         ContractKind::Interface
     );
 }
+
+#[test]
+fn an_optional_capability_member_is_rejected() {
+    // §9.5 defines `optional` for INTERFACE members a mod may skip. A
+    // capability member is host-provided and must always exist, so the
+    // flag has no meaning there — the parser rejects it with a pointed
+    // diagnostic.
+    let outcome = parse_schema_file(
+        "schema engine v1.0.0\n\
+         \n\
+         capability gfx {\n\
+         \x20   since 1.0.0 optional void Draw()\n\
+         }\n",
+    );
+    assert!(
+        !outcome.is_clean(),
+        "`optional` on a capability member must be a schema defect"
+    );
+    assert!(
+        outcome.diagnostics.iter().any(|d| d
+            .message()
+            .contains("`optional` is an interface-member concept")),
+        "the diagnostic names the rule: {:?}",
+        outcome.diagnostics
+    );
+
+    // The same flag on an interface member stays legal.
+    let clean = parse_clean(
+        "schema engine v1.0.0\n\
+         \n\
+         interface svc {\n\
+         \x20   since 1.0.0 optional void Draw()\n\
+         }\n",
+    );
+    assert_eq!(clean.contracts().count(), 1);
+}
+
+#[test]
+fn a_member_introduced_after_the_schema_version_is_a_set_issue() {
+    // §9.5: no target may exceed the schema's own version, so a member
+    // tagged beyond it could never be visible — a forgotten version bump.
+    let outcome = parse_clean(
+        "schema shop v1.0.0\n\
+         \n\
+         interface backend {\n\
+         \x20   since 1.0.0 bool Ping()\n\
+         \x20   since 9.9.9 bool Pong()\n\
+         }\n",
+    );
+    let issues = SchemaSet::build(vec![outcome]).expect_err("the set must reject it");
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.message.contains("`shop.backend` member `Pong`")
+                && i.message.contains("since 9.9.9")
+                && i.message.contains("v1.0.0")),
+        "the issue names the member and both versions: {:?}",
+        issues.iter().map(|i| &i.message).collect::<Vec<_>>()
+    );
+}

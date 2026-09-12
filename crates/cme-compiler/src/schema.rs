@@ -56,6 +56,9 @@ pub use cme_core::schema::{
 
 use crate::diagnostics::Diagnostic;
 
+mod codegen_c;
+pub use codegen_c::codegen_c;
+
 // ---------------------------------------------------------------------------
 // Scanner
 // ---------------------------------------------------------------------------

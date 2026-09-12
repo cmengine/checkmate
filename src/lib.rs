@@ -10,6 +10,12 @@ pub use cme_api::{CompiledProgram, Context, Engine, ExecutionLimits, MAX_CALL_DE
 #[cfg(feature = "compiler")]
 pub use cme_compiler as compiler;
 
+// §9.6: the procedural macro that turns a .cm schema file into
+// compile-time-verified host bindings (capability traits, interface
+// proxies, and the runtime schema descriptor).
+#[cfg(feature = "schema-macro")]
+pub use cme_schema_macro::cme_schema_bindings;
+
 #[cfg(feature = "core")]
 pub use cme_core as lang;
 

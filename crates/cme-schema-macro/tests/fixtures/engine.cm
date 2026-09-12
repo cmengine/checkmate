@@ -1,0 +1,64 @@
+// The §9.1-shaped fixture the bindings test generates bindings from.
+// Kept as a real file because the macro's contract IS reading real files.
+
+schema engine v1.4.0
+
+struct TextureHandle {
+    int id
+}
+
+struct Vec2 {
+    float x
+    float y
+}
+
+struct GameConfig {
+    int score
+    bool active
+}
+
+struct GameState {
+    int score
+    bool active
+}
+
+enum LoadError {
+    NotFound()
+    Corrupt(str reason)
+}
+
+struct Inventory {
+    str[] names
+    map<str, int> counts
+    option<str> label
+    result<int, LoadError> attempt
+}
+
+capability graphics {
+    since 1.0.0 TextureHandle LoadTexture(str path)
+    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
+    since 1.2.0 int DrawSprite(TextureHandle tex, Vec2 position, int frame)
+    since 1.3.0 option<TextureHandle> FindTexture(str path)
+    since 1.3.0 result<Inventory, LoadError> LoadInventory(str owner)
+    since 1.3.0 str[] TextureNames()
+    since 1.3.0 map<str, float> TextureScales()
+}
+
+capability assets requires loader {
+    since 1.0.0 TextureHandle LoadBundled(str name)
+}
+
+interface loader {
+    since 1.0.0 bool IsAvailable(str name)
+}
+
+interface gamemode requires core {
+    since 1.0.0 GameState InitGame(GameConfig config)
+    since 1.0.0 void OnTick(GameState state, float deltaTime)
+    since 1.0.0 result<int, LoadError> DamageRoll(int seed)
+    since 1.4.0 optional void OnSave(str path)
+}
+
+interface core {
+    since 1.0.0 void Tick()
+}

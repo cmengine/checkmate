@@ -1,0 +1,24 @@
+[package]
+name = "cme-schema-macro"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Compile-time-verified Checkmate host bindings from .cm schema files (WHITEPAPER 9.6)"
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+cme-compiler = { path = "../cme-compiler", version = "0.2.0" }
+cme-core = { path = "../cme-core", version = "0.2.0" }
+
+# Test-only: the generated bindings reference the host API, so the
+# integration tests compile and run them end to end.
+[dev-dependencies]
+cme-api = { path = "../cme-api", version = "0.2.0" }

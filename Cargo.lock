@@ -27,6 +27,7 @@ dependencies = [
  "cme-core",
  "cme-interp",
  "cme-runtime",
+ "cme-schema-macro",
 ]
 
 [[package]]
@@ -78,6 +79,15 @@ name = "cme-rust-host"
 version = "0.2.0"
 dependencies = [
  "cme",
+]
+
+[[package]]
+name = "cme-schema-macro"
+version = "0.2.0"
+dependencies = [
+ "cme-api",
+ "cme-compiler",
+ "cme-core",
 ]
 
 [[package]]

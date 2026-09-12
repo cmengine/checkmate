@@ -79,6 +79,10 @@ pub use cme_compiler::schema::{
     SchemaContext, SchemaFile, SchemaIssue, SchemaParseOutcome, SchemaSet, Version,
     parse_schema_file,
 };
+pub use cme_core::Span;
+/// The AST pieces schema declarations are built from — generated bindings
+/// (§9.6) construct [`SchemaFile`] descriptors with them.
+pub use cme_core::ast::{FieldDef, Param, PrimitiveType, Type, VariantDecl};
 pub use cme_core::schema::{
     ContractKind, MemberRequirement, RequiresPath, SchemaContract, SchemaEnum, SchemaItem,
     SchemaMember, SchemaStruct, is_camel_case, is_pascal_case,

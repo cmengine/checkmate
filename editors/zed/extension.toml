@@ -1,0 +1,12 @@
+id = "checkmate"
+name = "Checkmate"
+version = "0.1.0"
+schema_version = 1
+authors = ["cmengine"]
+description = "Checkmate (CME) language support: syntax highlighting, brackets, outline, indentation, and text objects for .cm scripts, mods, and schema files."
+repository = "https://github.com/cmengine/checkmate"
+
+[grammars.checkmate]
+repository = "https://github.com/cmengine/checkmate"
+rev = "88b78162a213d24f0290f221b3c0344bb8501461"
+path = "grammars/tree-sitter-checkmate"

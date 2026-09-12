@@ -873,9 +873,21 @@ static const char* SCHEMA_TEXT =
     "struct TextureHandle {\n"
     "int id\n"
     "}\n"
+    "struct Vec2 {\n"
+    "float x\n"
+    "float y\n"
+    "}\n"
+    "enum Event {\n"
+    "Started\n"
+    "Scored(int points)\n"
+    "}\n"
     "capability graphics {\n"
     "since 1.0.0 TextureHandle LoadTexture(str path)\n"
-    "since 1.0.0 void DrawTexture(TextureHandle tex)\n"
+    "since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)\n"
+    "}\n"
+    "interface hosthooks {\n"
+    "since 1.0.0 int OnEvent(Event event)\n"
+    "since 1.0.0 TextureHandle LastTexture()\n"
     "}\n";
 
 static cm_value_t* prov_LoadTexture(void* user,
@@ -945,7 +957,7 @@ static void test_schema_capability(void) {
         "import chost.graphics\n"
         "int main() {\n"
         "TextureHandle tex = chost.graphics.LoadTexture(\"hero.png\")\n"
-        "chost.graphics.DrawTexture(tex)\n"
+        "chost.graphics.DrawTexture(tex, Vec2(x: 1.0, y: 2.0))\n"
         "return tex.id\n"
         "}\n",
         &err);
@@ -1005,6 +1017,183 @@ static void test_value_string_round_trip(void) {
     cm_value_destroy(array);
 }
 
+/* The §9.6 schema bindings, consumed the way a REAL host consumes them:
+ * the header is GENERATED from apps/c_host/engine.cm (by this repo's build
+ * scripts or `make schema-gen`), and this file compiles against it. That
+ * gives the C half its compile-time guarantees — the REGISTER macro's
+ * _Static_asserts check every provider signature below against the schema,
+ * the pack/unpack helpers are the typed data layer, and the interface
+ * helpers take exactly the schema's arity. The section is guarded so the
+ * file still builds without the generated header (make clean state). */
+#ifdef CME_HOST_HAS_SCHEMA_GEN
+
+#include "chost_schema_gen.h"
+
+/* The providers: signatures here are compile-checked by the REGISTER
+ * macro's _Generic asserts — a wrong return type or parameter list is a
+ * BUILD error, never a runtime surprise. */
+static int64_t g_texture_id = 0;
+static double g_position_x = 0.0;
+static double g_position_y = 0.0;
+
+static cm_value_t* host_LoadTexture(void* user, cm_value_t* const* args,
+                                    size_t argc, cm_error_t* out_error) {
+    (void)user;
+    if (argc != 1 || !args[0]) {
+        if (out_error) out_error->kind = CM_ERROR_INVALID_ARG;
+        return NULL;
+    }
+    char* path = NULL;
+    size_t length = 0;
+    if (cm_value_as_str(args[0], &path, &length) != CM_OK) {
+        if (out_error) out_error->kind = CM_ERROR_INVALID_ARG;
+        return NULL;
+    }
+    cm_string_free(path);
+    cme_chost_TextureHandle tex;
+    tex.id = (int64_t)length;
+    return cme_chost_TextureHandle_pack(&tex);
+}
+
+static cm_value_t* host_DrawTexture(void* user, cm_value_t* const* args,
+                                    size_t argc, cm_error_t* out_error) {
+    (void)user;
+    if (argc != 2 || !args[0] || !args[1]) {
+        if (out_error) out_error->kind = CM_ERROR_INVALID_ARG;
+        return NULL;
+    }
+    /* The typed data layer, host side: unpack the script's struct values
+     * into the generated C structs, by field name. */
+    cme_chost_TextureHandle tex;
+    cme_chost_Vec2 position;
+    if (cme_chost_TextureHandle_unpack(args[0], &tex) != CM_OK) {
+        if (out_error) out_error->kind = CM_ERROR_INVALID_ARG;
+        return NULL;
+    }
+    if (cme_chost_Vec2_unpack(args[1], &position) != CM_OK) {
+        if (out_error) out_error->kind = CM_ERROR_INVALID_ARG;
+        return NULL;
+    }
+    g_texture_id = tex.id;
+    g_position_x = position.x;
+    g_position_y = position.y;
+    return cm_value_void();
+}
+
+static void test_schema_bindings(void) {
+    cm_error_t err = CM_ERROR_INIT;
+
+    cm_engine_t* engine = cm_engine_new();
+
+    /* The generated descriptor registers the SAME contract the header
+     * came from — one source of truth for toolchain and host. */
+    /* (The engine registers the schema through the parse surface; the
+     * header's own contract metadata is compile-time constants.) */
+    /* Parse the SAME schema text the generated header came from: the
+     * engine's runtime contract and the compile-time one share a source. */
+    cm_schema_t* schema = cm_schema_parse(SCHEMA_TEXT, &err);
+    CHECK(schema != NULL, "bindings: the schema parses");
+    CHECK(err.kind == CM_ERROR_NONE, "bindings: success report is NONE");
+    CHECK(cm_engine_register_schema(engine, schema) == 0, "bindings: registers");
+    cm_schema_destroy(schema);
+
+    /* The REGISTER macro: compile-time signature verification of the two
+     * providers above (a wrong signature here is a BUILD error). */
+    CHECK(cm_engine_register_capability(engine, "chost.graphics", NULL, 0, NULL) != 0,
+          "bindings: a NULL member table is rejected");
+    CME_CHOST_GRAPHICS_REGISTER(engine, NULL, host_LoadTexture, host_DrawTexture);
+
+    /* The program imports the capability, calls it, and implements the
+     * interface the host will call back into. */
+    const char* PROGRAM =
+        "import chost.graphics\n"
+        "impl chost.hosthooks {\n"
+        "int OnEvent(Event event) {\n"
+        "return match (event) {\n"
+        "Started() => 0\n"
+        "Scored(int points) => points\n"
+        "}\n"
+        "}\n"
+        "TextureHandle LastTexture() {\n"
+        "return TextureHandle(id: 77)\n"
+        "}\n"
+        "}\n"
+        "int main() {\n"
+        "TextureHandle tex = chost.graphics.LoadTexture(\"hero.png\")\n"
+        "chost.graphics.DrawTexture(tex, Vec2(x: 1.5, y: 2.5))\n"
+        "return tex.id\n"
+        "}\n";
+    cm_program_t* program = cm_engine_load_source(engine, PROGRAM, &err);
+    CHECK(program != NULL, "bindings: the gated program loads");
+    CHECK(err.kind == CM_ERROR_NONE, "bindings: no compile errors");
+    cm_error_free(&err);
+
+    if (program) {
+        cm_context_t* ctx = cm_engine_create_context(engine, program, NULL);
+        CHECK(ctx != NULL, "bindings: context created");
+
+        /* Script -> host capability call, unpacked through the typed layer. */
+        cm_future_t* future = cm_invoke(ctx, NULL, "main", NULL, 0);
+        cm_value_t* result = NULL;
+        if (future) {
+            cm_future_poll(future, &result);
+            cm_future_destroy(future);
+        }
+        int64_t id = 0;
+        CHECK(result && cm_value_as_int(result, &id) == CM_OK,
+              "bindings: main returns the texture id");
+        CHECK(id == 8, "bindings: the provider computed 8 from \"hero.png\"");
+        cm_value_destroy(result);
+        CHECK(g_texture_id == 8, "bindings: DrawTexture unpacked the struct");
+        CHECK(g_position_x == 1.5 && g_position_y == 2.5,
+              "bindings: DrawTexture unpacked the nested Vec2");
+
+        /* Host -> script interface call through the EXACT-ARITY helper,
+         * carrying a schema enum with a payload — packed C-side. */
+        cme_chost_Event event;
+        event.variant = CME_chost_Event_Scored;
+        event.as.Scored.points = 50;
+        cm_value_t* event_value = cme_chost_Event_pack(&event);
+        CHECK(event_value != NULL, "bindings: Event packs");
+        cm_value_t* points = cme_chost_hosthooks_OnEvent_invoke(ctx, event_value, &err);
+        CHECK(err.kind == CM_ERROR_NONE, "bindings: OnEvent invoked");
+        int64_t scored = -1;
+        CHECK(points && cm_value_as_int(points, &scored) == CM_OK,
+              "bindings: OnEvent returned an int");
+        CHECK(scored == 50, "bindings: the payload crossed to the script and back");
+        cm_value_destroy(points);
+
+        /* Round trip the SAME enum value through the generated unpack. */
+        cme_chost_Event back;
+        CHECK(cme_chost_Event_unpack(event_value, &back) == CM_OK &&
+                  back.variant == CME_chost_Event_Scored && back.as.Scored.points == 50,
+              "bindings: Event unpack round trips");
+        cm_value_destroy(event_value);
+        cm_error_free(&err);
+
+        /* A schema struct flowing OUT of the script, unpacked C-side. */
+        cm_future_t* last = cm_invoke(ctx, "chost.hosthooks", "LastTexture", NULL, 0);
+        cm_value_t* tex_value = NULL;
+        if (last) {
+            cm_future_poll(last, &tex_value);
+            cm_future_destroy(last);
+        }
+        cme_chost_TextureHandle last_tex;
+        CHECK(tex_value && cme_chost_TextureHandle_unpack(tex_value, &last_tex) == CM_OK,
+              "bindings: LastTexture unpacks");
+        CHECK(last_tex.id == 77, "bindings: the script's struct reaches the host typed");
+        cm_value_destroy(tex_value);
+
+        cm_context_destroy(ctx);
+        cm_program_destroy(program);
+    }
+
+    cm_engine_destroy(engine);
+    cm_error_free(&err);
+}
+
+#endif /* CME_HOST_HAS_SCHEMA_GEN */
+
 int cme_host_app_main(void) {
     printf("c-host: Checkmate C host application\n");
     printf("c-host: library version %s\n\n", cm_version());
@@ -1024,6 +1213,9 @@ int cme_host_app_main(void) {
     test_concurrent_contexts();
     test_value_string_round_trip();
     test_schema_capability();
+#ifdef CME_HOST_HAS_SCHEMA_GEN
+    test_schema_bindings();
+#endif
 
     printf("\nc-host: %d checks, %d failed\n", checks_run, checks_failed);
     if (checks_failed == 0) {

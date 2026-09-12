@@ -19,5 +19,8 @@ cme-core = { path = "../cme-core", version = "0.2.0" }
 
 # Compiles the C host application (apps/c_host) into this crate's test and
 # link surface, so `cargo test` exercises the real C consumer end to end.
+# cme-compiler generates the §9.6 schema header the consumer includes.
 [build-dependencies]
 cc = "1"
+cme-compiler = { path = "../cme-compiler", version = "0.2.0" }
+cme-core = { path = "../cme-core", version = "0.2.0" }

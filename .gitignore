@@ -28,6 +28,6 @@ rustc-ice-*.txt
 .DS_Store
 
 # The standalone C host app build output (see apps/c_host/Makefile)
-apps/c_host/c_host_app
-
 prepush.sh
+chost_schema_gen.h
+c_host_app

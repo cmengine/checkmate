@@ -12,31 +12,27 @@ INCLUDES = -I$(CME_ROOT)/crates/cme-ffi/include
 LIBDIR = $(CME_ROOT)/target/release
 LIBS = $(LIBDIR)/libcme_ffi.a -lm -lpthread -ldl
 TARGET = c_host_app
+CME_CLI ?= $(CME_ROOT)/target/debug/cme
 
-.PHONY: all clean test
+.PHONY: all clean test schema-gen
 
 all: $(TARGET)
 
-$(TARGET): main.c $(LIBS)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ main.c $(LIBS)
+# The §9.6 schema header, generated from THIS directory's engine.cm — the
+# same file the cme-ffi build script feeds its copy of main.c. With the
+# header present, main.c consumes it (CME_HOST_HAS_SCHEMA_GEN): REGISTER
+# macro, typed pack/unpack helpers, and exact-arity interface calls.
+chost_schema_gen.h: engine.cm $(CME_CLI)
+	$(CME_CLI) codegen-c engine.cm > $@
+	@echo "schema header generated and verified: $@"
+
+$(TARGET): main.c chost_schema_gen.h $(LIBS)
+	$(CC) $(CFLAGS) $(INCLUDES) -I. -DCME_HOST_HAS_SCHEMA_GEN -o $@ main.c $(LIBS)
 
 test: $(TARGET)
 	./$(TARGET)
 
-clean:
-	rm -f $(TARGET)
-
-# The §9.6 C bindings demo: generate the schema header with the CLI and
-# syntax-check it against the ABI header (requires `cargo build --features cli`).
-CME_CLI ?= $(CME_ROOT)/target/debug/cme
-
-schema-gen: engine_schema_gen.h
-
-engine_schema_gen.h: engine.cm $(CME_CLI)
-	$(CME_CLI) codegen-c engine.cm > $@
-	@printf '#include "engine_schema_gen.h"\nint main(void) { return 0; }\n' | \
-		$(CC) $(CFLAGS) $(INCLUDES) -I. -x c - -fsyntax-only
-	@echo "schema header generated and verified: $@"
+schema-gen: chost_schema_gen.h
 
 clean:
-	rm -f engine_schema_gen.h
+	rm -f $(TARGET) chost_schema_gen.h

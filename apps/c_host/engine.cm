@@ -1,5 +1,8 @@
 // The §9 schema fixture for the C host's codegen demo: `make schema-gen`
-// runs `cme codegen-c` on this file and syntax-checks the result.
+// runs `cme codegen-c` on this file, and the cme-ffi build script
+// generates the SAME header at build time so `main.c` consumes it for
+// real — REGISTER macro, pack/unpack helpers, and the typed interface
+// invocation helpers all compile-checked against this contract.
 
 schema chost v1.0.0
 
@@ -12,7 +15,17 @@ struct Vec2 {
     float y
 }
 
+enum Event {
+    Started
+    Scored(int points)
+}
+
 capability graphics {
     since 1.0.0 TextureHandle LoadTexture(str path)
     since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
+}
+
+interface hosthooks {
+    since 1.0.0 int OnEvent(Event event)
+    since 1.0.0 TextureHandle LastTexture()
 }

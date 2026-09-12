@@ -1,0 +1,563 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "Checkmate",
+	"scopeName": "source.checkmate",
+	"patterns": [
+		{ "include": "#comments" },
+		{ "include": "#schema-declarations" },
+		{ "include": "#grammar-declaration" },
+		{ "include": "#magic-declaration" },
+		{ "include": "#magic-invocation" },
+		{ "include": "#import" },
+		{ "include": "#impl-declaration" },
+		{ "include": "#struct-enum-declaration" },
+		{ "include": "#function-declaration" },
+		{ "include": "#statements" }
+	],
+	"repository": {
+		"comments": {
+			"patterns": [
+				{
+					"comment": "Line comment",
+					"match": "//.*$",
+					"name": "comment.line.double-slash.checkmate"
+				},
+				{
+					"comment": "Block comment (ends at the first */ — no nesting)",
+					"begin": "/\\*",
+					"end": "\\*/",
+					"name": "comment.block.checkmate"
+				}
+			]
+		},
+		"keywords": {
+			"patterns": [
+				{
+					"comment": "Core control-flow and declaration keywords",
+					"match": "\\b(import|struct|enum|impl|return|if|else|while|for|in|infer|match|true|false)\\b",
+					"name": "keyword.control.checkmate"
+				},
+				{
+					"comment": "Megaprogramming (§8) and schema (§9) contextual keywords",
+					"match": "\\b(grammar|magic|rule|extends|skip|comment|string|island|multiline|until|lineRest|eol|line|eof|soft|optional|each|sep|trailing|oneof|peek|not|indent|verbatim|raw|label|where|recur|as|with|context|some|all|when|schema|capability|interface|since|requires|suspend)\\b",
+					"name": "keyword.other.checkmate"
+				}
+			]
+		},
+		"types": {
+			"patterns": [
+				{
+					"comment": "Built-in scalar types",
+					"match": "\\b(int|float|bool|str|void)\\b",
+					"name": "storage.type.checkmate"
+				},
+				{
+					"comment": "Generic type arguments <T, E> after a capitalized or lowercase name",
+					"begin": "(?<=\\w)<",
+					"end": ">",
+					"patterns": [{ "include": "#types" }, { "include": "#comments" }],
+					"contentName": "meta.type-arguments.checkmate"
+				}
+			]
+		},
+		"numbers": {
+			"patterns": [
+				{
+					"comment": "Schema version literal: v1.4.0 / 1.0.0",
+					"match": "\\bv?\\d+\\.\\d+\\.\\d+\\b",
+					"name": "constant.numeric.version.checkmate"
+				},
+				{
+					"match": "\\b\\d+\\.\\d+\\b",
+					"name": "constant.numeric.float.checkmate"
+				},
+				{
+					"match": "\\b\\d+\\b",
+					"name": "constant.numeric.integer.checkmate"
+				}
+			]
+		},
+		"strings": {
+			"patterns": [
+				{
+					"comment": "Interpolated string $\"...{expr}...\" with live expression islands",
+					"begin": "\\$\"",
+					"end": "\"",
+					"name": "string.interpolated.checkmate",
+					"patterns": [
+						{ "include": "#string-escapes" },
+						{
+							"comment": "Interpolation island — real Checkmate expression",
+							"begin": "\\{",
+							"end": "\\}",
+							"name": "meta.interpolation.checkmate",
+							"patterns": [
+								{ "include": "#comments" },
+								{ "include": "#strings" },
+								{ "include": "#types" },
+								{ "include": "#keywords" },
+								{ "include": "#numbers" },
+								{ "include": "#operators" },
+								{ "include": "#splice" },
+								{ "include": "#compile-time-call" },
+								{ "include": "#identifiers" }
+							]
+						}
+					]
+				},
+				{
+					"comment": "Plain string with escapes",
+					"begin": "\"",
+					"end": "\"",
+					"name": "string.quoted.double.checkmate",
+					"patterns": [{ "include": "#string-escapes" }]
+				},
+				{
+					"comment": "Character literal in a lexical profile: ' ', '\\t', '\"'",
+					"match": "'(?:\\\\.|[^\\\\'])'",
+					"name": "string.quoted.single.char.checkmate"
+				}
+			]
+		},
+		"string-escapes": {
+			"patterns": [
+				{
+					"comment": "Accepted escape set: \\n \\t \\\\ \\\"",
+					"match": "\\\\[^\r\n]",
+					"name": "constant.character.escape.checkmate"
+				}
+			]
+		},
+		"operators": {
+			"patterns": [
+				{
+					"match": "=>",
+					"name": "keyword.operator.arrow.checkmate"
+				},
+				{
+					"match": "\\+=|-=|\\*=|/=|%=",
+					"name": "keyword.operator.compound-assignment.checkmate"
+				},
+				{
+					"match": "&&|\\|\\||==|!=|<=|>=",
+					"name": "keyword.operator.logical.checkmate"
+				},
+				{
+					"match": "[+\\-*/%<>]",
+					"name": "keyword.operator.arithmetic.checkmate"
+				},
+				{
+					"match": "=",
+					"name": "keyword.operator.assignment.checkmate"
+				},
+				{
+					"match": "[?!]",
+					"name": "keyword.operator.misc.checkmate"
+				}
+			]
+		},
+		"punctuation": {
+			"patterns": [
+				{ "match": "[{}()\\[\\]]", "name": "punctuation.bracket.checkmate" },
+				{ "match": "[,.:;]", "name": "punctuation.delimiter.checkmate" }
+			]
+		},
+		"identifiers": {
+			"patterns": [
+				{
+					"comment": "PascalCase — boundary types, host capabilities, schema names",
+					"match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+					"name": "entity.name.type.pascal.checkmate"
+				},
+				{
+					"match": "\\b[a-z_][A-Za-z0-9_]*\\b",
+					"name": "variable.other.checkmate"
+				}
+			]
+		},
+		"import": {
+			"begin": "\\b(import)\\b",
+			"beginCaptures": { "1": { "name": "keyword.control.checkmate" } },
+			"end": "(?=$|[}\r\n])",
+			"patterns": [
+				{
+					"match": "\\b[a-zA-Z_][A-Za-z0-9_]*(\\.[a-zA-Z_][A-Za-z0-9_]*)+",
+					"name": "entity.name.namespace.checkmate"
+				},
+				{ "include": "#identifiers" }
+			]
+		},
+		"function-declaration": {
+			"comment": "Return type first: `int fib(int n) { ... }` — also matches impl members",
+			"match": "\\b(?:(int|float|bool|str|void)|([A-Za-z_][A-Za-z0-9_]*(?:<[^>\r\n]*>)?(?:\\[\\])*))\\s+([a-zA-Z_][A-Za-z0-9_]*)\\s*(\\()",
+			"captures": {
+				"1": { "name": "storage.type.checkmate" },
+				"2": {
+					"patterns": [{ "include": "#types" }]
+				},
+				"3": { "name": "entity.name.function.checkmate" },
+				"4": { "name": "punctuation.bracket.checkmate" }
+			}
+		},
+		"struct-enum-declaration": {
+			"match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+			"captures": {
+				"1": { "name": "keyword.control.checkmate" },
+				"2": { "name": "entity.name.type.checkmate" }
+			}
+		},
+		"impl-declaration": {
+			"begin": "\\b(impl)\\s+([a-zA-Z_][A-Za-z0-9_.]*)",
+			"beginCaptures": {
+				"1": { "name": "keyword.control.checkmate" },
+				"2": { "name": "entity.name.type.checkmate" }
+			},
+			"end": "(?<=\\})",
+			"patterns": [{ "include": "$self" }]
+		},
+		"statements": {
+			"patterns": [
+				{ "include": "#comments" },
+				{ "include": "#strings" },
+				{ "include": "#splice" },
+				{ "include": "#compile-time-call" },
+				{ "include": "#template-constructs" },
+				{ "include": "#numbers" },
+				{ "include": "#keywords" },
+				{ "include": "#types" },
+				{ "include": "#operators" },
+				{ "include": "#punctuation" },
+				{ "include": "#identifiers" }
+			]
+		},
+		"schema-declarations": {
+			"patterns": [
+				{
+					"comment": "schema namespace v1.0.0",
+					"match": "\\b(schema)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(v?\\d+\\.\\d+\\.\\d+)",
+					"captures": {
+						"1": { "name": "keyword.other.checkmate" },
+						"2": { "name": "entity.name.namespace.checkmate" },
+						"3": { "name": "constant.numeric.version.checkmate" }
+					}
+				},
+				{
+					"comment": "capability/interface name (requires path)",
+					"begin": "\\b(capability|interface)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+					"beginCaptures": {
+						"1": { "name": "keyword.other.checkmate" },
+						"2": { "name": "entity.name.type.checkmate" }
+					},
+					"end": "(?<=\\})",
+					"patterns": [
+						{ "include": "#schema-members" },
+						{ "include": "$self" }
+					]
+				},
+				{
+					"comment": "since X.Y.Z version tag",
+					"match": "\\b(since)\\s+(v?\\d+\\.\\d+\\.\\d+)",
+					"captures": {
+						"1": { "name": "keyword.other.checkmate" },
+						"2": { "name": "constant.numeric.version.checkmate" }
+					}
+				},
+				{
+					"comment": "requires edge",
+					"match": "\\b(requires)\\s+([a-zA-Z_][A-Za-z0-9_.]*)",
+					"captures": {
+						"1": { "name": "keyword.other.checkmate" },
+						"2": { "name": "entity.name.namespace.checkmate" }
+					}
+				}
+			]
+		},
+		"schema-members": {
+			"patterns": [
+				{ "include": "#comments" },
+				{ "include": "#schema-version-tags" },
+				{ "include": "#types" },
+				{ "include": "#keywords" },
+				{
+					"comment": "Schema member function names are PascalCase: LoadTexture, OnTick",
+					"match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+					"name": "entity.name.function.checkmate"
+				},
+				{ "include": "#punctuation" },
+				{ "include": "#identifiers" }
+			]
+		},
+		"schema-version-tags": {
+			"match": "\\b(since)\\s+(v?\\d+\\.\\d+\\.\\d+)",
+			"captures": {
+				"1": { "name": "keyword.other.checkmate" },
+				"2": { "name": "constant.numeric.version.checkmate" }
+			}
+		},
+		"grammar-declaration": {
+			"begin": "\\b(grammar)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?:(extends)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
+			"beginCaptures": {
+				"1": { "name": "keyword.other.checkmate" },
+				"2": { "name": "entity.name.type.checkmate" },
+				"3": { "name": "keyword.other.checkmate" },
+				"4": { "name": "entity.name.type.checkmate" }
+			},
+			"end": "(?<=\\})",
+			"patterns": [
+				{ "include": "#profile-entries" },
+				{ "include": "#rule-declaration" },
+				{ "include": "$self" }
+			]
+		},
+		"profile-entries": {
+			"patterns": [
+				{
+					"comment": "skip [ ... ] — the skip set",
+					"begin": "\\b(skip)\\s*(\\[)",
+					"beginCaptures": {
+						"1": { "name": "keyword.other.checkmate" },
+						"2": { "name": "punctuation.bracket.checkmate" }
+					},
+					"end": "\\]",
+					"endCaptures": { "0": { "name": "punctuation.bracket.checkmate" } },
+					"patterns": [
+						{ "include": "#strings" },
+						{ "include": "#char-class-content" }
+					]
+				},
+				{
+					"comment": "comment/string/island profile forms",
+					"begin": "\\b(comment|string|island)\\s*(\\()",
+					"beginCaptures": {
+						"1": { "name": "keyword.other.checkmate" },
+						"2": { "name": "punctuation.bracket.checkmate" }
+					},
+					"end": "\\)",
+					"endCaptures": { "0": { "name": "punctuation.bracket.checkmate" } },
+					"patterns": [
+						{ "include": "#strings" },
+						{ "include": "#keywords" },
+						{ "include": "#punctuation" }
+					]
+				}
+			]
+		},
+		"char-class-content": {
+			"patterns": [
+				{
+					"comment": "Character class contents: ranges, escapes, negation",
+					"match": "(\\\\.|[^\\]\\\\])+",
+					"name": "string.regexp.character-class.checkmate"
+				}
+			]
+		},
+		"rule-declaration": {
+			"begin": "\\b(rule)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+			"beginCaptures": {
+				"1": { "name": "keyword.other.checkmate" },
+				"2": { "name": "entity.name.function.checkmate" }
+			},
+			"end": "(?<=\\})",
+			"patterns": [{ "include": "#pattern-language" }]
+		},
+		"magic-declaration": {
+			"begin": "\\b(magic)\\s+([A-Za-z_][A-Za-z0-9_.]*)\\s*(\\()",
+			"beginCaptures": {
+				"1": { "name": "keyword.other.checkmate" },
+				"2": { "name": "entity.name.function.checkmate" },
+				"3": { "name": "punctuation.bracket.checkmate" }
+			},
+			"end": "(?<=\\})",
+			"endCaptures": {},
+			"patterns": [
+				{ "include": "#pattern-language" },
+				{ "include": "#template-language" },
+				{ "include": "$self" }
+			]
+		},
+		"magic-invocation": {
+			"comment": "magic(name) { region } — the region is foreign-language content",
+			"begin": "\\b(magic)\\s*\\(\\s*([A-Za-z_][A-Za-z0-9_.]*)\\s*\\)",
+			"beginCaptures": {
+				"1": { "name": "keyword.other.checkmate" },
+				"2": { "name": "entity.name.function.checkmate" }
+			},
+			"end": "(?<=\\})",
+			"patterns": [{ "include": "#magic-region" }]
+		},
+		"magic-region": {
+			"patterns": [
+				{
+					"comment": "Brace-balanced region with string/comment awareness",
+					"begin": "\\{",
+					"end": "\\}",
+					"name": "meta.embedded.region.checkmate",
+					"patterns": [
+						{ "include": "#region-strings" },
+						{ "include": "#region-comments" },
+						{ "include": "#region-nested-braces" },
+						{
+							"match": "[^{}\"`]+",
+							"name": "string.unquoted.region-text.checkmate"
+						}
+					]
+				},
+				{
+					"comment": "Heredoc region: <<TAG ... TAG (verbatim)",
+					"begin": "<<([A-Za-z0-9_]+)\\s*$",
+					"end": "^\\s*\\1\\s*$",
+					"name": "string.unquoted.heredoc.checkmate"
+				}
+			]
+		},
+		"region-strings": {
+			"patterns": [
+				{
+					"comment": "Double-quoted foreign string",
+					"begin": "\"",
+					"end": "\"|$",
+					"name": "string.quoted.double.region-string.checkmate"
+				},
+				{
+					"comment": "Backtick foreign template string (may span lines)",
+					"begin": "`",
+					"end": "`|$",
+					"name": "string.interpolated.region-backtick.checkmate"
+				}
+			]
+		},
+		"region-comments": {
+			"patterns": [
+				{
+					"match": "//[^\r\n]*",
+					"name": "comment.line.region.checkmate"
+				},
+				{
+					"begin": "/\\*",
+					"end": "\\*/",
+					"name": "comment.block.region.checkmate"
+				}
+			]
+		},
+		"region-nested-braces": {
+			"begin": "\\{",
+			"end": "\\}",
+			"patterns": [
+				{ "include": "#region-strings" },
+				{ "include": "#region-comments" },
+				{ "include": "#region-nested-braces" },
+				{
+					"match": "[^{}\"`]+",
+					"name": "string.unquoted.region-text.checkmate"
+				}
+			]
+		},
+		"pattern-language": {
+			"patterns": [
+				{ "include": "#comments" },
+				{ "include": "#pattern-fragments" },
+				{ "include": "#pattern-annotations" },
+				{ "include": "#pattern-classes" },
+				{ "include": "#strings" },
+				{ "include": "#keywords" },
+				{ "include": "#operators" },
+				{ "include": "#punctuation" },
+				{ "include": "#pattern-rule-refs" },
+				{ "include": "#identifiers" }
+			]
+		},
+		"pattern-fragments": {
+			"patterns": [
+				{
+					"comment": "Fragment with inline validator/parameter spec: $tt<\"{{\" \"}}\">, $raw<js.program>",
+					"begin": "(i?\\$(?:ident|word|tag|int|float|str|tt|text|template|raw|expr|type|block))\\s*<",
+					"beginCaptures": {
+						"1": { "name": "variable.other.fragment.checkmate" }
+					},
+					"end": ">",
+					"endCaptures": {},
+					"patterns": [
+						{ "include": "#strings" },
+						{
+							"match": "[a-zA-Z_][A-Za-z0-9_.]*",
+							"name": "entity.name.type.checkmate"
+						},
+						{ "include": "#punctuation" }
+					]
+				},
+				{
+					"comment": "Bare fragment: $str, $word, i$tag, ...",
+					"match": "i?\\$(?:ident|word|tag|int|float|str|tt|text|template|raw|expr|type|block)",
+					"name": "variable.other.fragment.checkmate"
+				}
+			]
+		},
+		"pattern-annotations": {
+			"comment": "Inert editor metadata: #complete(...), #hover(\"...\"), #token(\"...\")",
+			"begin": "(#)(complete|hover|token)\\s*(\\()",
+			"beginCaptures": {
+				"1": { "name": "punctuation.special.checkmate" },
+				"2": { "name": "entity.name.tag.annotation.checkmate" },
+				"3": { "name": "punctuation.bracket.checkmate" }
+			},
+			"end": "\\)",
+			"patterns": [
+				{ "include": "#strings" },
+				{
+					"match": "[a-zA-Z_][A-Za-z0-9_.]*",
+					"name": "entity.name.namespace.checkmate"
+				},
+				{ "include": "#punctuation" }
+			]
+		},
+		"pattern-classes": {
+			"begin": "\\[",
+			"end": "\\]",
+			"name": "string.regexp.checkmate",
+			"patterns": [{ "include": "#char-class-content" }]
+		},
+		"pattern-rule-refs": {
+			"comment": "Qualified rule reference: json.value, js.statement, recur",
+			"match": "\\b([a-z][A-Za-z0-9_]*)\\.([a-z][A-Za-z0-9_]*)\\b",
+			"name": "entity.name.function.rule-ref.checkmate"
+		},
+		"template-language": {
+			"patterns": [
+				{ "include": "#comments" },
+				{ "include": "#template-constructs" },
+				{ "include": "#splice" },
+				{ "include": "#compile-time-call" },
+				{ "include": "$self" }
+			]
+		},
+		"template-constructs": {
+			"patterns": [
+				{
+					"comment": "[each ... ] and [when ... else ...] template blocks",
+					"match": "\\b(each|when|else)\\b",
+					"name": "keyword.control.checkmate"
+				},
+				{
+					"comment": "present($x) optionality test",
+					"match": "\\b(present)\\b",
+					"name": "support.function.builtin.checkmate"
+				}
+			]
+		},
+		"splice": {
+			"comment": "Template splice: $cap, $item.field, $d.fname",
+			"match": "\\$[a-zA-Z_][A-Za-z0-9_]*(?:\\.[a-zA-Z_][A-Za-z0-9_]*)*",
+			"name": "variable.other.splice.checkmate"
+		},
+		"compile-time-call": {
+			"comment": "@fn(...) compile-time evaluation (§8.5)",
+			"begin": "@([a-zA-Z_][A-Za-z0-9_.]*)\\s*(\\()",
+			"beginCaptures": {
+				"1": { "name": "support.function.compile-time.checkmate" },
+				"2": { "name": "punctuation.bracket.checkmate" }
+			},
+			"end": "\\)",
+			"patterns": [{ "include": "$self" }]
+		}
+	}
+}

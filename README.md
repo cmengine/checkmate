@@ -13,6 +13,37 @@ CME is a statically typed, embeddable scripting language implemented in Rust. Th
 
 The language specification is maintained in [`WHITEPAPER.md`](./WHITEPAPER.md).
 
+## Editor Support: one grammar surface, three consumers
+
+Checkmate ships its own editor tooling in-tree, next to the compiler it must
+stay in sync with:
+
+| Directory | What it is | Who consumes it |
+| --- | --- | --- |
+| `grammars/tree-sitter-checkmate` | Tree-sitter grammar + corpus tests + external heredoc scanner | Zed extension, Neovim/Helix/Emacs |
+| `editors/zed` | Zed extension: highlighting, brackets, outline, indents, text objects | Zed (`extensions: Install Dev Extension` → `editors/zed`) |
+| `editors/textmate` | TextMate grammar (`source.checkmate`) + installable VS Code wrapper | VS Code, Sublime, GitHub |
+
+All three cover the full implemented surface — the core language, §8
+megaprogramming (`grammar`/`magic` declarations, the pattern language,
+expansion templates, brace-balanced invocation regions, heredocs), and §9
+schema files. The tree-sitter grammar is validated against every fixture in
+this repository: `syntax.cm`, `magic.cm`, the schema files, and the mod trees
+all parse without error nodes (the deliberately damaged recovery fixtures
+`boom.cm`, `broken_syntax.cm`, `tests/fixtures/recovery/*` are expected to
+produce them).
+
+Build and test the grammar:
+
+```sh
+cd grammars/tree-sitter-checkmate
+tree-sitter generate && tree-sitter test
+```
+
+See `editors/zed/README.md` and `editors/textmate/README.md` for
+per-editor install instructions.
+
+
 ## Megaprogramming: `cme expand`
 
 Files that declare or invoke `magic` are expanded automatically before `check`/`run` (the source behaves exactly like its expansion). To see the generated program itself:

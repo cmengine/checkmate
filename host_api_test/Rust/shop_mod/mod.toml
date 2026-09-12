@@ -1,0 +1,10 @@
+# The mod manifest (§10.2). The [schemas] table NARROWS the schema grant:
+# only listed namespaces are visible to this mod, at the declared target
+# version. The host must have registered `shop` at >= 1.0.0 or the load
+# fails; members added `since` a later version stay hidden from this mod.
+name = "shop_mod"
+version = "1.0.0"
+checkmate_version = "0.2.0"
+
+[schemas]
+shop = "1.0.0"

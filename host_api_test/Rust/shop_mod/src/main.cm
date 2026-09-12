@@ -1,0 +1,22 @@
+// Main file of the module. Imports the capability the script CALLS and
+// implements the interface the host CALLS BACK into. Both sides are
+// checked against schemas/shop.cm at load time.
+import shop.store
+
+impl shop.checkout {
+    int OnOrder(OrderEvent event) {
+        return match (event) {
+            Started() => 0
+            Checkout(int total) => total + priceFor(2)
+        }
+    }
+    int TotalFor(int qty) {
+        return priceFor(qty)
+    }
+}
+
+int main() {
+    Item item = shop.store.FetchItem("apple")
+    shop.store.RecordSale(item, 2)
+    return item.price + priceFor(3)
+}

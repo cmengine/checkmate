@@ -1,0 +1,36 @@
+// Shop schema: the single source of truth for BOTH sides.
+//
+// The script toolchain (checker) and the Rust host below read THIS file:
+//  - `cme check|run --schema schemas/shop.cm` gates scripts against it.
+//  - `cme_schema_bindings!(path = "schemas/shop.cm", ...)` in src/main.rs
+//    parses it at host compile time and generates the Rust scaffolding.
+//
+// Sections:
+//  - `struct Item` / `enum OrderEvent`: boundary types shared across the
+//    script/host boundary (§9.3). PascalCase, never generic.
+//  - `capability store`: functions the SCRIPT calls and the HOST provides.
+//  - `interface checkout`: functions the SCRIPT implements and the HOST
+//    calls into (the mod must implement every member: §10.4 completeness).
+
+schema shop v1.0.0
+
+struct Item {
+    int id
+    str sku
+    int price
+}
+
+enum OrderEvent {
+    Started
+    Checkout(int total)
+}
+
+capability store {
+    since 1.0.0 Item FetchItem(str sku)
+    since 1.0.0 void RecordSale(Item item, int qty)
+}
+
+interface checkout {
+    since 1.0.0 int OnOrder(OrderEvent event)
+    since 1.0.0 int TotalFor(int qty)
+}

@@ -1,0 +1,11 @@
+// Second file of the module. The mod loader concatenates every src/**.cm
+// file into one virtual program and checks it ONCE, so a top-level
+// function declared here is callable from main.cm with no import: the
+// module is the unit of compilation, files are just organization.
+//
+// Note the camelCase name: top-level script declarations are camelCase
+// (§2.5). PascalCase is reserved for schema boundary types (Item,
+// OrderEvent) and capability/interface members (FetchItem, OnOrder).
+int priceFor(int qty) {
+    return qty * 10
+}

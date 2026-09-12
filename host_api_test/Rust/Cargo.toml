@@ -1,0 +1,9 @@
+[package]
+name = "host-api-test-rust"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+cme = { path = "../..", features = ["api", "schema-macro"] }

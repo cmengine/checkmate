@@ -20,6 +20,9 @@ pub mod mega;
 /// Multi-file mod support (§10): manifest, discovery, assembly.
 pub mod mods;
 pub mod parser;
+/// The §9 schema system: schema-file parsing and the host's registered
+/// schema surface ([`schema::SchemaSet`], [`schema::SchemaContext`]).
+pub mod schema;
 pub mod validate;
 pub use diagnostics::{Diagnostic, DiagnosticKind, ParseOutcome};
 

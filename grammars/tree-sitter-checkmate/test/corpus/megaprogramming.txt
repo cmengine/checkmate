@@ -1,0 +1,686 @@
+================================================================================
+Megaprogramming: grammar declarations, profiles, rules (§8.2)
+================================================================================
+
+grammar json {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule value {
+        oneof {
+            null   => "null"
+            trueV  => "true"
+            falseV => "false"
+            number => number
+            string => $str text
+            array  => ( "[" each sep "," { value } as items "]" )
+            object => ( "{" each sep "," { member } as fields "}" )
+        }
+    }
+
+    rule number {
+        ( optional { "-" }
+          oneof { zero => "0", pos => ( [1-9] as first optional { scan [0-9] as rest } ) }
+          optional { "." scan [0-9] as frac } ) as num
+    }
+}
+
+grammar toml {
+    skip    [ ' ', '\t' ]
+    comment ( "#" )
+}
+
+grammar css {
+    skip    [ ' ', '\t', '\r', '\n' ]
+    comment ( "/*" until "*/" )
+    string  ( '"' )
+    string  ( "'" )
+}
+
+grammar js {
+    skip    [ ' ', '\t' ]
+    comment ( "//" )
+    comment ( "/*" until "*/" )
+    string  ( '"' )  string ( "'" )  string ( '`' multiline island ( "${" "}" ) )
+}
+
+grammar ts extends js {
+    rule statement {
+        oneof {
+            typedDecl => ( oneof { let => "let", const => "const" } $word name ":" $type ann
+                           optional { soft { "=" expression init } } semi )
+            plain     => js.statement
+        }
+    }
+}
+
+grammar nest {
+    skip [ ' ', '\t', '\r', '\n' ]
+
+    rule doc {
+        each { element } as items
+        eof
+    }
+
+    rule element(context { str[] open = none }) {
+        "<" $word name ">"
+        where !present(open) || !some x in open { x == name }
+        optional { until { "<" } as text }
+        each { element with context { open: append(open, name) } } as children
+        "</" $word close ">"
+        where close == name
+    }
+}
+
+grammar py {
+    skip    [ ' ' ]
+    comment ( "#" )
+
+    rule def {
+        "def" $word fname
+        "(" soft { each sep "," { $word param optional { ":" $type ptype } } as params ")" }
+        "->" $type ret ":"
+        indent { each { stmt } as body }
+    }
+}
+
+---
+
+(source_file
+  (grammar_declaration
+    (identifier)
+    (profile_entry
+      (character_class))
+    (rule_declaration
+      (identifier)
+      (pattern_oneof
+        (oneof_branch
+          (identifier)
+          (string))
+        (oneof_branch
+          (identifier)
+          (string))
+        (oneof_branch
+          (identifier)
+          (string))
+        (oneof_branch
+          (identifier)
+          (pattern_rule_ref
+            (dotted_path
+              (identifier))))
+        (oneof_branch
+          (identifier)
+          (pattern_fragment
+            (fragment_token)
+            (identifier)))
+        (oneof_branch
+          (identifier)
+          (string)
+          (pattern_each
+            (string)
+            (pattern_rule_ref
+              (dotted_path
+                (identifier)))
+            (pattern_bind
+              (identifier)))
+          (string))
+        (oneof_branch
+          (identifier)
+          (string)
+          (pattern_each
+            (string)
+            (pattern_rule_ref
+              (dotted_path
+                (identifier)))
+            (pattern_bind
+              (identifier)))
+          (string))))
+    (rule_declaration
+      (identifier)
+      (pattern_group
+        (pattern_optional
+          (string))
+        (pattern_oneof
+          (oneof_branch
+            (identifier)
+            (string))
+          (oneof_branch
+            (identifier)
+            (pattern_class
+              (character_class)
+              (pattern_bind
+                (identifier)))
+            (pattern_optional
+              (pattern_scan
+                (character_class)
+                (pattern_bind
+                  (identifier))))))
+        (pattern_optional
+          (string)
+          (pattern_scan
+            (character_class)
+            (pattern_bind
+              (identifier))))
+        (pattern_bind
+          (identifier)))))
+  (grammar_declaration
+    (identifier)
+    (profile_entry
+      (character_class))
+    (profile_entry
+      (string)))
+  (grammar_declaration
+    (identifier)
+    (profile_entry
+      (character_class))
+    (profile_entry
+      (string)
+      (string))
+    (profile_entry
+      (char_literal))
+    (profile_entry
+      (string)))
+  (grammar_declaration
+    (identifier)
+    (profile_entry
+      (character_class))
+    (profile_entry
+      (string))
+    (profile_entry
+      (string)
+      (string))
+    (profile_entry
+      (char_literal))
+    (profile_entry
+      (string))
+    (profile_entry
+      (char_literal)
+      (profile_entry
+        (string)
+        (string))))
+  (grammar_declaration
+    (identifier)
+    (identifier)
+    (rule_declaration
+      (identifier)
+      (pattern_oneof
+        (oneof_branch
+          (identifier)
+          (pattern_oneof
+            (oneof_branch
+              (identifier)
+              (string))
+            (oneof_branch
+              (identifier)
+              (string)))
+          (pattern_fragment
+            (fragment_token)
+            (identifier))
+          (string)
+          (pattern_fragment
+            (fragment_token)
+            (identifier))
+          (pattern_optional
+            (pattern_soft
+              (string)
+              (pattern_rule_ref
+                (dotted_path
+                  (identifier)))
+              (pattern_rule_ref
+                (dotted_path
+                  (identifier)))))
+          (pattern_rule_ref
+            (dotted_path
+              (identifier))))
+        (oneof_branch
+          (identifier)
+          (pattern_rule_ref
+            (dotted_path
+              (identifier)
+              (identifier)))))))
+  (grammar_declaration
+    (identifier)
+    (profile_entry
+      (character_class))
+    (rule_declaration
+      (identifier)
+      (pattern_each
+        (pattern_rule_ref
+          (dotted_path
+            (identifier)))
+        (pattern_bind
+          (identifier)))
+      (pattern_eof))
+    (rule_declaration
+      (identifier)
+      (rule_context
+        (context_parameter
+          (array_type
+            (primitive_type))
+          (identifier)
+          (identifier)))
+      (string)
+      (pattern_fragment
+        (fragment_token)
+        (identifier))
+      (string)
+      (pattern_where
+        (binary_expression
+          (unary_expression
+            (call_expression
+              (identifier)
+              (arguments
+                (identifier))))
+          (unary_expression
+            (quantifier_expression
+              (identifier)
+              (identifier)
+              (binary_expression
+                (identifier)
+                (identifier))))))
+      (pattern_optional
+        (pattern_until
+          (string)
+          (pattern_bind
+            (identifier))))
+      (pattern_each
+        (pattern_rule_ref
+          (dotted_path
+            (identifier))
+          (context_binding
+            (context_binding_field
+              (identifier)
+              (call_expression
+                (identifier)
+                (arguments
+                  (identifier)
+                  (identifier))))))
+        (pattern_bind
+          (identifier)))
+      (string)
+      (pattern_fragment
+        (fragment_token)
+        (identifier))
+      (string)
+      (pattern_where
+        (binary_expression
+          (identifier)
+          (identifier)))))
+  (grammar_declaration
+    (identifier)
+    (profile_entry
+      (character_class))
+    (profile_entry
+      (string))
+    (rule_declaration
+      (identifier)
+      (string)
+      (pattern_fragment
+        (fragment_token)
+        (identifier))
+      (string)
+      (pattern_soft
+        (pattern_each
+          (string)
+          (pattern_fragment
+            (fragment_token)
+            (identifier))
+          (pattern_optional
+            (string)
+            (pattern_fragment
+              (fragment_token)
+              (identifier)))
+          (pattern_bind
+            (identifier)))
+        (string))
+      (string)
+      (pattern_fragment
+        (fragment_token)
+        (identifier))
+      (string)
+      (pattern_indent
+        (pattern_each
+          (pattern_rule_ref
+            (dotted_path
+              (identifier)))
+          (pattern_bind
+            (identifier)))))))
+
+================================================================================
+Megaprogramming: magic declarations and templates (§8.1/§8.4)
+================================================================================
+
+magic jsonValue(json.value as v) {
+    @toValue($v)
+}
+
+magic def(py.def as d) {
+    $d.ret $d.fname(each in d.params {
+        [when present($ptype) { $ptype $param } else { infer $param }]
+    }) {
+        @emitBody($d.body)
+    }
+}
+
+magic agent.spawn(
+    #complete(engine.availableModels)
+    #hover("Target model identifier")
+    "model:" $tag model
+    "effort:" $word effort
+
+    $text prompt
+) {
+    spawnAgent(
+        model: $"{$model}"
+        prompt: $"{$prompt}"
+    )
+}
+
+magic pair($word key "=" $tt<"{{" "}}"> value) {
+    Pair(key: $"{$key}", value: $"{$value.matched}")
+}
+
+magic listOf($word base) {
+    $base[]
+}
+
+magic bounded(
+    label "a bounded word list" { each [2, 3] { $ident word } as items }
+    $raw tail ";"
+) {
+    [
+        [each in $items { $"{$item.word}" }]
+        $"{$tail.matched}"
+    ]
+}
+
+---
+
+(source_file
+  (magic_declaration
+    (dotted_path
+      (identifier))
+    (pattern_rule_ref
+      (dotted_path
+        (identifier)
+        (identifier))
+      (pattern_bind
+        (identifier)))
+    (expression_statement
+      (compile_time_call
+        (dotted_path
+          (identifier))
+        (arguments
+          (splice
+            (identifier))))))
+  (magic_declaration
+    (dotted_path
+      (identifier))
+    (pattern_rule_ref
+      (dotted_path
+        (identifier)
+        (identifier))
+      (pattern_bind
+        (identifier)))
+    (expression_statement
+      (field_expression
+        (splice
+          (identifier))
+        (identifier)))
+    (expression_statement
+      (call_expression
+        (field_expression
+          (splice
+            (identifier))
+          (identifier))
+        (arguments
+          (template_each
+            (field_expression
+              (identifier)
+              (identifier))
+            (expression_statement
+              (array_literal
+                (template_when
+                  (call_expression
+                    (identifier)
+                    (arguments
+                      (splice
+                        (identifier))))
+                  (expression_statement
+                    (splice
+                      (identifier)))
+                  (expression_statement
+                    (splice
+                      (identifier)))
+                  (template_infer_hole
+                    (splice
+                      (identifier))))))))))
+    (block
+      (expression_statement
+        (compile_time_call
+          (dotted_path
+            (identifier))
+          (arguments
+            (field_expression
+              (splice
+                (identifier))
+              (identifier)))))))
+  (magic_declaration
+    (dotted_path
+      (identifier)
+      (identifier))
+    (pattern_annotation
+      (dotted_path
+        (identifier)
+        (identifier)))
+    (pattern_annotation
+      (string))
+    (string)
+    (pattern_fragment
+      (fragment_token)
+      (identifier))
+    (string)
+    (pattern_fragment
+      (fragment_token)
+      (identifier))
+    (pattern_fragment
+      (fragment_token)
+      (identifier))
+    (expression_statement
+      (call_expression
+        (identifier)
+        (arguments
+          (named_argument
+            (identifier)
+            (interp_string
+              (interpolation
+                (splice
+                  (identifier)))))
+          (named_argument
+            (identifier)
+            (interp_string
+              (interpolation
+                (splice
+                  (identifier)))))))))
+  (magic_declaration
+    (dotted_path
+      (identifier))
+    (pattern_fragment
+      (fragment_token)
+      (identifier))
+    (string)
+    (pattern_fragment
+      (fragment_token)
+      (string)
+      (string)
+      (identifier))
+    (expression_statement
+      (call_expression
+        (identifier)
+        (arguments
+          (named_argument
+            (identifier)
+            (interp_string
+              (interpolation
+                (splice
+                  (identifier)))))
+          (named_argument
+            (identifier)
+            (interp_string
+              (interpolation
+                (field_expression
+                  (splice
+                    (identifier))
+                  (identifier)))))))))
+  (magic_declaration
+    (dotted_path
+      (identifier))
+    (pattern_fragment
+      (fragment_token)
+      (identifier))
+    (expression_statement
+      (splice_array
+        (splice
+          (identifier)))))
+  (magic_declaration
+    (dotted_path
+      (identifier))
+    (pattern_label
+      (string)
+      (pattern_each
+        (pattern_bounds
+          (int_literal)
+          (int_literal))
+        (pattern_fragment
+          (fragment_token)
+          (identifier))
+        (pattern_bind
+          (identifier))))
+    (pattern_fragment
+      (fragment_token)
+      (identifier))
+    (string)
+    (expression_statement
+      (array_literal
+        (array_literal
+          (template_each
+            (splice
+              (identifier))
+            (expression_statement
+              (interp_string
+                (interpolation
+                  (field_expression
+                    (splice
+                      (identifier))
+                    (identifier)))))))
+        (interp_string
+          (interpolation
+            (field_expression
+              (splice
+                (identifier))
+              (identifier))))))))
+
+================================================================================
+Megaprogramming: invocations, regions, heredocs (§8.6)
+================================================================================
+
+JsonTree config = magic(jsonValue) {
+    {
+        "host": "db.local",
+        "ports": [5432, 6432],
+        "debug": true
+    }
+}
+
+magic(def) {
+    def pyClampFn(v: int, lo: int, hi: int) -> int:
+        usePy(lo)
+        return v
+}
+
+ReNode matcher = magic(reCompile) {
+    ^[\w.+-]+@[\w-]+(\.[\w-]+)+$
+}
+
+ReNode short = magic(reCompile) <<REGEX
+    ^a{2,3}b$
+    REGEX
+
+int fails = 0
+
+magic(tomlValue) {
+    title = "checkmate"
+
+    # a transparent comment line
+    [owner]
+    name = "matin"
+}
+
+magic(jsRun) {
+    const greeting = `Hello, ${ magic(json.value) { "world" } }!`
+    console.log(greeting)  // braces } inside comment
+}
+
+---
+
+(source_file
+  (expression_statement
+    (identifier))
+  (assignment_statement
+    (identifier)
+    (magic_invocation
+      (dotted_path
+        (identifier))
+      (region
+        (region_string)
+        (region_text)
+        (region_string)
+        (region_text)
+        (region_string)
+        (region_text)
+        (region_string)
+        (region_text))))
+  (expression_statement
+    (magic_invocation
+      (dotted_path
+        (identifier))
+      (region
+        (region_text))))
+  (expression_statement
+    (identifier))
+  (assignment_statement
+    (identifier)
+    (magic_invocation
+      (dotted_path
+        (identifier))
+      (region
+        (region_text))))
+  (expression_statement
+    (identifier))
+  (assignment_statement
+    (identifier)
+    (magic_invocation
+      (dotted_path
+        (identifier))
+      (heredoc_region)))
+  (variable_declaration
+    (primitive_type)
+    (identifier)
+    (int_literal))
+  (expression_statement
+    (magic_invocation
+      (dotted_path
+        (identifier))
+      (region
+        (region_text)
+        (region_string)
+        (region_text)
+        (region_string))))
+  (expression_statement
+    (magic_invocation
+      (dotted_path
+        (identifier))
+      (region
+        (region_text)
+        (region_backtick_string)
+        (region_text)
+        (line_comment)))))

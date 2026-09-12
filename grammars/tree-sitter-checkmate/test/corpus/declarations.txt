@@ -1,0 +1,195 @@
+================================================================================
+Core declarations: functions, structs, enums, generics, impls, imports
+================================================================================
+
+import engine.graphics
+import self.gamemode.rules
+
+struct vec2 {
+    float x
+    float y
+}
+
+struct party {
+    str name
+    int[] scores
+    player leader
+}
+
+struct pair<A, B> {
+    A first
+    B second
+}
+
+enum gameEvent {
+    Damage(int amount)
+    Heal(int amount)
+    Spawn(str enemyKind, vec2 position)
+    PlayerDied()
+}
+
+int fib(int n) {
+    if (n <= 1) {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+void logMessage(str msg) {
+    engine.Log(msg)
+}
+
+impl counter {
+    int peek(counter self) {
+        return self.value
+    }
+}
+
+impl engine.gamemode {
+    int InitGame(int startingScore) {
+        return startingScore
+    }
+}
+
+---
+
+(source_file
+  (import_statement
+    path: (dotted_path
+      (identifier)
+      (identifier)))
+  (import_statement
+    path: (dotted_path
+      (identifier)
+      (identifier)
+      (identifier)))
+  (struct_declaration
+    name: (identifier)
+    (field_declaration
+      type: (primitive_type)
+      name: (identifier))
+    (field_declaration
+      type: (primitive_type)
+      name: (identifier)))
+  (struct_declaration
+    name: (identifier)
+    (field_declaration
+      type: (primitive_type)
+      name: (identifier))
+    (field_declaration
+      type: (array_type
+        (primitive_type))
+      name: (identifier))
+    (field_declaration
+      type: (type_identifier)
+      name: (identifier)))
+  (struct_declaration
+    name: (identifier)
+    (type_parameters
+      (identifier)
+      (identifier))
+    (field_declaration
+      type: (type_identifier)
+      name: (identifier))
+    (field_declaration
+      type: (type_identifier)
+      name: (identifier)))
+  (enum_declaration
+    name: (identifier)
+    (enum_variant
+      name: (identifier)
+      payload: (parameter_list
+        (parameter
+          type: (primitive_type)
+          name: (identifier))))
+    (enum_variant
+      name: (identifier)
+      payload: (parameter_list
+        (parameter
+          type: (primitive_type)
+          name: (identifier))))
+    (enum_variant
+      name: (identifier)
+      payload: (parameter_list
+        (parameter
+          type: (primitive_type)
+          name: (identifier))
+        (parameter
+          type: (type_identifier)
+          name: (identifier))))
+    (enum_variant
+      name: (identifier)
+      payload: (parameter_list)))
+  (function_declaration
+    return_type: (primitive_type)
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        type: (primitive_type)
+        name: (identifier)))
+    body: (block
+      (if_statement
+        condition: (binary_expression
+          left: (identifier)
+          right: (int_literal))
+        consequence: (block
+          (return_statement
+            value: (identifier))))
+      (return_statement
+        value: (binary_expression
+          left: (call_expression
+            function: (identifier)
+            (arguments
+              (binary_expression
+                left: (identifier)
+                right: (int_literal))))
+          right: (call_expression
+            function: (identifier)
+            (arguments
+              (binary_expression
+                left: (identifier)
+                right: (int_literal))))))))
+  (function_declaration
+    return_type: (primitive_type)
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        type: (primitive_type)
+        name: (identifier)))
+    body: (block
+      (expression_statement
+        (call_expression
+          function: (field_expression
+            object: (identifier)
+            property: (identifier))
+          (arguments
+            (identifier))))))
+  (impl_declaration
+    target: (dotted_path
+      (identifier))
+    (function_declaration
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list
+        (parameter
+          type: (type_identifier)
+          name: (identifier)))
+      body: (block
+        (return_statement
+          value: (field_expression
+            object: (identifier)
+            property: (identifier))))))
+  (impl_declaration
+    target: (dotted_path
+      (identifier)
+      (identifier))
+    (function_declaration
+      return_type: (primitive_type)
+      name: (identifier)
+      parameters: (parameter_list
+        (parameter
+          type: (primitive_type)
+          name: (identifier)))
+      body: (block
+        (return_statement
+          value: (identifier))))))

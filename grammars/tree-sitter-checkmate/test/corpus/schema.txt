@@ -1,0 +1,155 @@
+================================================================================
+Schema files: schema/capability/interface, since, requires, suspend (§9)
+================================================================================
+
+schema chost v1.0.0
+
+struct TextureHandle {
+    int id
+}
+
+struct Vec2 {
+    float x
+    float y
+}
+
+enum Event {
+    Started
+    Scored(int points)
+}
+
+capability graphics {
+    since 1.0.0 TextureHandle LoadTexture(str path)
+    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
+}
+
+capability network requires auth {
+    since 1.0.0 httpResponse Send(httpRequest request)
+}
+
+interface auth {
+    requires core
+    since 1.0.0 bool ValidateToken(str token)
+    since 1.4.0 optional void InvalidateSession(str token)
+}
+
+interface gamemode requires core {
+    since 1.0.0 GameState InitGame(GameConfig config)
+    since 1.2.0 suspend Image FetchRemoteImage(str url)
+    since 1.0.0 void OnTick(GameState state, float deltaTime)
+}
+
+---
+
+(source_file
+  (schema_declaration
+    (identifier)
+    (version))
+  (struct_declaration
+    (identifier)
+    (field_declaration
+      (primitive_type)
+      (identifier)))
+  (struct_declaration
+    (identifier)
+    (field_declaration
+      (primitive_type)
+      (identifier))
+    (field_declaration
+      (primitive_type)
+      (identifier)))
+  (enum_declaration
+    (identifier)
+    (enum_variant
+      (identifier))
+    (enum_variant
+      (identifier)
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier)))))
+  (capability_declaration
+    (identifier)
+    (schema_member
+      (version)
+      (type_identifier)
+      (identifier)
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier))))
+    (schema_member
+      (version)
+      (primitive_type)
+      (identifier)
+      (parameter_list
+        (parameter
+          (type_identifier)
+          (identifier))
+        (parameter
+          (type_identifier)
+          (identifier)))))
+  (capability_declaration
+    (identifier)
+    (dotted_path
+      (identifier))
+    (schema_member
+      (version)
+      (type_identifier)
+      (identifier)
+      (parameter_list
+        (parameter
+          (type_identifier)
+          (identifier)))))
+  (interface_declaration
+    (identifier)
+    (requires_clause
+      (dotted_path
+        (identifier)))
+    (schema_member
+      (version)
+      (primitive_type)
+      (identifier)
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier))))
+    (schema_member
+      (version)
+      (primitive_type)
+      (identifier)
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier)))))
+  (interface_declaration
+    (identifier)
+    (dotted_path
+      (identifier))
+    (schema_member
+      (version)
+      (type_identifier)
+      (identifier)
+      (parameter_list
+        (parameter
+          (type_identifier)
+          (identifier))))
+    (schema_member
+      (version)
+      (type_identifier)
+      (identifier)
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier))))
+    (schema_member
+      (version)
+      (primitive_type)
+      (identifier)
+      (parameter_list
+        (parameter
+          (type_identifier)
+          (identifier))
+        (parameter
+          (primitive_type)
+          (identifier))))))

@@ -1,0 +1,23 @@
+{
+  "grammars": [
+    {
+      "name": "checkmate",
+      "version": "0.1.0",
+      "author": "cmengine",
+      "license": "Apache-2.0",
+      "description": "Checkmate (CME) language: statically typed, embeddable scripting",
+      "scope": "source.checkmate",
+      "file-types": ["cm"],
+      "injection-regex": "^checkmate$",
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "Apache-2.0",
+    "description": "Tree-sitter grammar for Checkmate (CME)",
+    "links": {
+      "repository": "https://github.com/cmengine/checkmate"
+    }
+  }
+}

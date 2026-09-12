@@ -1,0 +1,215 @@
+================================================================================
+Appendix A: operator precedence, unary, compound assignment, propagation
+================================================================================
+
+int main() {
+    int a = 1 + 2 * 3
+    int b = 10 - 4 - 3
+    float c = -x * y
+    bool d = a && b || c
+    bool e = a < b && c >= d
+    int f = 7 / 2
+    int g = 7 % 2
+    a += 10
+    a -= 1
+    a *= 2
+    a /= 3
+    a %= 4
+    str h = "HP: " + 100
+    bool i = !flag
+    bool j = !!flag
+    int k = --x
+    int l = a +
+        bonus
+    bool m = (a || b) && c
+    int first = checkedDivide(a, b)?
+    int[] nums = [1, 2, 3]
+    int[] stacked = [
+        10
+        20
+        30
+    ]
+    map<str, int> ages = { "ana": 30, "bo": 25 }
+    nums[2] = 30
+    p.health = p.health - 10
+    ages["ana"] = 31
+    grid[0][1] = 9
+    return 0
+}
+
+---
+
+(source_file
+  (function_declaration
+    (primitive_type)
+    (identifier)
+    (parameter_list)
+    (block
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (int_literal)
+          (binary_expression
+            (int_literal)
+            (int_literal))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (binary_expression
+            (int_literal)
+            (int_literal))
+          (int_literal)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (unary_expression
+            (identifier))
+          (identifier)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (binary_expression
+            (identifier)
+            (identifier))
+          (identifier)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (binary_expression
+            (identifier)
+            (identifier))
+          (binary_expression
+            (identifier)
+            (identifier))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (int_literal)
+          (int_literal)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (int_literal)
+          (int_literal)))
+      (assignment_statement
+        (identifier)
+        (int_literal))
+      (assignment_statement
+        (identifier)
+        (int_literal))
+      (assignment_statement
+        (identifier)
+        (int_literal))
+      (assignment_statement
+        (identifier)
+        (int_literal))
+      (assignment_statement
+        (identifier)
+        (int_literal))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (string)
+          (int_literal)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (unary_expression
+          (identifier)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (unary_expression
+          (unary_expression
+            (identifier))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (unary_expression
+          (unary_expression
+            (identifier))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (identifier)
+          (identifier)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (binary_expression
+          (parenthesized_expression
+            (binary_expression
+              (identifier)
+              (identifier)))
+          (identifier)))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (propagate_expression
+          (call_expression
+            (identifier)
+            (arguments
+              (identifier)
+              (identifier)))))
+      (variable_declaration
+        (array_type
+          (primitive_type))
+        (identifier)
+        (array_literal
+          (int_literal)
+          (int_literal)
+          (int_literal)))
+      (variable_declaration
+        (array_type
+          (primitive_type))
+        (identifier)
+        (array_literal
+          (int_literal)
+          (int_literal)
+          (int_literal)))
+      (variable_declaration
+        (generic_type
+          (type_identifier)
+          (type_arguments
+            (primitive_type)
+            (primitive_type)))
+        (identifier)
+        (map_literal
+          (map_entry
+            (string)
+            (int_literal))
+          (map_entry
+            (string)
+            (int_literal))))
+      (assignment_statement
+        (identifier)
+        (int_literal)
+        (int_literal))
+      (assignment_statement
+        (identifier)
+        (identifier)
+        (binary_expression
+          (field_expression
+            (identifier)
+            (identifier))
+          (int_literal)))
+      (assignment_statement
+        (identifier)
+        (string)
+        (int_literal))
+      (assignment_statement
+        (identifier)
+        (int_literal)
+        (int_literal)
+        (int_literal))
+      (return_statement
+        (int_literal)))))

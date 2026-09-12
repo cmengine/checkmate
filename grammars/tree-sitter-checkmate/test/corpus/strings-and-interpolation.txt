@@ -1,0 +1,231 @@
+================================================================================
+Strings: plain, escapes, interpolation islands (§2.8/§4.1)
+================================================================================
+
+int main() {
+    str a = "line1\nline2\ttabbed \"quoted\" back\\slash"
+    str b = $"hp={hp} ratio={ratio}"
+    str c = $"sum={1 + 2}"
+    str d = $"neg={-(3)}"
+    str e = $"spawn:{enemyKind}@{position.x}"
+    str f = $"ages: { table["ana"] }"
+    return 0
+}
+
+---
+
+(source_file
+  (function_declaration
+    (primitive_type)
+    (identifier)
+    (parameter_list)
+    (block
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (string))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (interp_string
+          (interp_chunk)
+          (interpolation
+            (identifier))
+          (interp_chunk)
+          (interpolation
+            (identifier))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (interp_string
+          (interp_chunk)
+          (interpolation
+            (binary_expression
+              (int_literal)
+              (int_literal)))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (interp_string
+          (interp_chunk)
+          (interpolation
+            (unary_expression
+              (parenthesized_expression
+                (int_literal))))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (interp_string
+          (interp_chunk)
+          (interpolation
+            (identifier))
+          (interp_chunk)
+          (interpolation
+            (field_expression
+              (identifier)
+              (identifier)))))
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (interp_string
+          (interp_chunk)
+          (interpolation
+            (index_expression
+              (identifier)
+              (string)))))
+      (return_statement
+        (int_literal)))))
+
+================================================================================
+Match: expression and statement forms, wildcard, payloads (§2.15)
+================================================================================
+
+str describeEvent(gameEvent evt) {
+    return match (evt) {
+        Damage(int amount) => "damage:" + amount
+        PlayerDied() => "died"
+        _ => "Unknown"
+    }
+}
+
+int classify(gameEvent evt) {
+    match (evt) {
+        Damage(int amount) => { return 1 }
+        _ => {}
+    }
+    return 0
+}
+
+option<int> find(int[] values) {
+    for (int v in values) {
+        if (v % 2 == 0) {
+            return Some(v)
+        }
+    }
+    return None()
+}
+
+result<int, str> chain(int a, int b) {
+    int first = safeDiv(a, b)?
+    return Ok(first)
+}
+
+---
+
+(source_file
+  (function_declaration
+    (primitive_type)
+    (identifier)
+    (parameter_list
+      (parameter
+        (type_identifier)
+        (identifier)))
+    (block
+      (return_statement
+        (match_expression
+          (identifier)
+          (match_arm
+            (match_pattern
+              (identifier)
+              (pattern_payload
+                (primitive_type)
+                (identifier)))
+            (binary_expression
+              (string)
+              (identifier)))
+          (match_arm
+            (match_pattern
+              (identifier))
+            (string))
+          (match_arm
+            (match_pattern
+              (wildcard))
+            (string))))))
+  (function_declaration
+    (primitive_type)
+    (identifier)
+    (parameter_list
+      (parameter
+        (type_identifier)
+        (identifier)))
+    (block
+      (expression_statement
+        (match_expression
+          (identifier)
+          (match_arm
+            (match_pattern
+              (identifier)
+              (pattern_payload
+                (primitive_type)
+                (identifier)))
+            (block
+              (return_statement
+                (int_literal))))
+          (match_arm
+            (match_pattern
+              (wildcard))
+            (block))))
+      (return_statement
+        (int_literal))))
+  (function_declaration
+    (generic_type
+      (type_identifier)
+      (type_arguments
+        (primitive_type)))
+    (identifier)
+    (parameter_list
+      (parameter
+        (array_type
+          (primitive_type))
+        (identifier)))
+    (block
+      (for_statement
+        (primitive_type)
+        (identifier)
+        (identifier)
+        (block
+          (if_statement
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (int_literal))
+              (int_literal))
+            (block
+              (return_statement
+                (call_expression
+                  (identifier)
+                  (arguments
+                    (identifier))))))))
+      (return_statement
+        (call_expression
+          (identifier)
+          (arguments)))))
+  (function_declaration
+    (generic_type
+      (type_identifier)
+      (type_arguments
+        (primitive_type)
+        (primitive_type)))
+    (identifier)
+    (parameter_list
+      (parameter
+        (primitive_type)
+        (identifier))
+      (parameter
+        (primitive_type)
+        (identifier)))
+    (block
+      (variable_declaration
+        (primitive_type)
+        (identifier)
+        (propagate_expression
+          (call_expression
+            (identifier)
+            (arguments
+              (identifier)
+              (identifier)))))
+      (return_statement
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier)))))))

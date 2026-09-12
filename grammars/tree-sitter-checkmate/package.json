@@ -1,0 +1,36 @@
+{
+  "name": "tree-sitter-checkmate",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Checkmate (CME), the static, safe, embeddable scripting language",
+  "license": "Apache-2.0",
+  "author": "cmengine",
+  "main": "bindings/node",
+  "keywords": [
+    "tree-sitter",
+    "checkmate",
+    "cme",
+    "grammar"
+  ],
+  "files": [
+    "grammar.js",
+    "src/",
+    "queries/",
+    "tree-sitter.json"
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.0"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.checkmate",
+      "file-types": ["cm"],
+      "injection-regex": "^checkmate$",
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

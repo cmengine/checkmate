@@ -871,6 +871,9 @@ pub unsafe extern "C" fn cm_future_get_error(future: *mut CmFuture) -> CmError {
                             CmErrorKind::Limit
                         }
                         ErrorKind::UnknownEntry => CmErrorKind::UnknownEntry,
+                        // §5.7 reentrancy is host misuse: the INVALID_ARG
+                        // family, with the full explanation in the message.
+                        ErrorKind::Reentrant => CmErrorKind::InvalidArg,
                     } as i32,
                     message: to_cstring(&error.message).into_raw(),
                     file: to_cstring(error.file.as_deref().unwrap_or("")).into_raw(),

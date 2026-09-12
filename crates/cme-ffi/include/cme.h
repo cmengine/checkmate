@@ -243,6 +243,13 @@ void cm_context_destroy(cm_context_t* context);
  *
  *     cm_future_t* f = cm_invoke(ctx, "engine.gamemode", "OnTick", NULL, 0);
  *
+ * §5.7 reentrancy: while an invocation is active on a thread, a host
+ * capability dispatched from it may not call cm_invoke on the SAME
+ * context before the original call returns. The reentrant call yields an
+ * ERROR future whose report carries kind CM_ERROR_INVALID_ARG and a
+ * message naming §5.7; the original invocation is unaffected. Invoking a
+ * DIFFERENT context (or from another thread) stays legal.
+ *
  * Returns NULL only for host misuse: NULL context, NULL member, args NULL
  * with argc > 0, or a NULL element inside args. Every real failure
  * (unknown entry, script error, budget) rides the returned future.

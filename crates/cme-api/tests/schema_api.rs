@@ -594,3 +594,196 @@ fn a_host_side_handle_implements_the_proxy_trait_over_the_value_seam() {
     };
     assert_eq!(error.kind, cme_api::ErrorKind::UnknownEntry);
 }
+
+// ---------------------------------------------------------------------------
+// §5.7 reentrancy protection
+// ---------------------------------------------------------------------------
+
+use std::sync::Mutex;
+
+/// The provider captures a `&'static Context` and invokes into it from
+/// INSIDE a script-triggered dispatch — the §5.7 shape a host capability
+/// is forbidden from exercising on the same context.
+struct Reentrant {
+    /// The context to invoke into (installed after creation).
+    slot: Mutex<Option<&'static cme_api::Context<'static>>>,
+    /// The error kind name observed by the provider, for assertions.
+    observed: Mutex<Option<String>>,
+    /// Whether the nested call unexpectedly succeeded.
+    succeeded: Mutex<bool>,
+}
+
+impl CapabilityProvider for Reentrant {
+    fn call(&self, _member: &str, _args: &[Value]) -> Result<Value, String> {
+        let context = self
+            .slot
+            .lock()
+            .unwrap()
+            .expect("the test must install the context first");
+        match context.invoke("helper", &[]) {
+            Ok(_) => {
+                *self.succeeded.lock().unwrap() = true;
+                Err("reentrancy must have been rejected".to_string())
+            }
+            Err(error) => {
+                *self.observed.lock().unwrap() = Some(format!("{:?}", error.kind));
+                // The original invocation continues normally.
+                Ok(Value::Int(5))
+            }
+        }
+    }
+}
+
+const TRACER_SCHEMA: &str = "
+schema tracer v1.0.0
+
+capability probe {
+    since 1.0.0 int Ping()
+}
+";
+
+/// Leaks program and context so the provider can hold `&'static` handles:
+/// the provider outlives the test body through the engine's Arc.
+fn leaked_context(
+    engine: &Engine,
+    source: &str,
+) -> (
+    &'static cme_api::Context<'static>,
+    &'static cme_api::CompiledProgram,
+) {
+    let program: &'static cme_api::CompiledProgram =
+        Box::leak(Box::new(engine.load_source(source).expect("loads")));
+    let context = engine.create_context(program, ExecutionLimits::default());
+    let context: &'static cme_api::Context<'static> = Box::leak(Box::new(context));
+    (context, program)
+}
+
+#[test]
+fn a_reentrant_provider_call_is_rejected_and_the_invocation_survives() {
+    let mut engine = Engine::new();
+    engine
+        .load_schema_text(TRACER_SCHEMA, "tracer.cm")
+        .expect("schema");
+    let provider = Arc::new(Reentrant {
+        slot: Mutex::new(None),
+        observed: Mutex::new(None),
+        succeeded: Mutex::new(false),
+    });
+    engine
+        .register_capability(
+            "tracer.probe",
+            provider.clone() as Arc<dyn CapabilityProvider>,
+        )
+        .expect("registers");
+
+    let (context, _program) = leaked_context(
+        &engine,
+        "import tracer.probe\n\nint helper() {\n    return 42\n}\n\nint entry() {\n    return tracer.probe.Ping()\n}\n",
+    );
+    *provider.slot.lock().unwrap() = Some(context);
+
+    // The OUTER invocation succeeds: the rejection hits only the nested call.
+    let result = context.invoke("entry", &[]).expect("invocation survives");
+    assert_eq!(result, Value::Int(5));
+
+    // The nested call failed with the §5.7 kind and never ran `helper`.
+    let observed = provider.observed.lock().unwrap().take().expect("observed");
+    assert_eq!(observed, "Reentrant");
+    assert!(!*provider.succeeded.lock().unwrap());
+
+    // After the invocation ends, the SAME context invokes normally again —
+    // the guard is per-invocation, not a permanent lockout.
+    let again = context.invoke("helper", &[]).expect("guard released");
+    assert_eq!(again, Value::Int(42));
+}
+
+#[test]
+fn a_reentrant_call_through_a_cloned_context_is_rejected_too() {
+    // A clone IS the same logical context (shared identity), so a provider
+    // capturing the clone exercises the same §5.7 prohibition.
+    let mut engine = Engine::new();
+    engine
+        .load_schema_text(TRACER_SCHEMA, "tracer.cm")
+        .expect("schema");
+    let provider = Arc::new(Reentrant {
+        slot: Mutex::new(None),
+        observed: Mutex::new(None),
+        succeeded: Mutex::new(false),
+    });
+    engine
+        .register_capability(
+            "tracer.probe",
+            provider.clone() as Arc<dyn CapabilityProvider>,
+        )
+        .expect("registers");
+
+    let (context, _program) = leaked_context(
+        &engine,
+        "import tracer.probe\n\nint helper() {\n    return 1\n}\n\nint entry() {\n    return tracer.probe.Ping()\n}\n",
+    );
+    // The clone is already `Context<'static>` (it borrows the leaked
+    // program); leaking the box gives the provider its `&'static` handle.
+    let clone = context.clone();
+    let clone_ref: &'static cme_api::Context<'static> = Box::leak(Box::new(clone));
+    *provider.slot.lock().unwrap() = Some(clone_ref);
+
+    let result = context.invoke("entry", &[]).expect("invocation survives");
+    assert_eq!(result, Value::Int(5));
+    assert_eq!(
+        provider.observed.lock().unwrap().take().expect("observed"),
+        "Reentrant"
+    );
+}
+
+#[test]
+fn a_provider_may_invoke_a_different_context() {
+    // §5.7 forbids re-entry into the SAME context only. Independent
+    // contexts over independent programs stay composable.
+    struct Cross {
+        other: Mutex<Option<&'static cme_api::Context<'static>>>,
+        failed: Mutex<Option<String>>,
+    }
+
+    impl CapabilityProvider for Cross {
+        fn call(&self, _member: &str, _args: &[Value]) -> Result<Value, String> {
+            let other = self.other.lock().unwrap().expect("installed");
+            match other.invoke("helper", &[]) {
+                Ok(Value::Int(42)) => Ok(Value::Int(7)),
+                Ok(other) => Err(format!("unexpected helper result: {other:?}")),
+                Err(error) => {
+                    *self.failed.lock().unwrap() = Some(error.message);
+                    Err("the cross-context invoke must succeed".to_string())
+                }
+            }
+        }
+    }
+
+    let mut engine = Engine::new();
+    engine
+        .load_schema_text(TRACER_SCHEMA, "tracer.cm")
+        .expect("schema");
+    let provider = Arc::new(Cross {
+        other: Mutex::new(None),
+        failed: Mutex::new(None),
+    });
+    engine
+        .register_capability(
+            "tracer.probe",
+            provider.clone() as Arc<dyn CapabilityProvider>,
+        )
+        .expect("registers");
+
+    let (context, _program) = leaked_context(
+        &engine,
+        "import tracer.probe\n\nint entry() {\n    return tracer.probe.Ping()\n}\n",
+    );
+    let (other, _other_program) = leaked_context(&engine, "int helper() {\n    return 42\n}\n");
+    *provider.other.lock().unwrap() = Some(other);
+
+    let result = context.invoke("entry", &[]).expect("cross-context allowed");
+    assert_eq!(result, Value::Int(7));
+    assert!(
+        provider.failed.lock().unwrap().is_none(),
+        "the nested invoke must not have failed"
+    );
+}

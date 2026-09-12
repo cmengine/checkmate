@@ -75,6 +75,11 @@ pub enum ErrorKind {
     /// The host asked for an entry point (§2.1) the program does not
     /// declare: an unknown function or impl member.
     UnknownEntry,
+    /// A host capability tried to invoke back into this context while an
+    /// invocation was still active on the calling thread — the §5.7
+    /// reentrancy prohibition. The call is rejected before any script code
+    /// runs; the original invocation is unaffected.
+    Reentrant,
 }
 
 impl From<InterpErrorKind> for ErrorKind {
@@ -145,6 +150,27 @@ impl fmt::Display for ExecutionError {
 
 impl std::error::Error for ExecutionError {}
 
+// The §5.7 reentrancy guard: the identity of the context currently
+// executing an invocation on THIS thread (`0` when none). Capability
+// dispatch is synchronous on the invoking thread, so a provider that
+// calls back into the same context observes its own id here — concurrent
+// invocations from other threads (legal per §5.7) never see it. (Doc
+// comments on `thread_local!` items are swallowed by the macro, so the
+// guard's contract lives in this plain comment.)
+thread_local! {
+    static ACTIVE_CONTEXT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Restores the previous guard value even when an invocation panics, so a
+/// thread never stays poisoned after a host bug unwinds through it.
+struct RestoreActiveContext(usize);
+
+impl Drop for RestoreActiveContext {
+    fn drop(&mut self) {
+        ACTIVE_CONTEXT.with(|cell| cell.set(self.0));
+    }
+}
+
 /// One execution context over a compiled program (WHITEPAPER §13.1
 /// `create_context`). Contexts are cheap handles over an immutable
 /// program: every invocation constructs its own interpreter frame, fuel
@@ -162,6 +188,9 @@ pub struct Context<'p> {
     program: &'p CompiledProgram,
     limits: ExecutionLimits,
     providers: Arc<HashMap<String, Arc<dyn CapabilityProvider>>>,
+    /// The §5.7 reentrancy-guard identity: shared by clones (they are the
+    /// same logical context), unique per [`Context::new`].
+    identity: Arc<()>,
 }
 
 /// The constructor side of the §9.6/§13.1 interface-proxy flow: a schema
@@ -204,6 +233,7 @@ impl<'p> Context<'p> {
             program,
             limits,
             providers,
+            identity: Arc::new(()),
         }
     }
 
@@ -265,10 +295,37 @@ impl<'p> Context<'p> {
     /// interpreter never escapes — contexts expose values, not frames.
     /// Capability calls (§9) dispatch to the snapshot's providers through
     /// the engine-agnostic [`CapabilityHost`] seam.
+    ///
+    /// §5.7 reentrancy: while an invocation is active on a thread, a
+    /// capability dispatched from it may not invoke back into the SAME
+    /// context — the nested call fails with [`ErrorKind::Reentrant`] and
+    /// the original invocation continues. Invoking a DIFFERENT context
+    /// (or invoking from another thread) stays legal: independent
+    /// invocations share no mutable state.
     fn run(
         &self,
         call: impl FnOnce(&Interpreter<'_>) -> Result<Value, InterpError>,
     ) -> Result<Value, ExecutionError> {
+        // The identity is shared by clones (a clone IS the same logical
+        // context) and distinct per `create_context` call. `0` means no
+        // active invocation, and a real allocation never collides with it.
+        let context_id = Arc::as_ptr(&self.identity).addr();
+        if ACTIVE_CONTEXT.get() == context_id {
+            return Err(ExecutionError {
+                kind: ErrorKind::Reentrant,
+                message: "reentrant invocation rejected (§5.7): a host capability called \
+                          by this context may not invoke script functions on the same \
+                          context before the original call returns"
+                    .to_string(),
+                line: 0,
+                column: 0,
+                file: None,
+                span: None,
+            });
+        }
+        let previous = ACTIVE_CONTEXT.with(|cell| cell.replace(context_id));
+        let _restore = RestoreActiveContext(previous);
+
         let fuel = self.limits.fuel.map(Cell::new);
         let deadline = self
             .limits

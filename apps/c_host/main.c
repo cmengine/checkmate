@@ -984,6 +984,113 @@ static void test_schema_capability(void) {
     cm_error_free(&err);
 }
 
+/* ------------------------------------------------------------------ */
+/* §5.7 reentrancy protection                                          */
+/* ------------------------------------------------------------------ */
+
+/* The context the reentrant provider draws back into, and what the
+ * provider observed. Statics because the registration happens before the
+ * context exists and C providers carry a single opaque `user`. */
+static cm_context_t* g_reentrant_ctx = NULL;
+static int g_nested_kind_ok = 0;
+static int g_nested_message_ok = 0;
+
+static cm_value_t* prov_ReentrantDraw(void* user,
+                                      cm_value_t* const* args,
+                                      size_t argc,
+                                      cm_error_t* out_error) {
+    (void)user;
+    (void)argc;
+    (void)args;
+    (void)out_error;
+    /* §5.7: a capability dispatched by an active invocation must not
+     * invoke back into the same context. The engine rejects the nested
+     * call with an INVALID_ARG error future; the outer call survives. */
+    cm_future_t* nested = cm_invoke(g_reentrant_ctx, NULL, "helper", NULL, 0);
+    if (nested) {
+        cm_poll_result_t poll = cm_future_poll(nested, NULL);
+        if (poll == CM_ERROR) {
+            cm_error_t report = cm_future_get_error(nested);
+            if (report.kind == CM_ERROR_INVALID_ARG) g_nested_kind_ok = 1;
+            if (strstr(report.message, "reentrant") != NULL) g_nested_message_ok = 1;
+            cm_error_free(&report);
+        } else {
+            /* The guard is broken: drain whatever came back. */
+            cm_value_t* leaked = NULL;
+            cm_future_poll(nested, &leaked);
+            cm_value_destroy(leaked);
+        }
+        cm_future_destroy(nested);
+    }
+    return cm_value_void();
+}
+
+static void test_reentrancy_guard(void) {
+    cm_error_t err = CM_ERROR_INIT;
+    cm_schema_t* schema = cm_schema_parse(SCHEMA_TEXT, &err);
+    CHECK(schema != NULL, "reentrancy: schema parses");
+    cm_engine_t* engine = cm_engine_new();
+    CHECK(cm_engine_register_schema(engine, schema) == 0, "reentrancy: schema registers");
+    cm_schema_destroy(schema);
+
+    const cm_capability_member_t members[] = {
+        { "DrawTexture", prov_ReentrantDraw },
+    };
+    CHECK(cm_engine_register_capability(engine, "chost.graphics", members, 1, NULL) == 0,
+          "reentrancy: provider registers");
+
+    cm_program_t* program = cm_engine_load_source(
+        engine,
+        "import chost.graphics\n"
+        "int helper() {\n"
+        "return 42\n"
+        "}\n"
+        "int main() {\n"
+        "TextureHandle tex = TextureHandle(id: 1)\n"
+        "chost.graphics.DrawTexture(tex, Vec2(x: 1.0, y: 2.0))\n"
+        "return helper()\n"
+        "}\n",
+        &err);
+    CHECK(program != NULL, "reentrancy: the gated program loads");
+    cm_error_free(&err);
+
+    cm_context_t* ctx = cm_engine_create_context(engine, program, NULL);
+    g_reentrant_ctx = ctx;
+
+    cm_future_t* future = cm_invoke(ctx, NULL, "main", NULL, 0);
+    cm_value_t* result = NULL;
+    if (future) {
+        cm_future_poll(future, &result);
+        cm_future_destroy(future);
+    }
+    int64_t value = 0;
+    CHECK(result && cm_value_as_int(result, &value) == CM_OK,
+          "reentrancy: the OUTER invocation completes");
+    CHECK(value == 42, "reentrancy: the original invocation is unaffected");
+    cm_value_destroy(result);
+
+    CHECK(g_nested_kind_ok, "reentrancy: the nested call reports INVALID_ARG");
+    CHECK(g_nested_message_ok, "reentrancy: the nested message names the reentrancy rule");
+
+    /* After the invocation ends the SAME context invokes normally again. */
+    cm_future_t* after = cm_invoke(ctx, NULL, "helper", NULL, 0);
+    cm_value_t* after_value = NULL;
+    if (after) {
+        cm_future_poll(after, &after_value);
+        cm_future_destroy(after);
+    }
+    int64_t helper_value = 0;
+    CHECK(after_value && cm_value_as_int(after_value, &helper_value) == CM_OK &&
+              helper_value == 42,
+          "reentrancy: the guard releases after the invocation");
+    cm_value_destroy(after_value);
+
+    cm_context_destroy(ctx);
+    cm_program_destroy(program);
+    cm_engine_destroy(engine);
+    g_reentrant_ctx = NULL;
+}
+
 static void test_value_string_round_trip(void) {
     /* CMON display matches the language's own rendering for every kind. */
     struct {
@@ -1213,6 +1320,7 @@ int cme_host_app_main(void) {
     test_concurrent_contexts();
     test_value_string_round_trip();
     test_schema_capability();
+    test_reentrancy_guard();
 #ifdef CME_HOST_HAS_SCHEMA_GEN
     test_schema_bindings();
 #endif

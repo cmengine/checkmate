@@ -1,0 +1,28 @@
+// The §9 schema fixture for the Rust host: `cme_schema_bindings!` reads
+// THIS file at the host's compile time and generates the capability
+// trait, the interface proxies, and the runtime descriptor. The host's
+// `WindowService` implements the generated trait — every signature below
+// is verified against the schema when this crate builds.
+
+schema game v1.0.0
+
+struct Sprite {
+    int id
+    str name
+    float scale
+}
+
+enum Event {
+    Started
+    Scored(int points)
+}
+
+capability window {
+    since 1.0.0 Sprite OpenWindow(str title)
+    since 1.0.0 void Draw(Sprite sprite)
+}
+
+interface gamemode {
+    since 1.0.0 int OnEvent(Event event)
+    since 1.0.0 int Tick(int frame)
+}

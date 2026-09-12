@@ -329,3 +329,127 @@ fn deadline_duration_conversion_is_the_obvious_one() {
         std::time::Duration::from_millis(50)
     );
 }
+
+// ---------------------------------------------------------------------------
+// The §9.6 schema flow (WHITEPAPER §9): --schema registration, the
+// compile-time-verified bindings, and the --schema-demo walkthrough
+// ---------------------------------------------------------------------------
+
+use cme_rust_host::{Command, parse_command, run_schema_demo};
+
+#[test]
+fn schema_flags_parse_into_the_invocation() {
+    let command = parse_command(&args_vec(&[
+        "game.cm",
+        "main",
+        "--schema",
+        "schemas/game.cm",
+        "--schema",
+        "schemas/other.cm",
+    ]))
+    .unwrap();
+    let Command::Run(invocation) = command else {
+        panic!("expected a run invocation");
+    };
+    assert_eq!(
+        invocation.schemas,
+        vec!["schemas/game.cm", "schemas/other.cm"]
+    );
+}
+
+#[test]
+fn the_demo_command_parses_without_a_program() {
+    assert_eq!(
+        parse_command(&args(["--schema-demo"])).unwrap(),
+        Command::SchemaDemo
+    );
+    // Extra arguments after the flag are a usage error.
+    assert_eq!(
+        parse_command(&args_vec(&["--schema-demo", "extra"])).unwrap_err(),
+        Outcome::Usage("--schema-demo takes no further arguments".to_string())
+    );
+}
+
+#[test]
+fn a_defective_schema_file_fails_the_run_with_io() {
+    let dir = temp_dir("bad_schema");
+    let schema = dir.join("broken.cm");
+    std::fs::write(&schema, "schema broken v1.0\n").unwrap();
+    // A schema that does not parse surfaces as an IO-kind failure (the
+    // file read succeeded; the contract is unusable).
+    let outcome = run_simple(&[
+        schema.to_str().expect("utf8"),
+        "main",
+        "--schema",
+        schema.to_str().expect("utf8"),
+    ]);
+    assert!(matches!(outcome, Outcome::Io(_)), "got {outcome:?}");
+}
+
+#[test]
+fn a_schema_gated_program_runs_against_a_registered_contract() {
+    let dir = temp_dir("schema_run");
+    let schema = dir.join("tiny.cm");
+    std::fs::write(
+        &schema,
+        "schema tiny v1.0.0\ncapability ping {\nsince 1.0.0 int Ping()\n}\n",
+    )
+    .unwrap();
+    let program = dir.join("uses_nothing.cm");
+    std::fs::write(&program, "int main() {\nreturn 5\n}\n").unwrap();
+
+    // The schema registers, the plain program loads, the entry runs.
+    let outcome = run_simple(&[
+        program.to_str().expect("utf8"),
+        "main",
+        "--schema",
+        schema.to_str().expect("utf8"),
+    ]);
+    assert_eq!(outcome, Outcome::Returned("5".to_string()));
+}
+
+#[test]
+fn the_schema_demo_walks_the_generated_bindings() {
+    let outcome = run_schema_demo();
+    let Outcome::Returned(text) = &outcome else {
+        panic!("the demo must succeed: {outcome:?}");
+    };
+    // The registered descriptor, the proxy calls (the script doubles the
+    // Scored payload), and the capability-backed main invocation.
+    assert!(
+        text.contains("schema: game v1.0.0 (namespace game)"),
+        "{text}"
+    );
+    assert!(text.contains("proxy: OnEvent(Started) = 0"), "{text}");
+    assert!(text.contains("proxy: OnEvent(Scored(21)) = 42"), "{text}");
+    assert!(text.contains("proxy: Tick(41) = 42"), "{text}");
+    assert!(text.contains("main: 100"), "{text}");
+}
+
+#[test]
+fn generated_bindings_expose_the_boundary_types() {
+    // The types came from schemas/game.cm at THIS crate's compile time;
+    // they pack to script values and unpack by name — the compile-time
+    // half of the §9.6 contract, exercised here at runtime.
+    use cme_rust_host::bindings::game::{Event, Sprite};
+
+    let sprite = Sprite {
+        id: 7,
+        name: "hero".to_string(),
+        scale: 2.0,
+    };
+    let value = sprite.to_value();
+    assert_eq!(Sprite::from_value(&value), Ok(sprite));
+
+    let event = Event::Scored { points: 9 };
+    let value = event.to_value();
+    assert_eq!(
+        value,
+        cme::Value::Enum {
+            name: "Event".to_string(),
+            variant: "Scored".to_string(),
+            payload: vec![cme::Value::Int(9)],
+        }
+    );
+    assert_eq!(Event::from_value(&value), Ok(event));
+}

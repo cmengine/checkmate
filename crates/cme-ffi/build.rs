@@ -44,7 +44,10 @@ fn main() {
         "apps/c_host/engine.cm has schema defects: {diagnostics:?}"
     );
     let header = cme_compiler::schema::codegen_c(
-        outcome.file.as_ref().expect("a clean parse yields the file"),
+        outcome
+            .file
+            .as_ref()
+            .expect("a clean parse yields the file"),
         "cme.h",
     );
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
@@ -63,6 +66,9 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", c_app.display());
     println!("cargo:rerun-if-changed={}", schema.display());
-    println!("cargo:rerun-if-changed={}", header_dir.join("cme.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        header_dir.join("cme.h").display()
+    );
     println!("cargo:rerun-if-changed={}", generated.display());
 }

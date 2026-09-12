@@ -16,6 +16,9 @@ name = "cme-rust-host"
 path = "src/main.rs"
 
 # Consumes the API through the `cme` facade exactly as the WHITEPAPER §13.1
-# example does: `use cme::{Engine, ExecutionLimits, ...}`.
+# example does: `use cme::{Engine, ExecutionLimits, ...}`. The `schema-macro`
+# feature pulls the §9.6 proc macro, so `cme_schema_bindings!` runs at THIS
+# crate's compile time over schemas/game.cm — the generated code references
+# the facade's `api` re-export (`crate = ::cme::api`).
 [dependencies]
-cme = { path = "../..", features = ["api"] }
+cme = { path = "../..", features = ["api", "schema-macro"] }

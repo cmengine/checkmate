@@ -419,6 +419,29 @@ pub trait CtHost {
     fn ct_call(&self, path: &str, args: &[Value]) -> Option<Result<Value, String>>;
 }
 
+/// The host capability boundary (WHITEPAPER §1, §7.2, §9, §13.1): the
+/// runtime half of the schema contract. When a script calls a capability
+/// member (`engine.graphics.LoadTexture(...)`), the evaluator hands the
+/// call to the registered host — the host owns every provider (§9.1:
+/// capabilities are functions the HOST provides), packs its native state
+/// into [`Value`]s, and returns the result.
+///
+/// This trait is the deliberate seam between the schema system and the
+/// execution engine: the tree walker calls through it today, and the
+/// bytecode VM and LLVM AOT engines (§5) will call through the same shape
+/// tomorrow, so swapping how Checkmate scripts run never touches host
+/// providers. Purity holds by construction — the megaprogram evaluator
+/// never attaches a capability host (§8.5), so compile-time code cannot
+/// reach host capabilities.
+pub trait CapabilityHost {
+    /// Invokes `member` of the capability at `path` (`["engine",
+    /// "graphics"]`) with positional [`Value`] arguments. Arguments arrive
+    /// by value (§2.13: the script's values are cloned into the call, so
+    /// the host can never alias script state). Errors are ordinary strings
+    /// — the interpreter anchors them to the call site.
+    fn call(&self, path: &[&str], member: &str, args: &[Value]) -> Result<Value, String>;
+}
+
 /// A program ready to invoke: the function, struct, and enum declarations
 /// of a parsed (and, in the host's pipeline, checked) statement list,
 /// collected into name maps. The first registration of a name wins,
@@ -433,6 +456,8 @@ pub struct Interpreter<'a> {
     /// The §8.5 host builtin surface, if this interpreter runs under the
     /// megaprogram evaluator.
     host: Option<&'a dyn CtHost>,
+    /// The §9/§13.1 capability surface, when the host registered providers.
+    capabilities: Option<&'a dyn CapabilityHost>,
     /// The §5.5 fuel meter, when this run is budgeted: a shared,
     /// deterministic OPERATION counter charged by every statement and
     /// expression evaluation. The compile-time evaluator shares its cell so
@@ -487,6 +512,7 @@ impl<'a> Interpreter<'a> {
             enums,
             impls,
             host: None,
+            capabilities: None,
             fuel: None,
             call_depth_limit: MAX_CALL_DEPTH,
             deadline: None,
@@ -497,6 +523,15 @@ impl<'a> Interpreter<'a> {
     /// evaluator; ordinary execution leaves it unset).
     pub fn with_host(mut self, host: &'a dyn CtHost) -> Self {
         self.host = Some(host);
+        self
+    }
+
+    /// Attaches the host capability surface (§9, §13.1): the providers a
+    /// script's `import`ed capabilities dispatch to at runtime. The
+    /// megaprogram evaluator never attaches one, which is what keeps
+    /// compile-time evaluation pure (§8.5).
+    pub fn with_capabilities(mut self, capabilities: &'a dyn CapabilityHost) -> Self {
+        self.capabilities = Some(capabilities);
         self
     }
 
@@ -575,6 +610,7 @@ impl<'a> Interpreter<'a> {
             enums: &self.enums,
             impls: &self.impls,
             host: self.host,
+            capabilities: self.capabilities,
             fuel: self.fuel,
             call_depth_limit: self.call_depth_limit,
             deadline: self.deadline,
@@ -608,6 +644,7 @@ struct Runner<'env, 'a> {
     enums: &'env HashMap<&'a str, &'a Stmt>,
     impls: &'env HashMap<String, HashMap<String, &'a Stmt>>,
     host: Option<&'env dyn CtHost>,
+    capabilities: Option<&'env dyn CapabilityHost>,
     fuel: Option<&'env Cell<u64>>,
     /// The configured §5.5 call-depth bound (the [`Interpreter`]'s, which
     /// defaults to [`MAX_CALL_DEPTH`]).
@@ -1483,6 +1520,25 @@ impl<'env, 'a> Runner<'env, 'a> {
                 )),
             };
         }
+        // §9/§13.1: a capability call — `engine.graphics.LoadTexture(...)`
+        // — dispatches to the registered host when one is attached. The
+        // checker (schema active) has already gated import, version, and
+        // `requires` visibility; the host is the authority on what is
+        // actually provided.
+        if let Some(capabilities) = self.capabilities {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                values.push(self.eval(expr)?);
+            }
+            let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+            let (capability_path, member) = segments.split_at(segments.len() - 1);
+            return capabilities
+                .call(capability_path, member[0], &values)
+                .map_err(|message| InterpError::new(message, span));
+        }
         Err(InterpError::new(
             format!("unknown function `{}`", path.join(".")),
             span,
@@ -1913,7 +1969,7 @@ fn unary_symbol(op: UnaryOp) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{InterpError, InterpErrorKind, Interpreter, MAX_CALL_DEPTH, Value};
+    use super::{CapabilityHost, InterpError, InterpErrorKind, Interpreter, MAX_CALL_DEPTH, Value};
     use cme_core::Span;
     use std::cell::Cell;
 
@@ -2575,5 +2631,96 @@ mod tests {
         let soon = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let interpreter = Interpreter::new(&statements).with_deadline(soon);
         assert_eq!(interpreter.invoke("sum", &[]), Ok(Value::Int(28)));
+    }
+
+    /// A capability host stub: counts calls, echoes deterministic results.
+    struct CountingHost {
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl CapabilityHost for CountingHost {
+        fn call(&self, path: &[&str], member: &str, args: &[Value]) -> Result<Value, String> {
+            self.calls.set(self.calls.get() + 1);
+            match (path, member) {
+                (["engine", "graphics"], "LoadTexture") => {
+                    let name = args[0].as_str().expect("str arg").to_string();
+                    Ok(Value::Struct {
+                        name: "TextureHandle".to_string(),
+                        fields: vec![("id".to_string(), Value::Int(name.len() as i64))],
+                    })
+                }
+                (["engine", "math"], "Sqrt") => Ok(Value::Float(
+                    (args[0].as_float().expect("float arg")).sqrt(),
+                )),
+                _ => Err(format!(
+                    "capability `{}` has no member `{member}`",
+                    path.join(".")
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn capability_calls_dispatch_to_the_registered_host() {
+        let source = "\
+import engine.graphics
+int main() {
+    TextureHandle tex = engine.graphics.LoadTexture(\"hero.png\")
+    return tex.id
+}
+";
+        let statements = parse_statements_for_interp(source);
+        let host = CountingHost {
+            calls: std::cell::Cell::new(0),
+        };
+        let interpreter = Interpreter::new(&statements).with_capabilities(&host);
+        assert_eq!(interpreter.invoke("main", &[]), Ok(Value::Int(8)));
+        assert_eq!(host.calls.get(), 1);
+    }
+
+    #[test]
+    fn capability_host_errors_surface_as_clean_runtime_errors() {
+        let source = "\
+import engine.graphics
+int main() {
+    engine.graphics.Missing(1)
+    return 0
+}
+";
+        let statements = parse_statements_for_interp(source);
+        let host = CountingHost {
+            calls: std::cell::Cell::new(0),
+        };
+        let interpreter = Interpreter::new(&statements).with_capabilities(&host);
+        let error = interpreter.invoke("main", &[]).unwrap_err();
+        assert_eq!(error.kind(), InterpErrorKind::Runtime);
+        assert!(
+            error
+                .message
+                .contains("capability `engine.graphics` has no member `Missing`"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn without_a_capability_host_the_calls_stay_unknown() {
+        // The pre-schema behavior: an interpreter with no capability
+        // surface attached reports the plain unknown-function error —
+        // which is exactly what compile-time evaluation relies on (§8.5
+        // purity: the megaprogram evaluator never attaches one).
+        let source = "\
+import engine.graphics
+int main() {
+    engine.graphics.LoadTexture(\"hero.png\")
+    return 0
+}
+";
+        let statements = parse_statements_for_interp(source);
+        let interpreter = Interpreter::new(&statements);
+        let error = interpreter.invoke("main", &[]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "unknown function `engine.graphics.LoadTexture`"
+        );
     }
 }

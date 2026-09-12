@@ -205,6 +205,11 @@ fn interface_proxies_call_into_the_script_with_types() {
     let context = engine.create_context(&program, cme_api::ExecutionLimits::default());
     let proxy = EngineGamemodeProxy::new(&context).expect("the program implements gamemode");
 
+    // The §13.1 shape: the same proxy through the generic constructor.
+    let proxy: EngineGamemodeProxy = context
+        .get_interface()
+        .expect("get_interface routes to InterfaceProxy::from_context");
+
     // Typed host → script call (§9.6 proxy shape).
     let state = proxy
         .init_game(GameConfig {
@@ -229,12 +234,16 @@ fn interface_proxies_call_into_the_script_with_types() {
     assert!(matches!(roll, Err(LoadError::Corrupt { .. })));
 
     // A proxy for an interface the program does not implement fails at
-    // construction.
+    // construction — through BOTH constructors, as an UnknownEntry error
+    // (the host asked for an entry the program does not declare).
     let missing = engine
         .load_source("int main() {\nreturn 0\n}\n")
         .expect("loads");
     let context = engine.create_context(&missing, cme_api::ExecutionLimits::default());
-    assert!(EngineGamemodeProxy::new(&context).is_err());
+    let error = EngineGamemodeProxy::new(&context).unwrap_err();
+    assert_eq!(error.kind, cme_api::ErrorKind::UnknownEntry);
+    let error = context.get_interface::<EngineGamemodeProxy>().unwrap_err();
+    assert_eq!(error.kind, cme_api::ErrorKind::UnknownEntry);
 }
 
 #[test]

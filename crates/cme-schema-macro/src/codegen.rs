@@ -1054,14 +1054,39 @@ impl<'s> Generator<'s> {
         /// this is the host-side guard).
         pub fn new(context: &'a {api}::Context<'p>) -> ::core::result::Result<Self, {api}::ExecutionError> {{
             if !context.has_interface(Self::TARGET) {{
-                return ::core::result::Result::Err(Self::__conv_err(::std::format!(
+                return ::core::result::Result::Err(Self::__iface_err(::std::format!(
                     "the loaded program does not implement `{qualified}`"
                 )));
             }}
             ::core::result::Result::Ok(Self {{ context }})
         }}
 
+        fn __iface_err(message: ::std::string::String) -> {api}::ExecutionError {{
+            {api}::ExecutionError {{
+                kind: {api}::ErrorKind::UnknownEntry,
+                message,
+                line: 0,
+                column: 0,
+                file: ::core::option::Option::None,
+                span: ::core::option::Option::None,
+            }}
+        }}
+
 {methods}    }}
+
+    impl<'a, 'p> ::core::fmt::Debug for {proxy}<'a, 'p> {{
+        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {{
+            f.write_str("{proxy}")
+        }}
+    }}
+
+    impl<'a, 'p> {api}::InterfaceProxy<'a, 'p> for {proxy}<'a, 'p> {{
+        fn from_context(
+            context: &'a {api}::Context<'p>,
+        ) -> ::core::result::Result<Self, {api}::ExecutionError> {{
+            Self::new(context)
+        }}
+    }}
 "#
         );
     }

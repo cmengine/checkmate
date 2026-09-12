@@ -50,15 +50,16 @@
 //!
 //! # Whitepaper alignment notes
 //!
-//! §13.1's example routes calls through schema-generated trait objects and
-//! awaits them (`gamemode.init_game(config).await`). Those pieces are the
-//! schema system's (§9) and the async VM's (§4, §5.2) — not yet
-//! implemented, per the repository state notes. Until they land, this API
-//! exposes the same load → limit → invoke shape over the shipped front end
-//! and tree-walking interpreter, and impl-member invocation covers the
-//! `cm_invoke(ctx, "engine.gamemode", "OnTick", …)` surface of the C API
-//! (§13.2). Every invocation completes synchronously; §5.7 reentrancy rules
-//! become observable once host capabilities can call back into scripts.
+//! §13.1's example awaits its calls (`gamemode.init_game(config).await`);
+//! the async/continuation machinery (§4, §5.2) is the one schema-era piece
+//! still ahead of this API — `suspend` members are rejected at parse time
+//! for now. The SYNC half of the §13.1 example is real today: schemas
+//! register on the engine (§9), capability calls dispatch to host
+//! providers, and schema proxies constructed through
+//! [`Context::get_interface`] give the host typed calls into the script's
+//! `impl` members (`gamemode.init_game(config)` minus the `.await`),
+//! whether the script ran on the tree walker or any future engine that
+//! honors the same [`Value`] seam.
 //!
 //! # Threads
 //!
@@ -93,7 +94,7 @@ mod context;
 mod engine;
 mod render;
 
-pub use context::{Context, ErrorKind, ExecutionError, ExecutionLimits};
+pub use context::{Context, ErrorKind, ExecutionError, ExecutionLimits, InterfaceProxy};
 pub use engine::{
     CapabilityProvider, CompileError, CompiledProgram, Engine, LoadError, ProgramKind, SchemaError,
 };

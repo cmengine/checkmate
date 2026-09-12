@@ -29,3 +29,5 @@ rustc-ice-*.txt
 
 # The standalone C host app build output (see apps/c_host/Makefile)
 apps/c_host/c_host_app
+
+prepush.sh

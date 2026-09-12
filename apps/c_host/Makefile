@@ -25,3 +25,18 @@ test: $(TARGET)
 
 clean:
 	rm -f $(TARGET)
+
+# The §9.6 C bindings demo: generate the schema header with the CLI and
+# syntax-check it against the ABI header (requires `cargo build --features cli`).
+CME_CLI ?= $(CME_ROOT)/target/debug/cme
+
+schema-gen: engine_schema_gen.h
+
+engine_schema_gen.h: engine.cm $(CME_CLI)
+	$(CME_CLI) codegen-c engine.cm > $@
+	@printf '#include "engine_schema_gen.h"\nint main(void) { return 0; }\n' | \
+		$(CC) $(CFLAGS) $(INCLUDES) -I. -x c - -fsyntax-only
+	@echo "schema header generated and verified: $@"
+
+clean:
+	rm -f engine_schema_gen.h

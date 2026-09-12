@@ -1,6 +1,6 @@
 # CME — Checkmate Engine
 
-CME is a statically typed, embeddable scripting language implemented in Rust. The full whitepaper language surface parses, type-checks, and runs end to end on the tree-walking interpreter, the §8 megaprogramming system (grammar-driven `magic` macros with a packrat pattern engine and compile-time function evaluation) is implemented at the source-text level with its own `cme expand` command, and multi-file mods (§10) load, link, and run from a `mod.toml` + `src/` tree. The bytecode VM, AOT compiler, and host schema system remain future work.
+CME is a statically typed, embeddable scripting language implemented in Rust. The full whitepaper language surface parses, type-checks, and runs end to end on the tree-walking interpreter, the §8 megaprogramming system (grammar-driven `magic` macros with a packrat pattern engine and compile-time function evaluation) is implemented at the source-text level with its own `cme expand` command, multi-file mods (§10) load, link, and run from a `mod.toml` + `src/` tree, and the §9 schema system gates host/script contracts with compile-time-verified bindings for Rust and C hosts. The bytecode VM and AOT compiler remain future work.
 
 ## Current Status
 
@@ -60,6 +60,51 @@ if (result == CM_ERROR) {
 cm_future_destroy(future);
 ```
 
+## The Schema System (§9): contracts with compile-time-verified host bindings
+
+Hosts declare their contract in `.cm` schema files — one namespace root per file (§9.2), capabilities the host provides, interfaces scripts implement with `impl` blocks, `since`/`optional` versioning (§9.5), and `requires` edges (§9.4):
+
+```checkmate
+// schemas/engine.cm
+schema engine v1.4.0
+
+struct TextureHandle {
+    int id
+}
+
+capability graphics {
+    since 1.0.0 TextureHandle LoadTexture(str path)
+}
+
+interface gamemode {
+    since 1.0.0 GameState InitGame(GameConfig config)
+}
+```
+
+Register the schema (with the engine or the CLI's `--schema` flag) and every load enforces the contract at compile time: capability calls type-check against the schema signatures and require the import, `impl engine.gamemode` blocks must implement every required visible member with the exact signature, members introduced after the program's target version are hidden (§9.5), and `requires` edges gate both directions.
+
+**Rust hosts get compile-time-verified bindings** (§9.6) through a procedural macro that runs the real schema parser at host build time:
+
+```rust
+cme_schema_bindings!("schemas/engine.cm"); // generates the `engine` module
+
+struct HostGraphics;
+impl engine::EngineGraphicsCapability for HostGraphics {
+    fn load_texture(&self, path: String) -> engine::TextureHandle { /* ... */ }
+    // missing members or wrong signatures = host COMPILE error
+}
+
+let mut engine = cme::Engine::new();
+engine.register_schema(engine::schema())?;          // same file, no re-parse
+engine::register_engine_graphics(&mut engine, std::sync::Arc::new(HostGraphics))?;
+```
+
+The macro also generates typed interface proxies (`engine::EngineGamemodeProxy::new(&context)`) for host → script calls and native Rust structs/enums for the §9.3 boundary types, packing and unpacking script values by name. Enable the facade's `schema-macro` feature.
+
+**C hosts get a generated header**: `cme codegen-c schemas/engine.cm` emits function-pointer typedefs per capability member, a vtable, and a registration macro whose `_Static_assert`s (via `_Generic`) verify every host implementation's signature AT COMPILE TIME — a missing member fails the preprocessor, a wrong signature fails the assert. Interface members become exact-arity invocation helpers.
+
+A program that calls a capability with no registered provider fails the LOAD — wiring mistakes are deterministic before any invocation, and capability calls at runtime dispatch to the provider through an engine-agnostic boundary the tree walker uses today and the bytecode VM will use unchanged.
+
 `apps/rust_host` is a working Rust consumer (`cme-rust-host <file.cm | mod_dir> <entry> [args...] --fuel N --deadline-ms N --depth N`), and `apps/c_host` is a working C consumer with a Makefile — the same C file also runs inside `cargo test` via cme-ffi's build script, so the workspace test run exercises the real C client end to end.
 
 ## Workspace
@@ -71,14 +116,15 @@ The repository is a Cargo workspace with focused crates:
 | `cme-core` | Shared AST and language data models | Full language surface |
 | `cme-compiler` | Lexer, parser, diagnostics, validator, type checker, `parse_source`, the `mega` megaprogram subsystem, and the `mods` multi-file mod loader | Working front-end for the full surface plus §8 megaprogramming and §10 mods |
 | `cme-interp` | Interpreter | Working tree-walking interpreter (full surface) |
-| `cme-api` | Rust host embedding API (§13.1): `Engine`, `CompiledProgram`, `Context`, `ExecutionLimits` | Working over source files and mod trees |
-| `cme-ffi` | Stable C host API (§13.2): `cme.h`, `cm_*` ABI, staticlib + cdylib | Working; the C host app runs in `cargo test` |
+| `cme-api` | Rust host embedding API (§13.1): `Engine`, `CompiledProgram`, `Context`, `ExecutionLimits`, schema registration, capability providers | Working over source files and mod trees, schema-gated |
+| `cme-ffi` | Stable C host API (§13.2): `cme.h`, `cm_*` ABI, staticlib + cdylib, schema + provider surface | Working; the C host app runs in `cargo test` |
+| `cme-schema-macro` | `cme_schema_bindings!` — compile-time-verified Rust host bindings from `.cm` schema files (§9.6) | Working; capability traits, proxies, descriptors |
 | `cme-runtime` | Runtime services and built-ins | Placeholder |
-| `cme` | Facade package and optional CLI | Working lex/ast/check/run/expand toolchain; check/ast/run accept mod directories |
+| `cme` | Facade package and optional CLI | Working lex/ast/check/run/expand/schema/codegen-c toolchain; check/ast/run accept mod directories and `--schema` contracts |
 | `apps/rust_host` | Rust host application (§13.1 consumer) | Working `cme-rust-host` CLI |
-| `apps/c_host` | C host application (§13.2 consumer) | 208 self-checks, run by `cargo test` and standalone |
+| `apps/c_host` | C host application (§13.2 consumer) | 219 self-checks incl. the schema flow, run by `cargo test` and standalone |
 
-The root `cme` package exposes workspace crates through optional `core`, `compiler`, `interp`, `runtime`, and `api` features. Enabling `cli` enables the toolchain crates; `api` enables the Rust host API (flat re-exports `Engine`, `ExecutionLimits`, `CompiledProgram`, `Context`, `Value`). The default build intentionally exposes no root APIs.
+The root `cme` package exposes workspace crates through optional `core`, `compiler`, `interp`, `runtime`, `api`, and `schema-macro` features. Enabling `cli` enables the toolchain crates; `api` enables the Rust host API (flat re-exports `Engine`, `ExecutionLimits`, `CompiledProgram`, `Context`, `Value`); `schema-macro` enables `cme::cme_schema_bindings`. The default build intentionally exposes no root APIs.
 
 ## Development
 

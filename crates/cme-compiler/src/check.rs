@@ -33,11 +33,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::diagnostics::Diagnostic;
+use crate::schema::SchemaContext;
 use cme_core::Span;
 use cme_core::ast::{
     BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, FieldDef, LValue, Param, Pattern,
     PrimitiveType, Stmt, StmtKind, Type, UnaryOp, VariantDecl,
 };
+use cme_core::schema::{MemberRequirement, SchemaMember};
 
 /// A registered struct declaration (§2.6, §2.9).
 #[derive(Clone)]
@@ -88,6 +90,31 @@ struct FnSig {
     params: Vec<(String, Ty)>,
     return_ty: Ty,
     poisoned: bool,
+}
+
+/// The display name of a declared (AST) type, for schema diagnostics that
+/// quote the contract's own spelling.
+fn type_display(ty: &Type) -> String {
+    match ty {
+        Type::Infer => "infer".into(),
+        Type::Void => "void".into(),
+        Type::Prim(PrimitiveType::Int) => "int".into(),
+        Type::Prim(PrimitiveType::Float) => "float".into(),
+        Type::Prim(PrimitiveType::Bool) => "bool".into(),
+        Type::Prim(PrimitiveType::Str) => "str".into(),
+        Type::Array(elem) => format!("{}[]", type_display(elem)),
+        Type::Map { key, value } => {
+            format!("map<{}, {}>", type_display(key), type_display(value))
+        }
+        Type::Named { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let inner: Vec<String> = args.iter().map(type_display).collect();
+                format!("{name}<{}>", inner.join(", "))
+            }
+        }
+    }
 }
 
 /// The resolved type of an expression or declaration.
@@ -167,8 +194,31 @@ const RESERVED_TYPE_NAMES: [&str; 3] = ["option", "result", "map"];
 
 /// Type-checks a whole program. Returns every violation found; the list is
 /// empty exactly when the program satisfies §2.6–§2.16, §11, and §A.4–§A.7.
+/// No schema contract is active: host-rooted imports, impl targets, and
+/// path calls keep their host-style acceptance (the pre-schema behavior).
 pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
-    let mut checker = Checker::new();
+    check_with_schema(statements, None)
+}
+
+/// Type-checks a whole program against an ACTIVE schema contract
+/// (WHITEPAPER §9). The schema enforces, at compile time:
+///
+/// - §2.5 boundary capitalization — a capitalized top-level declaration
+///   must belong to the schema contract; script-internal ones are
+///   camelCase;
+/// - §2.3/§7.2 capability gating — host imports resolve against granted
+///   namespaces, and capability calls are type-checked against the schema
+///   member signatures;
+/// - §9.5 version gating — members introduced after the program's target
+///   version (a mod manifest's `[schemas]`, or the schema's own version
+///   for loose sources) are hidden;
+/// - §9.4 `requires` — capabilities call only when their prerequisite
+///   interface is fully implemented, and implementing an interface pulls
+///   in its own prerequisites;
+/// - §10.4/§9.1 interface completeness — `impl <interface>` blocks must
+///   implement every required visible member with the exact signature.
+pub fn check_with_schema(statements: &[Stmt], schema: Option<&SchemaContext>) -> Vec<Diagnostic> {
+    let mut checker = Checker::new_with_schema(schema);
 
     // Pass 1: register every top-level declaration. Forward references and
     // recursion resolve because every signature and type is registered
@@ -187,6 +237,7 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
                 return_ty,
                 ..
             } => {
+                checker.check_boundary_capitalization(name, statement.span);
                 if checker.declaration_name_conflicts(name, statement.span) {
                     continue;
                 }
@@ -199,6 +250,7 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
                 type_params,
                 fields,
             } => {
+                checker.check_boundary_capitalization(name, statement.span);
                 if checker.declaration_name_conflicts(name, statement.span) {
                     continue;
                 }
@@ -210,6 +262,7 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
                 type_params,
                 variants,
             } => {
+                checker.check_boundary_capitalization(name, statement.span);
                 if checker.declaration_name_conflicts(name, statement.span) {
                     continue;
                 }
@@ -221,9 +274,12 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
                 impl_members.push(index);
             }
             // Resolution against the mod tree belongs to the mod loader
-            // (§10.3); an unresolvable import is reported there, so the
-            // checker treats the statement as transparent.
-            StmtKind::Import { .. } => {}
+            // (§10.3); `self` imports resolve there. Host-rooted imports
+            // resolve against the schema contract when one is active
+            // (§2.3, §7.2), so every import is collected here.
+            StmtKind::Import { path } => {
+                checker.imports.push((path.clone(), statement.span));
+            }
             // Already reported at parse level; never cascaded here.
             StmtKind::Invalid { .. } => {}
             _ => checker.report(
@@ -258,10 +314,17 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
         }
     }
 
+    // Pass 3 (schema active): the §9 contract checks that need the FULL
+    // picture — every impl block registered, every signature resolved.
+    checker.check_schema_boundaries();
+
     checker.diagnostics
 }
 
-struct Checker {
+/// The static type checker. `schema` carries the ACTIVE host contract
+/// (WHITEPAPER §9); `None` keeps the host-style acceptance of imports,
+/// impl targets, and path calls that predates the schema system.
+struct Checker<'a> {
     diagnostics: Vec<Diagnostic>,
     functions: HashMap<String, FnSig>,
     /// The registry of type declarations, in registration order. Indices 0
@@ -273,6 +336,18 @@ struct Checker {
     /// same target union here; a member implemented twice is rejected at
     /// registration.
     impls: HashMap<String, HashMap<String, FnSig>>,
+    /// The declaration span of the FIRST impl block per target path, for
+    /// schema diagnostics that point at the `impl` site (§10.4).
+    impl_spans: HashMap<String, Span>,
+    /// The span of each implemented impl member, for exact signature
+    /// diagnostics.
+    impl_member_spans: HashMap<String, HashMap<String, Span>>,
+    /// Every host-rooted or self-rooted import, in declaration order
+    /// (§2.3). Imports resolve against the schema contract when one is
+    /// active.
+    imports: Vec<(Vec<String>, Span)>,
+    /// The active schema contract, when the host granted one.
+    schema: Option<&'a SchemaContext>,
     /// Scope stack for the function currently being checked. Index 0 holds
     /// the parameters together with the body's top-level statements
     /// (redeclaring a parameter there is a duplicate, not a shadow).
@@ -282,14 +357,24 @@ struct Checker {
     current_fn: Option<(String, Ty)>,
 }
 
-impl Checker {
-    fn new() -> Self {
+impl<'a> Checker<'a> {
+    /// A checker with the schema types pre-registered (§9.3): every struct
+    /// and enum of every GRANTED namespace joins the type registry before
+    /// any script declaration, so script signatures, capability calls, and
+    /// impl members resolve against the boundary types exactly like
+    /// script-local ones. Type registration is poison-free by
+    /// construction — the schema parser already validated the shapes.
+    fn new_with_schema(schema: Option<&'a SchemaContext>) -> Self {
         let mut checker = Self {
             diagnostics: Vec::new(),
             functions: HashMap::new(),
             types: Vec::new(),
             type_index: HashMap::new(),
             impls: HashMap::new(),
+            impl_spans: HashMap::new(),
+            impl_member_spans: HashMap::new(),
+            imports: Vec::new(),
+            schema,
             scopes: Vec::new(),
             current_fn: None,
         };
@@ -303,7 +388,42 @@ impl Checker {
             &["T", "E"],
             &[("Ok", &[("T", "value")]), ("Err", &[("E", "error")])],
         );
+        if let Some(schema) = schema {
+            checker.register_schema_types(schema);
+        }
         checker
+    }
+
+    /// Registers the §9.3 boundary types of every granted namespace.
+    fn register_schema_types(&mut self, schema: &SchemaContext) {
+        for file in schema.set.namespaces() {
+            if schema.target(&file.namespace).is_none() {
+                continue;
+            }
+            for item in &file.items {
+                match item {
+                    cme_core::schema::SchemaItem::Struct(decl) => {
+                        let idx = self.types.len();
+                        self.types.push(TypeDef::Struct(StructDef {
+                            name: decl.name.clone(),
+                            params: Vec::new(),
+                            fields: decl.fields.clone(),
+                        }));
+                        self.type_index.insert(decl.name.clone(), idx);
+                    }
+                    cme_core::schema::SchemaItem::Enum(decl) => {
+                        let idx = self.types.len();
+                        self.types.push(TypeDef::Enum(EnumDef {
+                            name: decl.name.clone(),
+                            params: Vec::new(),
+                            variants: decl.variants.clone(),
+                        }));
+                        self.type_index.insert(decl.name.clone(), idx);
+                    }
+                    cme_core::schema::SchemaItem::Contract(_) => {}
+                }
+            }
+        }
     }
 
     /// Registers one built-in generic enum (§2.8).
@@ -336,6 +456,367 @@ impl Checker {
         let idx = self.types.len();
         self.types.push(TypeDef::Enum(def));
         self.type_index.insert(name.to_string(), idx);
+    }
+
+    /// §2.5 boundary capitalization, enforced against the active schema
+    /// contract: a capitalized top-level declaration is a boundary
+    /// declaration, and boundary declarations belong to the schema (a
+    /// script's interface functions live inside `impl` blocks). With no
+    /// schema active the rule has nothing to check against — the
+    /// pre-schema behavior is kept.
+    fn check_boundary_capitalization(&mut self, name: &str, span: Span) {
+        if self.schema.is_none() {
+            return;
+        }
+        let mut chars = name.chars();
+        let is_capitalized = matches!(chars.next(), Some(first) if first.is_ascii_uppercase());
+        if is_capitalized {
+            self.report(
+                format!(
+                    "top-level `{name}` is capitalized: boundary declarations belong to the \
+                     schema contract; script-internal declarations are camelCase (§2.5)"
+                ),
+                span,
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // §9 schema contract enforcement
+    // -----------------------------------------------------------------
+
+    /// Pass 3: the schema checks that need every registration in place —
+    /// import resolution (§2.3/§7.2), interface implementation against the
+    /// contract (§9.1/§10.4), and `requires` edges (§9.4).
+    fn check_schema_boundaries(&mut self) {
+        if self.schema.is_none() {
+            return;
+        }
+        self.check_schema_imports();
+        self.check_schema_impls();
+    }
+
+    /// Validates every host-rooted import against the granted namespaces
+    /// (§2.3: imports grant capability namespaces; §7.2: host access is
+    /// exclusively through them).
+    fn check_schema_imports(&mut self) {
+        let imports = std::mem::take(&mut self.imports);
+        for (path, span) in &imports {
+            if path.first().map(String::as_str) == Some("self") {
+                // §10.3: resolved by the mod loader, already checked there.
+                continue;
+            }
+            let namespace = &path[0];
+            let Some(schema) = self.schema else {
+                return;
+            };
+            if !schema.grants(namespace) {
+                if schema.set.namespace(namespace).is_some() {
+                    self.report(
+                        format!(
+                            "schema namespace `{namespace}` is not granted to this program: \
+                             a mod declares its target versions in `[schemas]` (§9.5, §10.2), \
+                             and the host must register the schema file"
+                        ),
+                        *span,
+                    );
+                } else {
+                    self.report(
+                        format!(
+                            "unknown schema namespace `{namespace}`: no registered schema \
+                             declares it (§9.2)"
+                        ),
+                        *span,
+                    );
+                }
+                continue;
+            }
+            match path.len() {
+                1 => {}
+                2 => {
+                    let Some(file) = schema.set.namespace(namespace) else {
+                        continue;
+                    };
+                    if file.capability(&path[1]).is_none() {
+                        if file.interface(&path[1]).is_some() {
+                            self.report(
+                                format!(
+                                    "`{}` is an interface: implement it with `impl {}` — \
+                                     interfaces are called by the host, not imported (§9.1)",
+                                    path.join("."),
+                                    path.join(".")
+                                ),
+                                *span,
+                            );
+                        } else {
+                            self.report(
+                                format!("`{namespace}` has no capability `{}` (§9.1)", path[1]),
+                                *span,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    self.report(
+                        format!(
+                            "import paths name a namespace or `namespace.capability`, \
+                             not `{}` (§2.3)",
+                            path.join(".")
+                        ),
+                        *span,
+                    );
+                }
+            }
+        }
+        self.imports = imports;
+    }
+
+    /// Validates every impl target that names a schema contract (§9.1,
+    /// §10.4): members must exist in the interface with the exact schema
+    /// signature, every required visible member must be implemented, and
+    /// `requires` edges must be satisfied (§9.4).
+    fn check_schema_impls(&mut self) {
+        let targets: Vec<(String, Span)> = self
+            .impl_spans
+            .iter()
+            .map(|(target, span)| (target.clone(), *span))
+            .collect();
+        for (target, span) in targets {
+            let Some((namespace, contract_name)) = target.split_once('.') else {
+                continue;
+            };
+            let Some(schema) = self.schema else {
+                return;
+            };
+            let Some(target_version) = schema.target(namespace) else {
+                // The namespace is not granted; the imports were already
+                // reported, and an impl report here would only be noise.
+                continue;
+            };
+            let Some(file) = schema.set.namespace(namespace) else {
+                continue;
+            };
+            if let Some(capability) = file.capability(contract_name) {
+                self.report(
+                    format!(
+                        "cannot implement capability `{namespace}.{}`: capabilities are \
+                         provided by the host; scripts implement interfaces (§9.1)",
+                        capability.name
+                    ),
+                    span,
+                );
+                continue;
+            }
+            let Some(contract) = file.interface(contract_name) else {
+                self.report(
+                    format!(
+                        "unknown interface `{target}`: `{namespace}.{contract_name}` is not \
+                         declared by the registered schema (§9.1)"
+                    ),
+                    span,
+                );
+                continue;
+            };
+
+            // Implemented-member validation: existence (and visibility,
+            // §9.5) plus the exact signature (§10.4).
+            let implemented = self.impls.get(&target).cloned().unwrap_or_default();
+            let member_spans = self
+                .impl_member_spans
+                .get(&target)
+                .cloned()
+                .unwrap_or_default();
+            for (name, sig) in &implemented {
+                let Some(member) = contract.members.iter().find(|m| &m.name == name) else {
+                    self.report(
+                        format!(
+                            "`{target}.{name}` is not a member of the schema interface: \
+                             expected one of {} (§9.1)",
+                            contract
+                                .members
+                                .iter()
+                                .map(|m| m.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        member_spans.get(name).copied().unwrap_or(span),
+                    );
+                    continue;
+                };
+                if !member.visible_at(target_version) {
+                    self.report(
+                        format!(
+                            "`{target}.{name}` was introduced in schema version {}, but this \
+                             program targets {} — the member is hidden (§9.5)",
+                            member.since, target_version
+                        ),
+                        member_spans.get(name).copied().unwrap_or(span),
+                    );
+                    continue;
+                }
+                self.check_impl_signature(&target, member, sig, member_spans.get(name).copied());
+            }
+
+            // Completeness: every required visible member present (§10.4,
+            // §9.5 — optional members may be skipped).
+            let missing: Vec<String> = contract
+                .members
+                .iter()
+                .filter(|member| {
+                    member.requirement == MemberRequirement::Required
+                        && member.visible_at(target_version)
+                        && !implemented.contains_key(&member.name)
+                })
+                .map(|member| {
+                    format!(
+                        "{} {}({})",
+                        type_display(&member.return_ty),
+                        member.name,
+                        member
+                            .params
+                            .iter()
+                            .map(|param| format!("{} {}", type_display(&param.ty), param.name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
+            if !missing.is_empty() {
+                self.report(
+                    format!(
+                        "interface `{target}` is not fully implemented: missing {} (§10.4) — \
+                         `optional` members may be skipped, required ones may not",
+                        missing.join(", ")
+                    ),
+                    span,
+                );
+            }
+
+            // §9.4 rule 1: implementing an interface requires fully
+            // implementing its prerequisite.
+            if let Some(requires) = &contract.requires {
+                let qualified = requires.qualified(namespace);
+                if !self.interface_satisfied(&qualified) {
+                    self.report(
+                        format!(
+                            "`{target}` requires `{qualified}`: a mod cannot implement an \
+                             interface without fully implementing its prerequisite (§9.4)"
+                        ),
+                        requires.span,
+                    );
+                }
+            }
+        }
+    }
+
+    /// The §10.4 exactness rule: an implemented member must match the
+    /// schema signature — parameter count, parameter types, and return
+    /// type. Parameter names are the implementation's own business (the
+    /// host calls members positionally through generated proxies).
+    fn check_impl_signature(
+        &mut self,
+        target: &str,
+        member: &SchemaMember,
+        sig: &FnSig,
+        span: Option<Span>,
+    ) {
+        let span = span.unwrap_or(Span::new(0, 0));
+        if sig.poisoned || sig.params.iter().any(|(_, ty)| ty.is_poison()) {
+            return; // already reported
+        }
+        let schema_sig = self.schema_member_sig(member, span);
+        if schema_sig.poisoned {
+            return;
+        }
+        let mut problems: Vec<String> = Vec::new();
+        if sig.params.len() != schema_sig.params.len() {
+            problems.push(format!(
+                "takes {} parameter(s), the schema declares {}",
+                sig.params.len(),
+                schema_sig.params.len()
+            ));
+        } else {
+            for (index, ((_, actual), (_, expected))) in
+                sig.params.iter().zip(&schema_sig.params).enumerate()
+            {
+                if actual != expected {
+                    problems.push(format!(
+                        "parameter {} is `{}`, the schema declares `{}`",
+                        index + 1,
+                        actual.name(&self.types),
+                        expected.name(&self.types)
+                    ));
+                }
+            }
+        }
+        if sig.return_ty != schema_sig.return_ty {
+            problems.push(format!(
+                "returns `{}`, the schema declares `{}`",
+                sig.return_ty.name(&self.types),
+                schema_sig.return_ty.name(&self.types)
+            ));
+        }
+        if !problems.is_empty() {
+            self.report(
+                format!(
+                    "`{target}.{}` does not match the schema signature: {} (§10.4)",
+                    member.name,
+                    problems.join("; ")
+                ),
+                span,
+            );
+        }
+    }
+
+    /// Whether `qualified` (`engine.auth`) is fully implemented: every
+    /// required member visible at the interface's target version has an
+    /// impl entry (§9.4). Ungranted or unknown interfaces are never
+    /// satisfied.
+    fn interface_satisfied(&self, qualified: &str) -> bool {
+        let Some(members) = self.interface_members_visible(qualified) else {
+            return false;
+        };
+        let Some(registry) = self.impls.get(qualified) else {
+            return false;
+        };
+        members
+            .iter()
+            .filter(|member| member.requirement == MemberRequirement::Required)
+            .all(|member| registry.contains_key(&member.name))
+    }
+
+    /// The visible (§9.5) members of `namespace.interface`, or `None` when
+    /// the path does not name an interface of a granted namespace.
+    fn interface_members_visible(&self, qualified: &str) -> Option<Vec<&'a SchemaMember>> {
+        let schema = self.schema?;
+        let (namespace, interface) = qualified.split_once('.')?;
+        let target = schema.target(namespace)?;
+        let file = schema.set.namespace(namespace)?;
+        let contract = file.interface(interface)?;
+        Some(
+            contract
+                .members
+                .iter()
+                .filter(|member| member.visible_at(target))
+                .collect(),
+        )
+    }
+
+    /// Resolves a schema member's signature against the registry (schema
+    /// types registered first, so every reference resolves).
+    fn schema_member_sig(&mut self, member: &SchemaMember, span: Span) -> FnSig {
+        let params: Vec<(String, Ty)> = member
+            .params
+            .iter()
+            .map(|param| (param.name.clone(), self.resolve_type(&param.ty, span)))
+            .collect();
+        let return_ty = self.resolve_type(&member.return_ty, span);
+        let poisoned = params.iter().any(|(_, ty)| ty.is_poison()) || return_ty.is_poison();
+        FnSig {
+            params,
+            return_ty,
+            poisoned,
+        }
     }
 
     fn report(&mut self, message: impl Into<String>, span: Span) {
@@ -483,6 +964,10 @@ impl Checker {
     /// resolution always wins, so the member could never be called).
     fn register_impl(&mut self, target: &[String], members: &[Stmt], span: Span) {
         let joined = target.join(".");
+        // The impl site span feeds the §9 checks (unknown interface,
+        // completeness, requires) even when this registration rejects the
+        // block — the contract errors belong at the `impl` keyword.
+        self.impl_spans.entry(joined.clone()).or_insert(span);
         if target.len() == 1 {
             let name = &target[0];
             if RESERVED_TYPE_NAMES.contains(&name.as_str()) {
@@ -588,6 +1073,10 @@ impl Checker {
                 .collect();
             let ret = self.resolve_type(return_ty, member.span);
             let poisoned = resolved.iter().any(|(_, ty)| ty.is_poison()) || ret.is_poison();
+            self.impl_member_spans
+                .entry(joined.clone())
+                .or_default()
+                .insert(name.clone(), member.span);
             fresh.push((
                 name.clone(),
                 FnSig {
@@ -776,7 +1265,7 @@ impl Checker {
     /// the caller: a bare `return state`, or the parameter as the sole
     /// payload of a constructor call (`return Ok(state)`,
     /// `return Some(state)`).
-    fn returned_param<'a>(expr: &'a Expr, reportable: &[&'a str]) -> Option<&'a str> {
+    fn returned_param<'b>(expr: &'b Expr, reportable: &[&'b str]) -> Option<&'b str> {
         match &expr.kind {
             ExprKind::Ident(name) if reportable.contains(&name.as_str()) => Some(name.as_str()),
             // `Ok(state)` / `Err(state)` / `Some(state)`: the built-in
@@ -2214,6 +2703,17 @@ impl Checker {
                 return self.type_function_call(&display, &sig, args, span);
             }
         }
+        // §9.1/§7.2: a schema capability call — `engine.graphics.LoadTexture`.
+        // Resolution, import gating, `requires` gating, and version gating
+        // all happen against the ACTIVE contract; the call then type-checks
+        // against the member's schema signature exactly like a script
+        // function.
+        if self.schema.is_some()
+            && path.len() >= 2
+            && let Some(ty) = self.type_schema_capability_call(path, args, span)
+        {
+            return ty;
+        }
         for arg in args {
             let expr = match arg {
                 CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
@@ -2222,6 +2722,140 @@ impl Checker {
         }
         self.report(format!("unknown function `{}`", path.join(".")), span);
         Ty::Poison
+    }
+
+    /// Types a call into a schema capability member. Returns `Some` when
+    /// the path names a capability of a GRANTED namespace (the call is
+    /// then fully checked — errors reported, `Ty::Poison` on failure), and
+    /// `None` when the path is not a capability call (letting the generic
+    /// `unknown function` diagnostic handle it).
+    fn type_schema_capability_call(
+        &mut self,
+        path: &[String],
+        args: &[CallArg],
+        span: Span,
+    ) -> Option<Ty> {
+        let schema = self.schema?;
+        let namespace = &path[0];
+        let target_version = schema.target(namespace)?;
+        let file = schema.set.namespace(namespace)?;
+        if path.len() == 2 {
+            // `ns.name` — if `name` is an interface, give the pointed
+            // diagnostic; otherwise this is not a capability call.
+            if file.interface(&path[1]).is_some() {
+                self.report(
+                    format!(
+                        "`{}` is an interface: the script implements it and the host calls \
+                         in — scripts call capabilities (§9.1)",
+                        path.join(".")
+                    ),
+                    span,
+                );
+                return Some(Ty::Poison);
+            }
+            return None;
+        }
+        if path.len() != 3 {
+            return None;
+        }
+        let capability = file.capability(&path[1])?;
+        let qualified = format!("{namespace}.{}", capability.name);
+
+        // §2.3/§7.2: the capability must be imported (`import engine`,
+        // `import engine.graphics`, or any import prefix of the call).
+        let imported = self.imports.iter().any(|(import_path, _)| {
+            import_path
+                .iter()
+                .zip(path.iter())
+                .all(|(imported, called)| imported == called)
+                && import_path.len() <= path.len()
+                && !import_path.is_empty()
+                && import_path[0] != "self"
+        });
+        if !imported {
+            self.report(
+                format!(
+                    "call to `{}` requires importing the capability first: \
+                     add `import {qualified}` (§2.3, §7.2)",
+                    path.join(".")
+                ),
+                span,
+            );
+            // Still type-check the arguments for recovery quality.
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            return Some(Ty::Poison);
+        }
+
+        // §9.4 rule 2: a capability with a `requires` edge calls only when
+        // the prerequisite interface is fully implemented by this program.
+        if let Some(requires) = &capability.requires {
+            let prerequisite = requires.qualified(namespace);
+            if !self.interface_satisfied(&prerequisite) {
+                self.report(
+                    format!(
+                        "capability `{qualified}` requires `{prerequisite}`: the program must \
+                         fully implement `{prerequisite}` before importing or calling (§9.4)"
+                    ),
+                    span,
+                );
+                for arg in args {
+                    let expr = match arg {
+                        CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                    };
+                    self.type_expr(expr, None);
+                }
+                return Some(Ty::Poison);
+            }
+        }
+
+        let member_name = &path[2];
+        let Some(member) = capability.members.iter().find(|m| &m.name == member_name) else {
+            self.report(
+                format!(
+                    "capability `{qualified}` has no member `{member_name}`: declared members \
+                     are {} (§9.1)",
+                    capability
+                        .members
+                        .iter()
+                        .map(|m| m.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                span,
+            );
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            return Some(Ty::Poison);
+        };
+        if !member.visible_at(target_version) {
+            self.report(
+                format!(
+                    "`{qualified}.{member_name}` was introduced in schema version {}, but this \
+                     program targets {} — the member is hidden (§9.5)",
+                    member.since, target_version
+                ),
+                span,
+            );
+            for arg in args {
+                let expr = match arg {
+                    CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
+                };
+                self.type_expr(expr, None);
+            }
+            return Some(Ty::Poison);
+        }
+        let sig = self.schema_member_sig(member, span);
+        let display = format!("{qualified}.{member_name}");
+        Some(self.type_function_call(&display, &sig, args, span))
     }
 
     /// A bare built-in constructor: `Ok`, `Err`, `Some`, `None` (§2.8).

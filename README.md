@@ -25,7 +25,7 @@ This writes `magic_expanded.cm` side by side with the original — pure Checkmat
 
 ## Host Embedding APIs (Rust and C)
 
-Checkmate embeds through the WHITEPAPER §13 host APIs over the shipped front end and tree-walking interpreter. Programs load from a source text, a `.cm` file, or a whole §10 mod tree; every load applies the same gate the CLI applies (megaprogram expansion when present, parse, standalone-import check, type check), so a program that produced a diagnostic is never invocable. Contexts carry the §5.5 execution limits — fuel, wall-clock deadline, call depth — per invocation, and hosts invoke top-level functions or §10.4 impl members (`engine.gamemode.OnTick`-style) — with the §9 schema system active, loads gate on the registered contract and capability calls dispatch to host providers.
+Checkmate embeds through the WHITEPAPER §13 host APIs over the shipped front end and tree-walking interpreter. Programs load from a source text, a `.cm` file, or a whole §10 mod tree; every load applies the same gate the CLI applies (megaprogram expansion when present, parse, standalone-import check, type check), so a program that produced a diagnostic is never invocable. Contexts carry the §5.5 execution limits — fuel, wall-clock deadline, call depth — per invocation, and hosts invoke top-level functions or §10.4 impl members (`engine.gamemode.OnTick`-style) — with the §9 schema system active, loads gate on the registered contract and capability calls dispatch to host providers. Invocations also enforce the §5.7 reentrancy prohibition: a capability dispatched mid-invocation cannot invoke back into the same context (the nested call fails with `ErrorKind::Reentrant`; the C ABI reports it as `CM_ERROR_INVALID_ARG`), while different contexts and other threads stay free.
 
 The Rust shape (behind the facade's `api` feature):
 
@@ -81,7 +81,7 @@ interface gamemode {
 }
 ```
 
-Register the schema (with the engine or the CLI's `--schema` flag) and every load enforces the contract at compile time: capability calls type-check against the schema signatures and require the import, `impl engine.gamemode` blocks must implement every required visible member with the exact signature, members introduced after the program's target version are hidden (§9.5), and `requires` edges gate both directions.
+Register the schema (with the engine or the CLI's `--schema` flag) and every load enforces the contract at compile time: capability calls type-check against the schema signatures and require the import, `import engine.assets` itself demands the capability's prerequisite (the §9.4 "cannot import or call"), `impl engine.gamemode` blocks must implement every required visible member with the exact signature, an impl naming an ungranted or unknown namespace is an error, members introduced after the program's target version are hidden (§9.5), and `requires` edges gate both directions. Schema-authoring defects are rejected too: an `optional` capability member (§9.5 defines the flag for interfaces) and a member tagged `since` beyond the schema's own version both fail validation.
 
 **Rust hosts get compile-time-verified bindings** (§9.6) through a procedural macro that runs the real schema parser at host build time:
 
@@ -122,7 +122,7 @@ The repository is a Cargo workspace with focused crates:
 | `cme-runtime` | Runtime services and built-ins | Placeholder |
 | `cme` | Facade package and optional CLI | Working lex/ast/check/run/expand/schema/codegen-c toolchain; check/ast/run accept mod directories and `--schema` contracts |
 | `apps/rust_host` | Rust host application (§13.1 consumer) | Loads file/mod, limits flags, `--schema` registration, and `--schema-demo`: the full generated-bindings flow (compile-time-verified provider, typed proxies) |
-| `apps/c_host` | C host application (§13.2 consumer) | 237 self-checks incl. the schema flow AND the generated schema header consumed for real, run by `cargo test` and standalone |
+| `apps/c_host` | C host application (§13.2 consumer) | 246 self-checks incl. the schema flow, the §5.7 reentrancy rejection, AND the generated schema header consumed for real, run by `cargo test` and standalone |
 
 The root `cme` package exposes workspace crates through optional `core`, `compiler`, `interp`, `runtime`, `api`, and `schema-macro` features. Enabling `cli` enables the toolchain crates; `api` enables the Rust host API (flat re-exports `Engine`, `ExecutionLimits`, `CompiledProgram`, `Context`, `Value`); `schema-macro` enables `cme::cme_schema_bindings`. The default build intentionally exposes no root APIs.
 

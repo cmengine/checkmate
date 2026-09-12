@@ -294,6 +294,80 @@ cm_error_t cm_future_get_error(cm_future_t* future);
 void cm_future_destroy(cm_future_t* future);
 
 /* ------------------------------------------------------------------ */
+/* Schema contract (WHITEPAPER §9)                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One parsed `.cm` schema file (§9.2: one namespace root per file). The
+ * schema configures script-side checking — imports, capability calls,
+ * `impl` completeness, `since` version gating, `requires` edges — for
+ * every program the engine loads AFTER registration.
+ */
+typedef struct cm_schema_t cm_schema_t;
+
+/**
+ * Parses schema source text. Returns NULL on any defect, filling
+ * `out_error` with kind CM_ERROR_COMPILE and the rendered diagnostics.
+ */
+cm_schema_t* cm_schema_parse(const char* text, cm_error_t* out_error);
+
+/** As cm_schema_parse, reading a `.cm` file; IO failures are CM_ERROR_IO. */
+cm_schema_t* cm_schema_parse_file(const char* path, cm_error_t* out_error);
+
+void cm_schema_destroy(cm_schema_t* schema);
+
+/**
+ * Registers the schema with the engine. The whole registered set is
+ * re-validated (§9.2/§9.4): duplicate namespaces, cross-namespace type
+ * collisions, and unresolved `requires` edges fail with CM_ERROR_INVALID_ARG
+ * and the set is left unchanged. The schema handle stays owned by the
+ * caller and may be destroyed after registration (the engine keeps a copy).
+ */
+cm_status_t cm_engine_register_schema(cm_engine_t* engine,
+                                      const cm_schema_t* schema);
+
+/* ------------------------------------------------------------------ */
+/* Capability providers (§9.1, §13.2)                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The C provider contract: invoked when a script calls a member of the
+ * capability this provider is registered for. `args` are BORROWED
+ * (owned by the engine; valid for the call only); `argc` is their count.
+ * Return a NEWLY OWNED cm_value_t* (Value::Void for void members), or
+ * NULL with `out_error` filled to fail the invocation. `user` is the
+ * opaque pointer given at registration.
+ */
+typedef cm_value_t* (*cm_capability_fn)(void* user,
+                                        cm_value_t* const* args,
+                                        size_t argc,
+                                        cm_error_t* out_error);
+
+/** One capability member: its schema name plus the provider function. */
+typedef struct cm_capability_member {
+    const char* name;
+    cm_capability_fn fn;
+} cm_capability_member_t;
+
+/**
+ * Registers the provider for a capability path (`namespace.capability`,
+ * §9.1). Members are borrowed for the call. The provider-presence check
+ * runs at LOAD time: a program that calls a capability without a
+ * registered provider fails to load, so wiring mistakes are deterministic
+ * before any invocation.
+ *
+ * THREADS: `user` must stay valid for the engine's lifetime; provider
+ * calls may arrive from any thread that invokes into the engine (§5:
+ * invocations race with nothing, but the SAME provider function may run
+ * concurrently across contexts).
+ */
+cm_status_t cm_engine_register_capability(cm_engine_t* engine,
+                                          const char* path,
+                                          const cm_capability_member_t* members,
+                                          size_t count,
+                                          void* user);
+
+/* ------------------------------------------------------------------ */
 /* Values                                                             */
 /* ------------------------------------------------------------------ */
 

@@ -863,6 +863,115 @@ static void test_concurrent_contexts(void) {
     cm_engine_destroy(engine);
 }
 
+/* The §9 schema contract, end to end from C: parse a schema file, register
+ * it, register a capability provider, and watch a script call back into C
+ * through the boundary. A real host uses the codegen-c header's
+ * _Generic-verified REGISTER macro; this consumer spells the vtable by
+ * hand to keep the demo dependency-free. */
+static const char* SCHEMA_TEXT =
+    "schema chost v1.0.0\n"
+    "struct TextureHandle {\n"
+    "int id\n"
+    "}\n"
+    "capability graphics {\n"
+    "since 1.0.0 TextureHandle LoadTexture(str path)\n"
+    "since 1.0.0 void DrawTexture(TextureHandle tex)\n"
+    "}\n";
+
+static cm_value_t* prov_LoadTexture(void* user,
+                                    cm_value_t* const* args,
+                                    size_t argc,
+                                    cm_error_t* out_error) {
+    (void)user;
+    if (argc != 1 || !args[0]) {
+        if (out_error) out_error->kind = CM_ERROR_INVALID_ARG;
+        return NULL;
+    }
+    char* text = NULL;
+    size_t length = 0;
+    if (cm_value_as_str(args[0], &text, &length) != CM_OK) {
+        if (out_error) out_error->kind = CM_ERROR_INVALID_ARG;
+        return NULL;
+    }
+    cm_string_free(text);
+    cm_value_t* tex = cm_value_struct("TextureHandle");
+    if (!tex) return NULL;
+    cm_value_t* id = cm_value_int((int64_t)length);
+    cm_struct_set_field(tex, "id", id); /* moves id */
+    return tex;
+}
+
+static cm_value_t* prov_DrawTexture(void* user,
+                                    cm_value_t* const* args,
+                                    size_t argc,
+                                    cm_error_t* out_error) {
+    (void)user;
+    (void)argc;
+    (void)args;
+    (void)out_error;
+    return cm_value_void();
+}
+
+static void test_schema_capability(void) {
+    cm_error_t err = CM_ERROR_INIT;
+
+    /* A malformed schema is rejected with a compile-kind report. */
+    cm_schema_t* broken = cm_schema_parse("schema bad v1.0\n", &err);
+    CHECK(broken == NULL, "schema: malformed text rejected");
+    CHECK(err.kind == CM_ERROR_COMPILE, "schema: defect reports COMPILE");
+    cm_error_free(&err);
+
+    cm_schema_t* schema = cm_schema_parse(SCHEMA_TEXT, &err);
+    CHECK(schema != NULL, "schema: the contract parses");
+    CHECK(err.kind == CM_ERROR_NONE, "schema: success report is NONE");
+
+    cm_engine_t* engine = cm_engine_new();
+    CHECK(cm_engine_register_schema(engine, schema) == 0, "schema: registers");
+    cm_schema_destroy(schema); /* the engine keeps its own copy */
+
+    const cm_capability_member_t graphics_members[] = {
+        { "LoadTexture", prov_LoadTexture },
+        { "DrawTexture", prov_DrawTexture },
+    };
+    CHECK(cm_engine_register_capability(engine, "graphics", graphics_members, 2, NULL) != 0,
+          "capability: a wrong path shape is rejected");
+    CHECK(cm_engine_register_capability(engine, "chost.graphics", graphics_members, 2, NULL) == 0,
+          "capability: registers");
+
+    /* The program imports the capability and calls it; the load already
+     * gates on provider presence, so an invocation can only dispatch. */
+    cm_program_t* ok = cm_engine_load_source(
+        engine,
+        "import chost.graphics\n"
+        "int main() {\n"
+        "TextureHandle tex = chost.graphics.LoadTexture(\"hero.png\")\n"
+        "chost.graphics.DrawTexture(tex)\n"
+        "return tex.id\n"
+        "}\n",
+        &err);
+    CHECK(ok != NULL, "capability: the gated program loads");
+    cm_error_free(&err);
+
+    cm_context_t* ctx = cm_engine_create_context(engine, ok, NULL);
+    CHECK(ctx != NULL, "capability: context created");
+    cm_future_t* future = cm_invoke(ctx, NULL, "main", NULL, 0);
+    cm_value_t* result = NULL;
+    if (future) {
+        cm_future_poll(future, &result);
+        cm_future_destroy(future);
+    }
+    int64_t id = 0;
+    CHECK(result && cm_value_as_int(result, &id) == CM_OK,
+          "capability: result is an int");
+    CHECK(id == 8, "capability: the provider computed the value");
+    cm_value_destroy(result);
+
+    cm_context_destroy(ctx);
+    cm_program_destroy(ok);
+    cm_engine_destroy(engine);
+    cm_error_free(&err);
+}
+
 static void test_value_string_round_trip(void) {
     /* CMON display matches the language's own rendering for every kind. */
     struct {
@@ -914,6 +1023,7 @@ int cme_host_app_main(void) {
     test_limits();
     test_concurrent_contexts();
     test_value_string_round_trip();
+    test_schema_capability();
 
     printf("\nc-host: %d checks, %d failed\n", checks_run, checks_failed);
     if (checks_failed == 0) {

@@ -14,6 +14,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 cme-api = { path = "../cme-api", version = "0.2.0" }
+cme-compiler = { path = "../cme-compiler", version = "0.2.0" }
 cme-core = { path = "../cme-core", version = "0.2.0" }
 
 # Compiles the C host application (apps/c_host) into this crate's test and

@@ -8,7 +8,8 @@ use std::os::raw::{c_char, c_int};
 use std::ptr;
 
 use cme_api::{
-    CompiledProgram, Context, Engine, ErrorKind, ExecutionError, ExecutionLimits, Value,
+    CapabilityProvider, CompiledProgram, Context, Engine, ErrorKind, ExecutionError,
+    ExecutionLimits, Value,
 };
 
 /// One opaque engine handle. `_unique` guarantees a real, freeable
@@ -285,6 +286,231 @@ pub unsafe extern "C" fn cm_engine_destroy(engine: *mut CmEngine) {
     if !engine.is_null() {
         unsafe { drop(Box::from_raw(engine)) };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Schema contract (§9) and capability providers (§9.1, §13.2)
+// ---------------------------------------------------------------------------
+
+/// One opaque schema handle: a parsed `.cm` schema file.
+pub struct CmSchema(cme_compiler::schema::SchemaFile);
+
+/// # Safety
+/// `text` must be a valid NUL-terminated string (or NULL); `out_error`
+/// follows the header fill convention.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cm_schema_parse(
+    text: *const c_char,
+    out_error: *mut CmError,
+) -> *mut CmSchema {
+    unsafe {
+        let Some(text) = borrow_str(text) else {
+            fill_plain_error(out_error, CmErrorKind::InvalidArg, "schema text is NULL");
+            return ptr::null_mut();
+        };
+        let _ = &text;
+        let outcome = cme_compiler::schema::parse_schema_file(text);
+        if !outcome.is_clean() || outcome.file.is_none() {
+            let listed: String = outcome
+                .diagnostics
+                .iter()
+                .map(|d| d.message())
+                .collect::<Vec<_>>()
+                .join("; ");
+            fill_plain_error(out_error, CmErrorKind::Compile, &listed);
+            return ptr::null_mut();
+        }
+        fill_success(out_error);
+        Box::into_raw(Box::new(CmSchema(
+            outcome.file.expect("clean parse yields the file"),
+        )))
+    }
+}
+
+/// # Safety
+/// `path` must be a valid NUL-terminated string (or NULL); `out_error`
+/// follows the header fill convention.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cm_schema_parse_file(
+    path: *const c_char,
+    out_error: *mut CmError,
+) -> *mut CmSchema {
+    unsafe {
+        let Some(path) = borrow_str(path) else {
+            fill_plain_error(out_error, CmErrorKind::InvalidArg, "schema path is NULL");
+            return ptr::null_mut();
+        };
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                fill_plain_error(
+                    out_error,
+                    CmErrorKind::Io,
+                    &format!("cannot read {path}: {error}"),
+                );
+                return ptr::null_mut();
+            }
+        };
+        let outcome = cme_compiler::schema::parse_schema_file(&text);
+        if !outcome.is_clean() || outcome.file.is_none() {
+            let listed: String = outcome
+                .diagnostics
+                .iter()
+                .map(|d| d.message())
+                .collect::<Vec<_>>()
+                .join("; ");
+            fill_plain_error(out_error, CmErrorKind::Compile, &listed);
+            return ptr::null_mut();
+        }
+        fill_success(out_error);
+        Box::into_raw(Box::new(CmSchema(
+            outcome.file.expect("clean parse yields the file"),
+        )))
+    }
+}
+
+/// # Safety
+/// `schema` must be a live handle or NULL; never use it again afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cm_schema_destroy(schema: *mut CmSchema) {
+    if !schema.is_null() {
+        unsafe { drop(Box::from_raw(schema)) };
+    }
+}
+
+/// # Safety
+/// `engine` and `schema` must be live handles (or NULL, which fails with
+/// CM_ERR_NULL semantics as CM_ERROR_INVALID_ARG in `out_error`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cm_engine_register_schema(
+    engine: *mut CmEngine,
+    schema: *const CmSchema,
+) -> c_int {
+    unsafe {
+        if engine.is_null() || schema.is_null() {
+            return 5; // CM_ERR_INVALID_ARG
+        }
+        let engine = &mut (*engine).engine;
+        match engine.register_schema((*schema).0.clone()) {
+            Ok(()) => 0, // CM_OK
+            // The set failed re-validation; the engine is unchanged.
+            Err(_) => 5, // CM_ERR_INVALID_ARG
+        }
+    }
+}
+
+/// # Safety
+/// `engine` must be live; `path` and `members` must be valid (or NULL);
+/// `user` is passed back to every provider call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cm_engine_register_capability(
+    engine: *mut CmEngine,
+    path: *const c_char,
+    members: *const CmCapabilityMember,
+    count: usize,
+    user: *mut core::ffi::c_void,
+) -> c_int {
+    unsafe {
+        if engine.is_null() {
+            return 5; // CM_ERR_INVALID_ARG
+        }
+        let Some(path) = borrow_str(path) else {
+            return 5;
+        };
+        if members.is_null() || count == 0 {
+            return 5;
+        }
+        let member_slice = std::slice::from_raw_parts(members, count);
+        let mut converted: Vec<(String, CmCapabilityFn)> = Vec::with_capacity(count);
+        for member in member_slice {
+            let Some(name) = borrow_str(member.name) else {
+                return 5;
+            };
+            let Some(c_fn) = member.fn_ else {
+                return 5;
+            };
+            converted.push((name.to_string(), c_fn));
+        }
+
+        let provider = CProvider {
+            user,
+            members: converted,
+        };
+        match (*engine)
+            .engine
+            .register_capability(path, std::sync::Arc::new(provider))
+        {
+            Ok(()) => 0, // CM_OK
+            Err(_) => 5, // CM_ERR_INVALID_ARG (bad path shape)
+        }
+    }
+}
+
+/// The C-side projection of `cm_capability_member_t`.
+#[repr(C)]
+pub struct CmCapabilityMember {
+    pub name: *const c_char,
+    pub fn_: Option<CmCapabilityFn>,
+}
+
+pub type CmCapabilityFn = unsafe extern "C" fn(
+    user: *mut core::ffi::c_void,
+    args: *const *mut CmValue,
+    argc: usize,
+    out_error: *mut CmError,
+) -> *mut CmValue;
+
+/// The Rust half of a registered C provider: dispatches member names to
+/// the C function pointers, converting values across the ABI boundary.
+struct CProvider {
+    user: *mut core::ffi::c_void,
+    members: Vec<(String, CmCapabilityFn)>,
+}
+
+// SAFETY: `user` is opaque C memory whose threading contract the header
+// states ("the same provider function may run concurrently across
+// contexts"); the member table is immutable after registration.
+unsafe impl Send for CProvider {}
+unsafe impl Sync for CProvider {}
+
+impl CapabilityProvider for CProvider {
+    fn call(&self, member: &str, args: &[Value]) -> Result<Value, String> {
+        let Some((_, c_fn)) = self.members.iter().find(|(name, _)| name == member) else {
+            return Err(format!("capability provider has no member `{member}`"));
+        };
+        // Borrowed argument handles: boxed clones the C side may inspect
+        // (never free) for the duration of the call.
+        let handles: Vec<*mut CmValue> = args
+            .iter()
+            .map(|value| Box::into_raw(Box::new(CmValue(value.clone()))))
+            .collect();
+        let out_error = Box::into_raw(Box::new(CmError::zeroed()));
+        let result = unsafe { c_fn(self.user, handles.as_ptr(), handles.len(), out_error) };
+        let report = unsafe { Box::from_raw(out_error) };
+        // Free the borrowed argument boxes.
+        for handle in handles {
+            unsafe { drop(Box::from_raw(handle)) };
+        }
+        if result.is_null() {
+            let report_message = report.message;
+            let message = unsafe { cstr_to_string(report_message) }
+                .unwrap_or_else(|| "capability call failed".to_string());
+            return Err(message);
+        }
+        // The returned handle is OWNED: take the value, drop the box.
+        let value = unsafe { *Box::from_raw(result) };
+        Ok(value.0)
+    }
+}
+
+unsafe fn cstr_to_string(pointer: *mut c_char) -> Option<String> {
+    if pointer.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(pointer) }
+        .to_str()
+        .ok()
+        .map(String::from)
 }
 
 /// # Safety

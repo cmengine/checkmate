@@ -59,6 +59,7 @@ version = "0.2.0"
 dependencies = [
  "cc",
  "cme-api",
+ "cme-compiler",
  "cme-core",
 ]
 

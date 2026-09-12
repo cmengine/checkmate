@@ -12,10 +12,21 @@
 //! arity-checked at compile time too.
 //!
 //! Data-layer scope, stated honestly: schema structs and enums get pack/
-//! unpack helpers for primitive and nested schema-type fields; container
-//! shapes (arrays, maps, option/result) ride the stable `cm_value`
-//! accessors the ABI already provides (§13.2) — the FFI boundary currency
-//! is `cm_value_t` either way.
+//! unpack helpers for primitive and nested schema-type fields — `str`
+//! fields unpack to OWNED `char*` copies (free with `cm_string_free`);
+//! container shapes (arrays, maps, option/result) ride the stable
+//! `cm_value` accessors the ABI already provides (§13.2) — the FFI
+//! boundary currency is `cm_value_t` either way.
+//!
+//! Every generated `_pack` helper takes the host's C value BY ADDRESS
+//! (structs and enums alike), so nested schema-typed fields compose: a
+//! struct field of schema type `T` packs through `T_pack(&field)` and
+//! unpacks through `T_unpack(value, &field)`, recursively.
+//!
+//! The header is safe to include alongside OTHER generated headers (one
+//! per namespace, §9.2): the shared `cme_future_take_sync` helper carries
+//! its own guard macro, so two headers in one translation unit do not
+//! redefine it.
 
 use cme_core::ast::{PrimitiveType, Type};
 use cme_core::schema::{ContractKind, MemberRequirement, SchemaFile, SchemaStruct, Version};
@@ -41,12 +52,17 @@ pub fn codegen_c(schema: &SchemaFile, include_path: &str) -> String {
          \x20 *   - interface members: typed invocation helpers with exact arity,\n\
          \x20 *     so host call sites are compile-checked too;\n\
          \x20 *   - schema structs/enums: pack/unpack helpers over the cm_value\n\
-         \x20 *     ABI (primitives and nested schema types; containers ride the\n\
-         \x20 *     stable cm_value accessors).\n\
+         \x20 *     ABI (primitives, strs, and nested schema types; containers\n\
+         \x20 *     ride the stable cm_value accessors).\n\
+         \x20 *\n\
+         \x20 * One header per schema namespace (§9.2); several generated headers\n\
+         \x20 * may be included by one translation unit — the shared future\n\
+         \x20 * helper carries its own guard macro.\n\
          \x20 */\n\
          #ifndef CME_SCHEMA_GEN_{NS}_H\n\
          #define CME_SCHEMA_GEN_{NS}_H\n\n\
-         #include \"{include}\"\n",
+         #include \"{include}\"\n\
+         #include <string.h> /* strcmp: enum unpack dispatches on the variant name */\n",
         NS = ns,
         ns_low = schema.namespace,
         include = include_path,
@@ -69,6 +85,35 @@ pub fn codegen_c(schema: &SchemaFile, include_path: &str) -> String {
     );
 
     let raw_ns = &schema.namespace;
+
+    // The shared synchronous-future helper, ONCE per header under its own
+    // guard: two generated headers in one translation unit must not
+    // redefine it, and a capability-only schema still gets it.
+    let _ = writeln!(
+        out,
+        "\n/* Synchronously resolves an invocation future (the current engine\n\
+         * completes synchronously; CM_PENDING stays reserved for the\n\
+         * continuation-splitting VM, §4/§5.2). Guarded so several generated\n\
+         * headers coexist in one translation unit. */\n\
+         #ifndef CME_SCHEMA_GEN_FUTURE_TAKE_SYNC\n\
+         #define CME_SCHEMA_GEN_FUTURE_TAKE_SYNC\n\
+         static inline cm_value_t* cme_future_take_sync(cm_future_t* future, cm_error_t* out_error) {{\n\
+         \x20   if (!future) {{\n\
+         \x20       if (out_error) {{ out_error->kind = CM_ERROR_INVALID_ARG; }}\n\
+         \x20       return NULL;\n\
+         \x20   }}\n\
+         \x20   cm_poll_result_t result = cm_future_poll(future, NULL);\n\
+         \x20   if (result == CM_ERROR) {{\n\
+         \x20       if (out_error) {{ *out_error = cm_future_get_error(future); }}\n\
+         \x20       cm_future_destroy(future);\n\
+         \x20       return NULL;\n\
+         \x20   }}\n\
+         \x20   cm_value_t* value = cm_future_take_value(future);\n\
+         \x20   cm_future_destroy(future);\n\
+         \x20   return value;\n}}\n\
+         #endif /* CME_SCHEMA_GEN_FUTURE_TAKE_SYNC */\n"
+    );
+
     for item in &schema.items {
         match item {
             cme_core::schema::SchemaItem::Struct(decl) => {
@@ -94,18 +139,20 @@ fn format_version(version: &Version) -> String {
 
 /// The C type of a schema type at the cm_value boundary: the deep typed
 /// shapes the generator unpacks, or NULL for containers (the host uses
-/// the generic accessors).
+/// the generic accessors). A `str` field unpacks to an OWNED `char*`
+/// (free with `cm_string_free`); packs read any NUL-terminated string.
 fn c_scalar_type(ty: &Type) -> Option<&'static str> {
     match ty {
         Type::Prim(PrimitiveType::Int) => Some("int64_t"),
         Type::Prim(PrimitiveType::Float) => Some("double"),
         Type::Prim(PrimitiveType::Bool) => Some("int"),
+        Type::Prim(PrimitiveType::Str) => Some("char*"),
         _ => None,
     }
 }
 
 /// True when the field shape is fully supported by the generated pack/
-/// unpack layer (primitives, str, nested schema types).
+/// unpack layer (primitives incl. str, nested schema types).
 fn field_is_typed(ty: &Type) -> bool {
     match ty {
         Type::Prim(_) => true,
@@ -121,11 +168,75 @@ fn render_struct(ns: &str, decl: &SchemaStruct, out: &mut String) {
     let c_name = format!("cme_{ns}_{}", decl.name);
     let mut fields = String::new();
     let mut unpack = String::new();
-    let mut pack_args = String::new();
     let mut pack_fields = String::new();
 
     for field in &decl.fields {
+        if !field_is_typed(&field.ty) {
+            // Container shape: the stable cm_value accessors cover it.
+            let _ = writeln!(
+                fields,
+                "    /* `{name}` uses the generic cm_value accessors (container shape) */",
+                name = field.name,
+            );
+            continue;
+        }
+        if let Type::Named { name: inner, .. } = &field.ty {
+            // A nested schema type (struct or enum — both expose generated
+            // pack/unpack over the C value by address): recurse.
+            let inner_c = format!("cme_{ns}_{inner}");
+            let _ = writeln!(fields, "    {inner_c} {name};", name = field.name);
+            let _ = writeln!(
+                unpack,
+                "    {{ /* {name}: nested schema type */\n\
+                 \x20       const cm_value_t* f = cm_value_struct_field(value, \"{name}\");\n\
+                 \x20       if (!f) return CM_ERR_MISSING;\n\
+                 \x20       cm_status_t st = {inner_c}_unpack(f, &out->{name});\n\
+                 \x20       if (st != CM_OK) return st;\n\
+                 \x20   }}",
+                name = field.name,
+                inner_c = inner_c,
+            );
+            let _ = writeln!(
+                pack_fields,
+                "    {{ /* {name}: nested schema type */\n\
+                 \x20       cm_value_t* f = {inner_c}_pack(&value->{name});\n\
+                 \x20       if (!f) goto fail;\n\
+                 \x20       if (cm_struct_set_field(s, \"{name}\", f) != CM_OK) {{ cm_value_destroy(f); goto fail; }}\n\
+                 \x20   }}",
+                name = field.name,
+                inner_c = inner_c,
+            );
+            continue;
+        }
         match c_scalar_type(&field.ty) {
+            Some(_) if field.ty == Type::Prim(PrimitiveType::Str) => {
+                // An OWNED copy: unpack hands the host a fresh string it
+                // frees with cm_string_free; pack copies the bytes in.
+                let _ = writeln!(
+                    fields,
+                    "    char* {name}; /* owned after unpack: free with cm_string_free */",
+                    name = field.name,
+                );
+                let _ = writeln!(
+                    unpack,
+                    "    {{ /* {name}: owned copy, free with cm_string_free */\n\
+                     \x20       const cm_value_t* f = cm_value_struct_field(value, \"{name}\");\n\
+                     \x20       if (!f) return CM_ERR_MISSING;\n\
+                     \x20       cm_status_t st = cm_value_as_str(f, &out->{name}, NULL);\n\
+                     \x20       if (st != CM_OK) return st;\n\
+                     \x20   }}",
+                    name = field.name,
+                );
+                let _ = writeln!(
+                    pack_fields,
+                    "    {{ /* {name} */\n\
+                     \x20       cm_value_t* f = cm_value_str(value->{name});\n\
+                     \x20       if (!f) goto fail;\n\
+                     \x20       if (cm_struct_set_field(s, \"{name}\", f) != CM_OK) {{ cm_value_destroy(f); goto fail; }}\n\
+                     \x20   }}",
+                    name = field.name,
+                );
+            }
             Some(c_type) => {
                 let _ = writeln!(fields, "    {c_type} {};", field.name);
                 let _ = writeln!(
@@ -139,11 +250,10 @@ fn render_struct(ns: &str, decl: &SchemaStruct, out: &mut String) {
                     name = field.name,
                     kind = scalar_accessor(&field.ty),
                 );
-                let _ = writeln!(pack_args, "    {c_type} {},", field.name);
                 let _ = writeln!(
                     pack_fields,
-                    "    {{\n\
-                     \x20       cm_value_t* f = cm_value_{kind}({name});\n\
+                    "    {{ /* {name} */\n\
+                     \x20       cm_value_t* f = cm_value_{kind}(value->{name});\n\
                      \x20       if (!f) goto fail;\n\
                      \x20       if (cm_struct_set_field(s, \"{name}\", f) != CM_OK) {{ cm_value_destroy(f); goto fail; }}\n\
                      \x20   }}",
@@ -151,44 +261,7 @@ fn render_struct(ns: &str, decl: &SchemaStruct, out: &mut String) {
                     kind = scalar_constructor(&field.ty),
                 );
             }
-            None if field_is_typed(&field.ty) => {
-                // A nested schema type: recurse into its generated unpack.
-                let Type::Named { name: inner, .. } = &field.ty else {
-                    continue;
-                };
-                let inner_c = format!("cme_{ns}_{inner}");
-                let _ = writeln!(fields, "    {inner_c} {};", field.name);
-                let _ = writeln!(
-                    unpack,
-                    "    {{ /* {name}: nested schema type */\n\
-                     \x20       const cm_value_t* f = cm_value_struct_field(value, \"{name}\");\n\
-                     \x20       if (!f) return CM_ERR_MISSING;\n\
-                     \x20       cm_status_t st = {inner_c}_unpack(f, &out->{name});\n\
-                     \x20       if (st != CM_OK) return st;\n\
-                     \x20   }}",
-                    name = field.name,
-                    inner_c = inner_c,
-                );
-                let _ = writeln!(pack_args, "    const {inner_c} {},", field.name);
-                let _ = writeln!(
-                    pack_fields,
-                    "    {{\n\
-                     \x20       cm_value_t* f = {inner_c}_pack(&{name});\n\
-                     \x20       if (!f) goto fail;\n\
-                     \x20       if (cm_struct_set_field(s, \"{name}\", f) != CM_OK) {{ cm_value_destroy(f); goto fail; }}\n\
-                     \x20   }}",
-                    name = field.name,
-                    inner_c = inner_c,
-                );
-            }
-            _ => {
-                // Container shape: the stable cm_value accessors cover it.
-                let _ = writeln!(
-                    fields,
-                    "    /* `{name}` uses the generic cm_value accessors (container shape) */",
-                    name = field.name,
-                );
-            }
+            None => unreachable!("field_is_typed covers primitives and nested types"),
         }
     }
 
@@ -199,7 +272,8 @@ fn render_struct(ns: &str, decl: &SchemaStruct, out: &mut String) {
          /* Packs a host-side value into a script struct value; NULL on\n\
           * allocation failure. Fields not covered by the typed layer are\n\
           * attached with cm_struct_set_field by the caller. */\n\
-         static inline cm_value_t* {c_name}_pack({pack_args_joined}) {{\n\
+         static inline cm_value_t* {c_name}_pack(const {c_name}* value) {{\n\
+         \x20   if (!value) return NULL;\n\
          \x20   cm_value_t* s = cm_value_struct(\"{name}\");\n\
          \x20   if (!s) return NULL;\n{pack_fields}\
          \x20   return s;\n\
@@ -207,18 +281,13 @@ fn render_struct(ns: &str, decl: &SchemaStruct, out: &mut String) {
          \x20   cm_value_destroy(s);\n\
          \x20   return NULL;\n}}\n\n\
          /* Unpacks a script struct value by field NAME; returns CM_OK,\n\
-          * CM_ERR_KIND (wrong value kind), or CM_ERR_MISSING. */\n\
+          * CM_ERR_KIND (wrong value kind), or CM_ERR_MISSING. `str` fields\n\
+          * become OWNED copies — free them with cm_string_free. */\n\
          static inline cm_status_t {c_name}_unpack(const cm_value_t* value, {c_name}* out) {{\n\
          \x20   if (!value || cm_value_kind(value) != CM_VALUE_STRUCT) return CM_ERR_KIND;\n{unpack}\
          \x20   return CM_OK;\n}}\n",
         c_name = c_name,
         name = decl.name,
-        pack_args_joined = pack_args
-            .lines()
-            .map(|line| line.trim().to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim_end_matches(','),
         pack_fields = pack_fields,
         unpack = unpack,
     );
@@ -242,9 +311,110 @@ fn scalar_constructor(ty: &Type) -> &'static str {
     }
 }
 
+/// The union member type for an enum payload field: scalars by value,
+/// str as an owned `char*`, nested schema types inline by value; NULL
+/// for container shapes (they ride the generic accessors).
+fn payload_field_type(ns: &str, ty: &Type) -> Option<String> {
+    match ty {
+        Type::Prim(PrimitiveType::Str) => Some("char*".to_string()),
+        Type::Named { name, args } if args.is_empty() && field_is_typed(ty) => {
+            Some(format!("cme_{ns}_{name}"))
+        }
+        other => c_scalar_type(other).map(str::to_string),
+    }
+}
+
+/// The unpack statement for one enum payload field, reading payload
+/// slot `index` into `out->as.<variant>.<field>`. Statements record the
+/// FIRST failure into `status` instead of returning early — the variant
+/// name copy has to be freed on every path.
+fn payload_unpack_arm(
+    ns: &str,
+    variant: &str,
+    field: &cme_core::ast::FieldDef,
+    index: usize,
+) -> String {
+    let read = if let Some(inner_c) = nested_type(ns, &field.ty) {
+        format!(
+            "{inner_c}_unpack(p, &out->as.{variant}.{name})",
+            variant = variant,
+            name = field.name,
+            inner_c = inner_c,
+        )
+    } else if field.ty == Type::Prim(PrimitiveType::Str) {
+        format!(
+            "cm_value_as_str(p, &out->as.{variant}.{name}, NULL)",
+            variant = variant,
+            name = field.name,
+        )
+    } else if c_scalar_type(&field.ty).is_some() {
+        format!(
+            "cm_value_as_{kind}(p, &out->as.{variant}.{name})",
+            kind = scalar_accessor(&field.ty),
+            variant = variant,
+            name = field.name,
+        )
+    } else {
+        return String::new(); // containers ride the generic accessors
+    };
+    format!(
+        "            {{ cm_status_t st = CM_OK;\n\
+         \x20             const cm_value_t* p = cm_value_enum_payload(value, {index});\n\
+         \x20             if (!p) st = CM_ERR_MISSING;\n\
+         \x20             else st = {read};\n\
+         \x20             if (st != CM_OK && status == CM_OK) status = st; }}\n",
+        index = index,
+        read = read,
+    )
+}
+
+/// The pack statement for one enum payload field: pushes a scalar,
+/// copies a str, or packs a nested schema type (every generated pack
+/// helper takes the C value by address).
+fn payload_pack_arm(ns: &str, variant: &str, field: &cme_core::ast::FieldDef) -> String {
+    let inner = nested_type(ns, &field.ty);
+    let value_expr = if let Some(inner_c) = inner {
+        format!(
+            "{inner_c}_pack(&value->as.{variant}.{field_name})",
+            field_name = field.name
+        )
+    } else if field.ty == Type::Prim(PrimitiveType::Str) {
+        format!(
+            "cm_value_str(value->as.{variant}.{field_name})",
+            field_name = field.name
+        )
+    } else if c_scalar_type(&field.ty).is_some() {
+        format!(
+            "cm_value_{kind}(value->as.{variant}.{field_name})",
+            kind = scalar_constructor(&field.ty),
+            field_name = field.name,
+        )
+    } else {
+        return String::new(); // containers attach with cm_enum_push by hand
+    };
+    format!(
+        "        {{\n\
+         \x20           cm_value_t* p = {value_expr};\n\
+         \x20           if (!p || cm_enum_push(e, p) != CM_OK) {{ cm_value_destroy(p); cm_value_destroy(e); return NULL; }}\n\
+         \x20       }}\n",
+        value_expr = value_expr,
+    )
+}
+
+/// The generated C type name when `ty` is a nested schema type (a
+/// PascalCase named type with no type arguments); `None` otherwise.
+fn nested_type(ns: &str, ty: &Type) -> Option<String> {
+    match ty {
+        Type::Named { name, args } if args.is_empty() && field_is_typed(ty) => {
+            Some(format!("cme_{ns}_{name}"))
+        }
+        _ => None,
+    }
+}
+
 fn render_enum(ns: &str, decl: &cme_core::schema::SchemaEnum, out: &mut String) {
     let c_name = format!("cme_{ns}_{}", decl.name);
-    let mut tag_comments = String::new();
+    let mut union_members = String::new();
     let mut unpack_arms = String::new();
     let mut pack_arms = String::new();
     let mut variant_tags = String::new();
@@ -258,46 +428,97 @@ fn render_enum(ns: &str, decl: &cme_core::schema::SchemaEnum, out: &mut String) 
             VARIANT = variant.name,
             variant_index = variant_index,
         );
-        let _ = writeln!(
-            tag_comments,
-            "    /* {variant_name}: {count} payload value(s) */",
-            variant_name = variant.name,
-            count = variant.fields.len(),
-        );
-        let mut payload_unpack = String::new();
-        for (index, field) in variant.fields.iter().enumerate() {
-            if c_scalar_type(&field.ty).is_some() {
-                let _ = writeln!(
-                    payload_unpack,
-                    "        {{ const cm_value_t* p = cm_value_enum_payload(value, {index});\n\
-                     \x20         if (!p) return CM_ERR_MISSING;\n\
-                     \x20         cm_status_t st = cm_value_as_{kind}(p, &out->as.{variant}.{name});\n\
-                     \x20         if (st != CM_OK) return st; }}",
-                    kind = scalar_accessor(&field.ty),
-                    name = field.name,
-                    variant = variant.name,
-                    index = index,
-                );
+
+        // The union member: one named struct per variant, holding the
+        // scalar/nested payload fields (containers ride the generic
+        // accessors and appear only as a comment).
+        let mut member_fields = String::new();
+        for field in &variant.fields {
+            match payload_field_type(ns, &field.ty) {
+                Some(_) if field.ty == Type::Prim(PrimitiveType::Str) => {
+                    let _ = writeln!(
+                        member_fields,
+                        "            char* {name}; /* owned after unpack: free with cm_string_free */",
+                        name = field.name,
+                    );
+                }
+                Some(c_type) => {
+                    let _ = writeln!(
+                        member_fields,
+                        "            {c_type} {name};",
+                        name = field.name
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        member_fields,
+                        "            /* `{name}` rides the generic cm_value accessors (container shape) */",
+                        name = field.name,
+                    );
+                }
             }
-            // Non-scalar payloads ride the generic accessors; the pack arm
-            // creates the bare enum (attach values with cm_enum_push).
         }
         let _ = writeln!(
-            unpack_arms,
-            "    case CME_{NS}_{NAME}_{VARIANT}:\n{payload_unpack}        return CM_OK;",
-            NS = ns,
+            union_members,
+            "        struct {{ /* {variant_name}: {count} payload value(s) */\n{member_fields}        }} {variant_name};",
+            variant_name = variant.name,
+            count = variant.fields.len(),
+            member_fields = member_fields,
+        );
+
+        // The unpack arm: strcmp on the variant name (cm_value_enum_variant
+        // hands over an OWNED copy — freed once after the dispatch), a
+        // strict payload-count check, then per-field reads that record the
+        // first failure. No early returns: the name copy must be freed on
+        // every path. Arms chain as if / else-if / else-if …
+        let mut reads = String::new();
+        for (index, field) in variant.fields.iter().enumerate() {
+            reads.push_str(&payload_unpack_arm(ns, &variant.name, field, index));
+        }
+        let chain = if variant_index == 0 { "" } else { "else " };
+        let tag = format!(
+            "CME_{ns}_{NAME}_{VARIANT}",
+            ns = ns,
             NAME = decl.name,
-            VARIANT = variant.name,
-            payload_unpack = payload_unpack,
+            VARIANT = variant.name
+        );
+        let _ = writeln!(
+            unpack_arms,
+            "{chain}if (strcmp(variant_name, \"{variant_name}\") == 0) {{\n\
+             \x20       status = CM_OK;\n\
+             \x20       if (cm_value_len(value) != {expected}) status = CM_ERR_MISSING;\n{reads}\
+             \x20       if (status == CM_OK) out->variant = {tag};\n\
+             \x20   }}\n",
+            chain = chain,
+            variant_name = variant.name,
+            expected = variant.fields.len(),
+            reads = reads,
+            tag = tag,
+        );
+
+        // The pack arm: create the bare enum, push every typed payload.
+        let mut pushes = String::new();
+        for field in &variant.fields {
+            pushes.push_str(&payload_pack_arm(ns, &variant.name, field));
+        }
+        let tag = format!(
+            "CME_{ns}_{NAME}_{VARIANT}",
+            ns = ns,
+            NAME = decl.name,
+            VARIANT = variant.name
         );
         let _ = writeln!(
             pack_arms,
-            "    case CME_{NS}_{NAME}_{variant_name}:\n\
-             \x20       return cm_value_enum(\"{enum_name}\", \"{variant_name}\");",
-            NS = ns,
-            NAME = decl.name,
+            "    case {tag}:\n\
+             \x20       {{\n\
+             \x20           cm_value_t* e = cm_value_enum(\"{enum_name}\", \"{variant_name}\");\n\
+             \x20           if (!e) return NULL;\n{pushes}\
+             \x20           return e;\n\
+             \x20       }}",
+            tag = tag,
             enum_name = decl.name,
             variant_name = variant.name,
+            pushes = pushes,
         );
     }
 
@@ -305,18 +526,24 @@ fn render_enum(ns: &str, decl: &cme_core::schema::SchemaEnum, out: &mut String) 
         out,
         "\n/* ---- schema enum {c_name} (§9.3): a tagged union over the cm_value\n\
          \x20 * enum shape (name.variant + positional payload). Payload values\n\
-         \x20 * beyond the scalar layer ride the generic accessors. ---- */\n\
+         \x20 * beyond the scalar layer ride the generic accessors; `str`\n\
+         \x20 * payloads unpack to OWNED copies (free with cm_string_free). ---- */\n\
          typedef enum {{\n{variant_tags}}} {c_name}_tag;\n\n\
          typedef struct {c_name} {{\n\
          \x20   {c_name}_tag variant;\n\
-         \x20   union {{\n{tag_comments}        /* per-variant scalar payloads */\n\
+         \x20   union {{\n{union_members}\n\
          \x20   }} as;\n\
          }} {c_name};\n\n\
          static inline cm_status_t {c_name}_unpack(const cm_value_t* value, {c_name}* out) {{\n\
-         \x20   (void)out;\n{unpack_arms}\
-         \x20   return CM_ERR_KIND;\n}}\n\n\
-         /* Packs a bare enum value (no payload); payload-carrying variants\n\
-          * attach values with cm_enum_push. */\n\
+         \x20   if (!value || cm_value_kind(value) != CM_VALUE_ENUM) return CM_ERR_KIND;\n\
+         \x20   char* variant_name = NULL;\n\
+         \x20   if (cm_value_enum_variant(value, &variant_name) != CM_OK || !variant_name) return CM_ERR_KIND;\n\
+         \x20   cm_status_t status = CM_ERR_KIND; /* stays set when no variant matches */\n{unpack_arms}\
+         \x20   cm_string_free(variant_name);\n\
+         \x20   return status;\n}}\n\n\
+         /* Packs a typed value into a script enum value, pushing every\n\
+          * typed payload (scalars, strs, nested schema types); NULL on\n\
+          * failure. Container payloads attach with cm_enum_push by hand. */\n\
          static inline cm_value_t* {c_name}_pack(const {c_name}* value) {{\n\
          \x20   (void)value;\n\
          \x20   switch (value->variant) {{\n{pack_arms}    default:\n\
@@ -324,7 +551,7 @@ fn render_enum(ns: &str, decl: &cme_core::schema::SchemaEnum, out: &mut String) 
          \x20   }}\n}}\n",
         c_name = c_name,
         variant_tags = variant_tags,
-        tag_comments = tag_comments,
+        union_members = union_members,
         unpack_arms = unpack_arms,
         pack_arms = pack_arms,
     );
@@ -503,23 +730,7 @@ fn render_interface(ns: &str, contract: &cme_core::schema::SchemaContract, out: 
         "\n/* ---- interface {path} (§9.1): the script implements these; the host\n\
          \x20 * calls in. `optional` members may be left unimplemented by the mod. ---- */\n\
          {defines}\n\
-         /* Synchronously resolves an invocation future (the current engine\n\
-          * completes synchronously; CM_PENDING stays reserved for the\n\
-          * continuation-splitting VM, §4/§5.2). */\n\
-         static inline cm_value_t* cme_future_take_sync(cm_future_t* future, cm_error_t* out_error) {{\n\
-         \x20   if (!future) {{\n\
-         \x20       if (out_error) {{ out_error->kind = CM_ERROR_INVALID_ARG; }}\n\
-         \x20       return NULL;\n\
-         \x20   }}\n\
-         \x20   cm_poll_result_t result = cm_future_poll(future, NULL);\n\
-         \x20   if (result == CM_ERROR) {{\n\
-         \x20       if (out_error) {{ *out_error = cm_future_get_error(future); }}\n\
-         \x20       cm_future_destroy(future);\n\
-         \x20       return NULL;\n\
-         \x20   }}\n\
-         \x20   cm_value_t* value = cm_future_take_value(future);\n\
-         \x20   cm_future_destroy(future);\n\
-         \x20   return value;\n}}\n{helpers}",
+         {helpers}",
         path = path,
         defines = defines,
         helpers = helpers,

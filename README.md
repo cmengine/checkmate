@@ -25,7 +25,7 @@ This writes `magic_expanded.cm` side by side with the original — pure Checkmat
 
 ## Host Embedding APIs (Rust and C)
 
-Checkmate embeds through the WHITEPAPER §13 host APIs over the shipped front end and tree-walking interpreter. Programs load from a source text, a `.cm` file, or a whole §10 mod tree; every load applies the same gate the CLI applies (megaprogram expansion when present, parse, standalone-import check, type check), so a program that produced a diagnostic is never invocable. Contexts carry the §5.5 execution limits — fuel, wall-clock deadline, call depth — per invocation, and hosts invoke top-level functions or §10.4 impl members (`engine.gamemode.OnTick`-style), which is the same surface the schema system will gate once it lands.
+Checkmate embeds through the WHITEPAPER §13 host APIs over the shipped front end and tree-walking interpreter. Programs load from a source text, a `.cm` file, or a whole §10 mod tree; every load applies the same gate the CLI applies (megaprogram expansion when present, parse, standalone-import check, type check), so a program that produced a diagnostic is never invocable. Contexts carry the §5.5 execution limits — fuel, wall-clock deadline, call depth — per invocation, and hosts invoke top-level functions or §10.4 impl members (`engine.gamemode.OnTick`-style) — with the §9 schema system active, loads gate on the registered contract and capability calls dispatch to host providers.
 
 The Rust shape (behind the facade's `api` feature):
 
@@ -99,13 +99,13 @@ engine.register_schema(engine::schema())?;          // same file, no re-parse
 engine::register_engine_graphics(&mut engine, std::sync::Arc::new(HostGraphics))?;
 ```
 
-The macro also generates typed interface proxies (`engine::EngineGamemodeProxy::new(&context)`) for host → script calls and native Rust structs/enums for the §9.3 boundary types, packing and unpacking script values by name. Enable the facade's `schema-macro` feature.
+The macro also generates typed interface proxies for host → script calls and native Rust structs/enums for the §9.3 boundary types, packing and unpacking script values by name. Proxies construct through `engine::EngineGamemodeProxy::new(&context)` or the WHITEPAPER §13.1 shape, `context.get_interface::<EngineGamemodeProxy>()?` — construction fails when the loaded program never implemented the interface. Enable the facade's `schema-macro` feature.
 
-**C hosts get a generated header**: `cme codegen-c schemas/engine.cm` emits function-pointer typedefs per capability member, a vtable, and a registration macro whose `_Static_assert`s (via `_Generic`) verify every host implementation's signature AT COMPILE TIME — a missing member fails the preprocessor, a wrong signature fails the assert. Interface members become exact-arity invocation helpers.
+**C hosts get a generated header**: `cme codegen-c schemas/engine.cm` emits function-pointer typedefs per capability member, a vtable, and a registration macro whose `_Static_assert`s (via `_Generic`) verify every host implementation's signature AT COMPILE TIME — a missing member fails the preprocessor, a wrong signature fails the assert. Interface members become exact-arity invocation helpers, and schema structs/enums gain pack/unpack helpers over the `cm_value` ABI (primitives, owned `char*` strings, nested schema types by address; container shapes ride the generic accessors). One header per namespace; several headers coexist in one translation unit. The header is not just a demo: `cme-ffi`'s build generates it from `apps/c_host/engine.cm` and the C host application compiles against it, so `cargo test` exercises the full flow.
 
 A program that calls a capability with no registered provider fails the LOAD — wiring mistakes are deterministic before any invocation, and capability calls at runtime dispatch to the provider through an engine-agnostic boundary the tree walker uses today and the bytecode VM will use unchanged.
 
-`apps/rust_host` is a working Rust consumer (`cme-rust-host <file.cm | mod_dir> <entry> [args...] --fuel N --deadline-ms N --depth N`), and `apps/c_host` is a working C consumer with a Makefile — the same C file also runs inside `cargo test` via cme-ffi's build script, so the workspace test run exercises the real C client end to end.
+`apps/rust_host` is a working Rust consumer (`cme-rust-host <file.cm | mod_dir> <entry> [args...] --fuel N --deadline-ms N --depth N --schema <schema.cm>`, plus `--schema-demo` for the full §9.6 generated-bindings walkthrough over its own `schemas/game.cm` — the host implements the macro-generated capability trait, so its signatures are verified at the app's compile time), and `apps/c_host` is a working C consumer with a Makefile — the same C file also runs inside `cargo test` via cme-ffi's build script, which generates the schema header the consumer includes, so the workspace test run exercises the real C client AND its compile-time-verified bindings end to end.
 
 ## Workspace
 
@@ -121,8 +121,8 @@ The repository is a Cargo workspace with focused crates:
 | `cme-schema-macro` | `cme_schema_bindings!` — compile-time-verified Rust host bindings from `.cm` schema files (§9.6) | Working; capability traits, proxies, descriptors |
 | `cme-runtime` | Runtime services and built-ins | Placeholder |
 | `cme` | Facade package and optional CLI | Working lex/ast/check/run/expand/schema/codegen-c toolchain; check/ast/run accept mod directories and `--schema` contracts |
-| `apps/rust_host` | Rust host application (§13.1 consumer) | Working `cme-rust-host` CLI |
-| `apps/c_host` | C host application (§13.2 consumer) | 219 self-checks incl. the schema flow, run by `cargo test` and standalone |
+| `apps/rust_host` | Rust host application (§13.1 consumer) | Loads file/mod, limits flags, `--schema` registration, and `--schema-demo`: the full generated-bindings flow (compile-time-verified provider, typed proxies) |
+| `apps/c_host` | C host application (§13.2 consumer) | 237 self-checks incl. the schema flow AND the generated schema header consumed for real, run by `cargo test` and standalone |
 
 The root `cme` package exposes workspace crates through optional `core`, `compiler`, `interp`, `runtime`, `api`, and `schema-macro` features. Enabling `cli` enables the toolchain crates; `api` enables the Rust host API (flat re-exports `Engine`, `ExecutionLimits`, `CompiledProgram`, `Context`, `Value`); `schema-macro` enables `cme::cme_schema_bindings`. The default build intentionally exposes no root APIs.
 

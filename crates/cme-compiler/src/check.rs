@@ -537,23 +537,43 @@ impl<'a> Checker<'a> {
                     let Some(file) = schema.set.namespace(namespace) else {
                         continue;
                     };
-                    if file.capability(&path[1]).is_none() {
-                        if file.interface(&path[1]).is_some() {
-                            self.report(
-                                format!(
-                                    "`{}` is an interface: implement it with `impl {}` — \
-                                     interfaces are called by the host, not imported (§9.1)",
-                                    path.join("."),
-                                    path.join(".")
-                                ),
-                                *span,
-                            );
-                        } else {
-                            self.report(
-                                format!("`{namespace}` has no capability `{}` (§9.1)", path[1]),
-                                *span,
-                            );
+                    if let Some(capability) = file.capability(&path[1]) {
+                        // §9.4 rule 2: importing a capability whose
+                        // prerequisite interface is not fully implemented is
+                        // already a contract violation — the whitepaper's
+                        // "cannot import or call" — so the gate fires here,
+                        // before any call site exists. A namespace-only
+                        // import (`import engine`) stays legal: the call
+                        // gate catches actual uses of the capability.
+                        if let Some(requires) = &capability.requires {
+                            let prerequisite = requires.qualified(namespace);
+                            if !self.interface_satisfied(&prerequisite) {
+                                self.report(
+                                    format!(
+                                        "importing `{}` requires `{prerequisite}`: the program \
+                                         must fully implement `{prerequisite}` before importing \
+                                         or calling this capability (§9.4)",
+                                        path.join(".")
+                                    ),
+                                    *span,
+                                );
+                            }
                         }
+                    } else if file.interface(&path[1]).is_some() {
+                        self.report(
+                            format!(
+                                "`{}` is an interface: implement it with `impl {}` — \
+                                 interfaces are called by the host, not imported (§9.1)",
+                                path.join("."),
+                                path.join(".")
+                            ),
+                            *span,
+                        );
+                    } else {
+                        self.report(
+                            format!("`{namespace}` has no capability `{}` (§9.1)", path[1]),
+                            *span,
+                        );
                     }
                 }
                 _ => {
@@ -589,8 +609,30 @@ impl<'a> Checker<'a> {
                 return;
             };
             let Some(target_version) = schema.target(namespace) else {
-                // The namespace is not granted; the imports were already
-                // reported, and an impl report here would only be noise.
+                // §9.5/§7.2: an impl against a namespace the program was
+                // never granted is outside the contract. Silently skipping
+                // it would ship an interface the schema never validated —
+                // no completeness, no signature checks — so both the
+                // ungranted and the unknown case are reported. An impl is
+                // not an import: the import diagnostics above do not fire
+                // for impl-only programs.
+                if schema.set.namespace(namespace).is_some() {
+                    self.report(
+                        format!(
+                            "schema namespace `{namespace}` is not granted to this program: \
+                             `{target}` cannot be implemented (§9.5, §7.2)"
+                        ),
+                        span,
+                    );
+                } else {
+                    self.report(
+                        format!(
+                            "unknown schema namespace `{namespace}`: no registered schema \
+                             declares it, so `{target}` cannot be implemented (§9.2)"
+                        ),
+                        span,
+                    );
+                }
                 continue;
             };
             let Some(file) = schema.set.namespace(namespace) else {
@@ -693,7 +735,9 @@ impl<'a> Checker<'a> {
             }
 
             // §9.4 rule 1: implementing an interface requires fully
-            // implementing its prerequisite.
+            // implementing its prerequisite. The diagnostic anchors at the
+            // IMPL site (the program text the host renders); the schema's
+            // own `requires` span belongs to the schema file's coordinates.
             if let Some(requires) = &contract.requires {
                 let qualified = requires.qualified(namespace);
                 if !self.interface_satisfied(&qualified) {
@@ -702,7 +746,7 @@ impl<'a> Checker<'a> {
                             "`{target}` requires `{qualified}`: a mod cannot implement an \
                              interface without fully implementing its prerequisite (§9.4)"
                         ),
-                        requires.span,
+                        span,
                     );
                 }
             }

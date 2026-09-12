@@ -832,3 +832,84 @@ fn an_unimplemented_prerequisite_fails_the_requires_rule() {
         "requires fires when the prerequisite has no impl at all: {messages:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// §9.4 rule 2 at IMPORT time (the whitepaper's "cannot import or call")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn importing_a_capability_requires_its_prerequisite_at_import_time() {
+    // `assets requires loader`: implementing loader is demanded by the
+    // IMPORT itself, before any call site exists (§9.4 rule 2).
+    let context = schema(ENGINE);
+    let diagnostics = check_with(
+        "import engine.assets\n\nvoid run() {\n    int x = 1\n}\n",
+        &context,
+    );
+    let messages = diagnostic_messages(&diagnostics);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("importing `engine.assets`") && m.contains("engine.loader")),
+        "the import must be gated by the prerequisite: {messages:?}"
+    );
+}
+
+#[test]
+fn importing_a_capability_with_the_prerequisite_implemented_checks_clean() {
+    // The §9.4 import gate lifts as soon as the prerequisite interface is
+    // fully implemented — even though the capability is never called.
+    let context = schema(ENGINE);
+    let diagnostics = check_with(
+        "import engine.assets\n\nimpl engine.loader {\n    bool IsAvailable(str name) {\n        return name != \"\"\n    }\n}\n\nvoid run() {\n    int x = 1\n}\n",
+        &context,
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "an implemented prerequisite lifts the import gate: {:?}",
+        diagnostic_messages(&diagnostics)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §9.5/§7.2: impl targets against ungranted or unknown namespaces
+// ---------------------------------------------------------------------------
+
+#[test]
+fn implementing_an_interface_of_an_ungranted_namespace_is_an_error() {
+    // The namespace is registered but the program was not granted it: the
+    // impl would otherwise ship an interface the schema never validated.
+    let outcome = parse_schema_file(ENGINE);
+    assert!(outcome.is_clean(), "fixture must parse");
+    let set = SchemaSet::build(vec![outcome.file.expect("file")]).expect("set");
+    let context = SchemaContext::grant_targets(set, Vec::new()).expect("empty grant");
+    let diagnostics = check_with(
+        "impl engine.gamemode {\n    void OnTick(GameState state, float deltaTime) {\n    }\n}\n",
+        &context,
+    );
+    let messages = diagnostic_messages(&diagnostics);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("not granted") && m.contains("engine.gamemode")),
+        "an impl outside the grant must be reported: {messages:?}"
+    );
+}
+
+#[test]
+fn implementing_an_interface_of_an_unknown_namespace_is_an_error() {
+    // With a contract active, a dotted impl target must name a schema
+    // interface: `ghost` is declared by no registered schema.
+    let context = schema(ENGINE);
+    let diagnostics = check_with(
+        "impl ghost.thing {\n    void DoIt() {\n    }\n}\n",
+        &context,
+    );
+    let messages = diagnostic_messages(&diagnostics);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("unknown schema namespace `ghost`")),
+        "an impl of an unknown namespace must be reported: {messages:?}"
+    );
+}

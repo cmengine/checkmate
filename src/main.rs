@@ -11,10 +11,14 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "cli")]
 use std::process::ExitCode;
 #[cfg(feature = "cli")]
-const USAGE: &str = "Usage: cme <lex|ast|check|run|expand> <file.cm> [--provenance]\
-     \n       cme <check|ast|run> <mod_dir | path/to/mod.toml>\
+const USAGE: &str = "Usage: cme <lex|ast|check|run|expand> <file.cm> [--provenance] [--schema <schema.cm>]\
+     \n       cme <check|ast|run> <mod_dir | path/to/mod.toml> [--schema <schema.cm>]\
+     \n       cme schema <schema.cm>\
+     \n       cme codegen-c <schema.cm>\
      \n  (--provenance is an `expand` option: it annotates each root magic site \
        with `// @ magic(name) src:line:col`)\
+     \n  (--schema registers a §9 schema contract; repeatable; a mod's [schemas] \
+       table narrows the grant — §9.5)\
      \n  a mod directory holds a mod.toml and a src/ tree (WHITEPAPER §10); \
        lex and expand stay single-file commands";
 
@@ -28,14 +32,34 @@ enum CliError {
     /// messages (each diagnostic is re-anchored to its own module before
     /// reporting, so no raw virtual-text spans leak out).
     Mod(Vec<String>),
+    /// Schema contract failures: rendered defect lines from the §9
+    /// front end or the set invariants.
+    Schema(Vec<String>),
 }
 
 #[cfg(feature = "cli")]
 fn run() -> Result<(), CliError> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--schema <path>` may appear anywhere (repeatable); the rest is the
+    // command, its file, and `expand`'s optional flag.
+    let mut schema_paths: Vec<String> = Vec::new();
+    let mut positional: Vec<String> = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--schema" {
+            let Some(value) = iter.next() else {
+                return Err(CliError::Usage(format!(
+                    "--schema requires a .cm schema file path\n{USAGE}"
+                )));
+            };
+            schema_paths.push(value);
+        } else {
+            positional.push(arg);
+        }
+    }
     // `expand` accepts an optional `--provenance` flag; other commands take
     // exactly one file argument.
-    let (command, path, provenance) = match args.as_slice() {
+    let (command, path, provenance) = match positional.as_slice() {
         [command, path] => (command.as_str(), path.as_str(), false),
         [command, path, flag] if command == "expand" && flag == "--provenance" => {
             (command.as_str(), path.as_str(), true)
@@ -47,10 +71,14 @@ fn run() -> Result<(), CliError> {
         }
     };
 
+    // The active §9 contract, when the caller registered schema files.
+    let schema = load_schema_context(&schema_paths, None)?;
+    let schema = schema.as_ref();
+
     // A directory (or a path ending in mod.toml) selects mod mode: the
     // unit of compilation is the whole §10 mod tree.
     if let Some(mod_root) = resolve_mod_root(path) {
-        return mod_command(command, &mod_root.root, &mod_root.display);
+        return mod_command(command, &mod_root.root, &mod_root.display, schema);
     }
 
     let source = std::fs::read_to_string(path)
@@ -90,11 +118,18 @@ fn run() -> Result<(), CliError> {
             errors.extend(cme_compiler::mods::standalone_import_diagnostics(
                 &outcome.statements,
             ));
-            errors.extend(cme_compiler::check::check(&outcome.statements));
+            errors.extend(match schema {
+                Some(context) => {
+                    cme_compiler::check::check_with_schema(&outcome.statements, Some(context))
+                }
+                None => cme_compiler::check::check(&outcome.statements),
+            });
             render_diagnostics(errors, &source)
         }
-        "run" => run_program(&source, path),
+        "run" => run_program(&source, path, schema),
         "expand" => expand_command(&source, path, provenance),
+        "schema" => schema_command(path),
+        "codegen-c" => codegen_c_command(path),
         _ => Err(CliError::Usage(format!(
             "unknown command: {command}\n{USAGE}"
         ))),
@@ -143,7 +178,12 @@ fn resolve_mod_root(path: &str) -> Option<ModRoot> {
 /// for `run` — invoke `main`. Every diagnostic is re-anchored to the
 /// module it came from before reporting.
 #[cfg(feature = "cli")]
-fn mod_command(command: &str, mod_root: &Path, display_root: &str) -> Result<(), CliError> {
+fn mod_command(
+    command: &str,
+    mod_root: &Path,
+    display_root: &str,
+    schema: Option<&cme_compiler::schema::SchemaContext>,
+) -> Result<(), CliError> {
     if matches!(command, "lex" | "expand") {
         return Err(CliError::Usage(format!(
             "`{command}` works on a single .cm file; a mod directory accepts \
@@ -185,7 +225,33 @@ fn mod_command(command: &str, mod_root: &Path, display_root: &str) -> Result<(),
 
     let program = cme_compiler::mods::assemble(&modules);
     let mut failures = render_assembled_diagnostics(&program, &modules, display_root);
-    let check_errors = cme_compiler::check::check(&program.statements);
+    // With schemas registered, the mod's [schemas] manifest table narrows
+    // the grant (§9.5, §10.2); a manifest listing nothing denies
+    // everything — the §7.2 sandbox.
+    let check_errors = match schema {
+        Some(context) => {
+            // A manifest listing nothing denies every namespace — the
+            // §7.2 sandbox: only granted namespaces are visible.
+            let targets = loaded
+                .manifest
+                .as_ref()
+                .map(|m| m.schemas.clone())
+                .unwrap_or_default();
+            let grant =
+                cme_compiler::schema::SchemaContext::grant_targets(context.set.clone(), targets);
+            match grant {
+                Ok(grant) => {
+                    cme_compiler::check::check_with_schema(&program.statements, Some(&grant))
+                }
+                Err(issues) => {
+                    return Err(CliError::Schema(
+                        issues.iter().map(|issue| issue.message.clone()).collect(),
+                    ));
+                }
+            }
+        }
+        None => cme_compiler::check::check(&program.statements),
+    };
     if !check_errors.is_empty() {
         // Checker diagnostics live in virtual-text coordinates too: run
         // them through the same re-anchoring.
@@ -408,13 +474,23 @@ fn expanded_path_for(path: &str) -> String {
 }
 
 #[cfg(feature = "cli")]
-fn run_program(source: &str, path: &str) -> Result<(), CliError> {
+fn run_program(
+    source: &str,
+    path: &str,
+    schema: Option<&cme_compiler::schema::SchemaContext>,
+) -> Result<(), CliError> {
     let outcome = cme_compiler::parse_source(source);
     let mut errors = outcome.diagnostics;
     errors.extend(cme_compiler::mods::standalone_import_diagnostics(
         &outcome.statements,
     ));
-    errors.extend(cme_compiler::check::check(&outcome.statements));
+    let declarations = schema
+        .map(cme_compiler::schema::declaration_statements)
+        .unwrap_or_default();
+    errors.extend(match schema {
+        Some(context) => cme_compiler::check::check_with_schema(&outcome.statements, Some(context)),
+        None => cme_compiler::check::check(&outcome.statements),
+    });
     // Never run broken code: refuse before invoking anything.
     render_diagnostics(errors, source)?;
 
@@ -430,7 +506,7 @@ fn run_program(source: &str, path: &str) -> Result<(), CliError> {
         )));
     }
 
-    let interpreter = Interpreter::new(&outcome.statements);
+    let interpreter = Interpreter::new(&outcome.statements).with_declarations(&declarations);
     match interpreter.invoke("main", &[]) {
         Ok(value) => {
             // Void prints nothing; every other value prints via Display.
@@ -441,6 +517,95 @@ fn run_program(source: &str, path: &str) -> Result<(), CliError> {
         }
         Err(error) => Err(CliError::Runtime(error, source.to_string())),
     }
+}
+
+/// Loads every `--schema` file into one context. `targets` overrides the
+/// per-namespace target versions (the mod path). Each file's diagnostics
+/// render against its own text, so positions name the schema file.
+#[cfg(feature = "cli")]
+fn load_schema_context(
+    paths: &[String],
+    targets: Option<Vec<(String, String)>>,
+) -> Result<Option<cme_compiler::schema::SchemaContext>, CliError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut files = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| CliError::Io(format!("failed to read {path}: {error}")))?;
+        let outcome = cme_compiler::schema::parse_schema_file(&text);
+        if !outcome.is_clean() {
+            let rendered: Vec<String> = outcome
+                .diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    render_message_at(diagnostic.message(), diagnostic.span(), &text, path)
+                })
+                .collect();
+            return Err(CliError::Schema(rendered));
+        }
+        files.push(outcome.file.expect("clean parse yields the file"));
+    }
+    let set = cme_compiler::schema::SchemaSet::build(files).map_err(|issues| {
+        CliError::Schema(issues.iter().map(|issue| issue.message.clone()).collect())
+    })?;
+    let context = match targets {
+        Some(targets) => {
+            cme_compiler::schema::SchemaContext::grant_targets(set, targets).map_err(|issues| {
+                CliError::Schema(issues.iter().map(|issue| issue.message.clone()).collect())
+            })?
+        }
+        None => cme_compiler::schema::SchemaContext::grant_all(set),
+    };
+    Ok(Some(context))
+}
+
+/// `cme schema <file.cm>`: validates one schema file against §9 and
+/// prints every defect; a clean schema prints nothing and exits 0.
+#[cfg(feature = "cli")]
+fn schema_command(path: &str) -> Result<(), CliError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| CliError::Io(format!("failed to read {path}: {error}")))?;
+    let outcome = cme_compiler::schema::parse_schema_file(&text);
+    if !outcome.is_clean() {
+        let rendered: Vec<String> = outcome
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                render_message_at(diagnostic.message(), diagnostic.span(), &text, path)
+            })
+            .collect();
+        return Err(CliError::Schema(rendered));
+    }
+    // Cross-file invariants even for a single file (duplicate names,
+    // unresolved requires — §9.2/§9.4).
+    let set = cme_compiler::schema::SchemaSet::build(vec![outcome.file.expect("file")]).map_err(
+        |issues| CliError::Schema(issues.iter().map(|issue| issue.message.clone()).collect()),
+    )?;
+    let _ = set;
+    Ok(())
+}
+
+/// `cme codegen-c <schema.cm>`: writes the §9.6 C header to stdout.
+#[cfg(feature = "cli")]
+fn codegen_c_command(path: &str) -> Result<(), CliError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| CliError::Io(format!("failed to read {path}: {error}")))?;
+    let outcome = cme_compiler::schema::parse_schema_file(&text);
+    if !outcome.is_clean() {
+        let rendered: Vec<String> = outcome
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                render_message_at(diagnostic.message(), diagnostic.span(), &text, path)
+            })
+            .collect();
+        return Err(CliError::Schema(rendered));
+    }
+    let file = outcome.file.expect("a clean parse yields the file");
+    print!("{}", cme_compiler::schema::codegen_c(&file, "cme.h"));
+    Ok(())
 }
 
 #[cfg(feature = "cli")]
@@ -568,6 +733,12 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Usage(message) | CliError::Io(message)) => {
             eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+        Err(CliError::Schema(lines)) => {
+            for line in lines {
+                eprintln!("error: {line}");
+            }
             ExitCode::FAILURE
         }
         Err(CliError::Compiler(errors, source)) => {

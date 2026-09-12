@@ -519,7 +519,7 @@ fn check_program(
         },
         None => SchemaContext::grant_all(set),
     };
-    let schema_declarations = schema_declaration_statements(&context);
+    let schema_declarations = cme_compiler::schema::declaration_statements(&context);
     let mut diagnostics = check_with_schema(statements, Some(&context));
 
     // Provider presence: every capability the program CALLS must have a
@@ -538,42 +538,6 @@ fn check_program(
         }
     }
     (diagnostics, schema_declarations)
-}
-
-/// Synthesizes the §9.3 boundary-type declarations of every GRANTED
-/// namespace into AST statements: scripts construct schema structs and
-/// enums exactly like local ones, and every execution engine consumes the
-/// same AST shape (the AST is the contract).
-fn schema_declaration_statements(context: &SchemaContext) -> Vec<Stmt> {
-    use cme_core::Span as S;
-    let mut declarations = Vec::new();
-    for file in context.set.namespaces() {
-        if context.target(&file.namespace).is_none() {
-            continue;
-        }
-        for item in &file.items {
-            match item {
-                cme_core::schema::SchemaItem::Struct(decl) => declarations.push(Stmt {
-                    span: S::new(0, 0),
-                    kind: StmtKind::StructDecl {
-                        name: decl.name.clone(),
-                        type_params: Vec::new(),
-                        fields: decl.fields.clone(),
-                    },
-                }),
-                cme_core::schema::SchemaItem::Enum(decl) => declarations.push(Stmt {
-                    span: S::new(0, 0),
-                    kind: StmtKind::EnumDecl {
-                        name: decl.name.clone(),
-                        type_params: Vec::new(),
-                        variants: decl.variants.clone(),
-                    },
-                }),
-                cme_core::schema::SchemaItem::Contract(_) => {}
-            }
-        }
-    }
-    declarations
 }
 
 /// Every capability path (`engine.graphics`) the program calls through a

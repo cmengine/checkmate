@@ -45,7 +45,7 @@
 use std::collections::BTreeMap;
 
 use cme_core::Span;
-use cme_core::ast::{FieldDef, Param, PrimitiveType, Type, VariantDecl};
+use cme_core::ast::{FieldDef, Param, PrimitiveType, Stmt, StmtKind, Type, VariantDecl};
 // The §9 data model lives in `cme-core` (the AST-ownership rule); this
 // module re-exports it so consumers of the front end need only
 // `cme_compiler::schema`.
@@ -1168,6 +1168,42 @@ fn is_identifier(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|rest| rest.is_ascii_alphanumeric() || rest == '_')
+}
+
+/// Synthesizes the §9.3 boundary-type declarations of every GRANTED
+/// namespace into AST statements: scripts construct schema structs and
+/// enums exactly like local ones, so every execution engine (the tree
+/// walker now, the bytecode VM and AOT engines later) receives their
+/// shapes through the one contract it already consumes — the AST.
+pub fn declaration_statements(context: &SchemaContext) -> Vec<Stmt> {
+    let mut declarations = Vec::new();
+    for file in context.set.namespaces() {
+        if context.target(&file.namespace).is_none() {
+            continue;
+        }
+        for item in &file.items {
+            match item {
+                SchemaItem::Struct(decl) => declarations.push(Stmt {
+                    span: Span::new(0, 0),
+                    kind: StmtKind::StructDecl {
+                        name: decl.name.clone(),
+                        type_params: Vec::new(),
+                        fields: decl.fields.clone(),
+                    },
+                }),
+                SchemaItem::Enum(decl) => declarations.push(Stmt {
+                    span: Span::new(0, 0),
+                    kind: StmtKind::EnumDecl {
+                        name: decl.name.clone(),
+                        type_params: Vec::new(),
+                        variants: decl.variants.clone(),
+                    },
+                }),
+                SchemaItem::Contract(_) => {}
+            }
+        }
+    }
+    declarations
 }
 
 // ---------------------------------------------------------------------------

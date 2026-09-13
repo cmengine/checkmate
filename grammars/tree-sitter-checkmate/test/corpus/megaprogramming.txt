@@ -346,14 +346,14 @@ grammar py {
             (identifier)))))))
 
 ================================================================================
-Megaprogramming: magic declarations and templates (§8.1/§8.4)
+Megaprogramming: mega declarations and templates (§8.1/§8.4)
 ================================================================================
 
-magic jsonValue(json.value as v) {
+mega jsonValue(json.value as v) {
     @toValue($v)
 }
 
-magic def(py.def as d) {
+mega def(py.def as d) {
     $d.ret $d.fname(each in d.params {
         [when present($ptype) { $ptype $param } else { infer $param }]
     }) {
@@ -361,7 +361,7 @@ magic def(py.def as d) {
     }
 }
 
-magic agent.spawn(
+mega agent.spawn(
     #complete(engine.availableModels)
     #hover("Target model identifier")
     "model:" $tag model
@@ -375,15 +375,15 @@ magic agent.spawn(
     )
 }
 
-magic pair($word key "=" $tt<"{{" "}}"> value) {
+mega pair($word key "=" $tt<"{{" "}}"> value) {
     Pair(key: $"{$key}", value: $"{$value.matched}")
 }
 
-magic listOf($word base) {
+mega listOf($word base) {
     $base[]
 }
 
-magic bounded(
+mega bounded(
     label "a bounded word list" { each [2, 3] { $ident word } as items }
     $raw tail ";"
 ) {
@@ -583,7 +583,7 @@ magic bounded(
 Megaprogramming: invocations, regions, heredocs (§8.6)
 ================================================================================
 
-JsonTree config = magic(jsonValue) {
+JsonTree config = jsonValue! {
     {
         "host": "db.local",
         "ports": [5432, 6432],
@@ -591,23 +591,23 @@ JsonTree config = magic(jsonValue) {
     }
 }
 
-magic(def) {
+def! {
     def pyClampFn(v: int, lo: int, hi: int) -> int:
         usePy(lo)
         return v
 }
 
-ReNode matcher = magic(reCompile) {
+ReNode matcher = reCompile! {
     ^[\w.+-]+@[\w-]+(\.[\w-]+)+$
 }
 
-ReNode short = magic(reCompile) <<REGEX
+ReNode short = reCompile! <<REGEX
     ^a{2,3}b$
     REGEX
 
 int fails = 0
 
-magic(tomlValue) {
+tomlValue! {
     title = "checkmate"
 
     # a transparent comment line
@@ -615,8 +615,8 @@ magic(tomlValue) {
     name = "matin"
 }
 
-magic(jsRun) {
-    const greeting = `Hello, ${ magic(json.value) { "world" } }!`
+jsRun! {
+    const greeting = `Hello, ${ json.value! { "world" } }!`
     console.log(greeting)  // braces } inside comment
 }
 

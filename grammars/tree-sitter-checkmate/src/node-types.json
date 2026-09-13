@@ -3443,11 +3443,11 @@
     "extra": true
   },
   {
-    "type": "magic",
+    "type": "match",
     "named": false
   },
   {
-    "type": "match",
+    "type": "mega",
     "named": false
   },
   {

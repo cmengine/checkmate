@@ -9,7 +9,7 @@ schema files.
 - **Tree-sitter parsing** via the grammar in
   [`grammars/tree-sitter-checkmate`](../../grammars/tree-sitter-checkmate) —
   the full implemented surface including §8 megaprogramming (`grammar`,
-  `magic`, patterns, templates, regions, heredocs) and §9 schema files.
+  `mega`, patterns, templates, regions, heredocs) and §9 schema files.
 - **Syntax highlighting** mapped onto standard Zed captures (`@keyword`,
   `@type`, `@function`, `@string.special`, `@embedded`, ...), so every theme
   works out of the box.
@@ -28,7 +28,7 @@ schema files.
     preview.
 - **Bracket matching** with rainbow-bracket colorization (quotes excluded).
 - **Code outline** for functions, structs, enums, impl targets, imports,
-  grammar rules, magic declarations, and schema members.
+  grammar rules, mega declarations, and schema members.
 - **Auto-indentation** driven by the syntax tree plus newline-aware fallback
   patterns (statements are newline-delimited).
 - **Vim text objects** (`af`/`if` around/inside functions, `ac`/`ic` for

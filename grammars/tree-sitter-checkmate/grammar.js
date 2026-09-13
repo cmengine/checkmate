@@ -5,9 +5,9 @@
  *   - the core language: newline-significant statements, Appendix A operator
  *     table, structs/enums/impls, arrays/maps, match, `?`, $"..." interpolation
  *   - §8 megaprogramming: `grammar` declarations with lexical profiles and the
- *     pattern language, `magic` declarations (patterns + templates),
- *     `magic(name) { region }` invocations with brace-balanced regions, and
- *     heredoc regions (`magic(name) <<TAG ... TAG`, external scanner)
+ *     pattern language, `mega` declarations (patterns + templates),
+ *     `name! { region }` invocations with brace-balanced regions, and
+ *     heredoc regions (`name! <<TAG ... TAG`, external scanner)
  *   - §9 schema files: `schema`, `capability`, `interface`, `since`,
  *     `requires`, `optional`, `suspend`
  *
@@ -81,9 +81,16 @@ module.exports = grammar({
   // alive and the non-viable one dies naturally.
   // `_lvalue` vs `_expr`: `a.b = 1` (assignment target) vs `a.b`
   // (expression statement).
+  // `dotted_path` vs `_lvalue`/`_expr`: `json.value! { region }` reads the
+  // leading `json.value` as an invocation macro path, while the same tokens
+  // could open a field expression or an assignment target; the postfix `!`
+  // (which exists nowhere else) kills the non-invocation readings.
   conflicts: ($) => [
     [$._type, $._expr],
     [$._lvalue, $._expr],
+    [$.dotted_path, $._lvalue, $._expr],
+    [$.dotted_path, $._expr],
+    [$.dotted_path, $._lvalue],
     // `Damage(int amount)` payloads vs an arm body starting with a call.
     [$.match_pattern],
     // `$str key`: the identifier after a fragment is its capture bind or
@@ -990,14 +997,14 @@ module.exports = grammar({
       ),
 
     // ------------------------------------------------------------------
-    // §8.1/§8.4/§8.6 — magic declarations, invocations, regions
+    // §8.1/§8.4/§8.6 — mega declarations, invocations, regions
     // ------------------------------------------------------------------
 
-    // Magic names are module-qualified: `magic agent.spawn(...)`,
-    // `magic jsonValue(...)` (§8.1 names).
+    // Magic names are module-qualified: `mega agent.spawn(...)`,
+    // `mega jsonValue(...)` (§8.1 names).
     magic_declaration: ($) =>
       seq(
-        'magic',
+        'mega',
         field('name', $.dotted_path),
         '(',
         repeat(choice($._newline, $._pattern_item)),
@@ -1007,14 +1014,16 @@ module.exports = grammar({
         '}',
       ),
 
+    // The invocation is a postfix bang: `jsonValue! { region }`,
+    // `agent.spawn! <<TAG ... TAG`. Postfix `!` exists nowhere else in the
+    // language (`!=` is one token, `!` is a prefix operator), so prec(1)
+    // settles the dotted-path-vs-field-expression ambiguity in the GLR.
     magic_invocation: ($) =>
       prec(
         1,
         seq(
-          'magic',
-          '(',
           field('macro', $.dotted_path),
-          ')',
+          '!',
           choice($.region, $.heredoc_region),
         ),
       ),

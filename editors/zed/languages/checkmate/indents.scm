@@ -5,7 +5,7 @@
 ; increase/decrease_indent_patterns for lines ending in `{`/`(`.
 
 ; Braced blocks: functions, ifs, while/for bodies, struct/enum/impl bodies,
-; grammar/magic declaration bodies.
+; grammar/mega declaration bodies.
 (block) @indent
 
 ; The closing brace outdents back to the block's own level.

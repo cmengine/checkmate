@@ -11,10 +11,10 @@ The grammar covers the full implemented language surface:
 - **Megaprogramming (§8)** — `grammar` declarations with lexical profiles
   (`skip`/`comment`/`string`/`island`), the whole pattern language
   (`oneof`, `each sep`, `until`, `indent`, `where`, fragments with validators,
-  `#complete`/`#hover`/`#token` annotations, ...), `magic` declarations with
-  expansion templates, `magic(name) { region }` invocations with
+  `#complete`/`#hover`/`#token` annotations, ...), `mega` declarations with
+  expansion templates, `name! { region }` invocations with
   brace-balanced foreign-content regions, and heredoc regions
-  (`magic(name) <<TAG ... TAG`, via an external scanner in `src/scanner.c`).
+  (`name! <<TAG ... TAG`, via an external scanner in `src/scanner.c`).
 - **Schema files (§9)** — `schema`, `capability`, `interface`, `since`,
   `requires`, `optional`, `suspend`.
 

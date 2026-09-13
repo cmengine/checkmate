@@ -1,7 +1,7 @@
 /**
  * External scanner for Checkmate heredoc magic regions (WHITEPAPER §8.6):
  *
- *     magic(name) <<TAG
+ *     name! <<TAG
  *     ...verbatim region text...
  *     TAG
  *

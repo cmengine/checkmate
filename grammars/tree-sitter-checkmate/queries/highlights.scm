@@ -53,7 +53,7 @@
 
 [
   "grammar"
-  "magic"
+  "mega"
   "rule"
   "extends"
   "skip"
@@ -244,7 +244,7 @@
 "?" @operator
 
 ; --------------------------------------------------------------------------
-; Magic regions: foreign-language content inside magic(name) { ... } and
+; Magic regions: foreign-language content inside name! { ... } and
 ; heredocs. Rendered as embedded/special strings by themes.
 ; --------------------------------------------------------------------------
 

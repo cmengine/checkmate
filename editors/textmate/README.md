@@ -10,13 +10,13 @@ consumes `.tmLanguage` grammars.
 - Core language: keywords, types, functions, operators, numbers, comments
 - Strings with the accepted escape set, plus `$"..."` interpolation with
   `{expr}` islands highlighted as live expression scopes
-- Megaprogramming (§8): `grammar`/`magic` declarations, the pattern language
+- Megaprogramming (§8): `grammar`/`mega` declarations, the pattern language
   (fragments `$str`/`$tt<...>`, character classes, annotations
   `#complete`/`#hover`/`#token`), and templates (`$splice`, `@fn(...)`,
   `[each ...]`, `[when ... else ...]`)
 - Magic invocation regions rendered as embedded foreign content
   (brace-balanced, string/comment aware) and heredoc regions
-  (`magic(name) <<TAG ... TAG`) as verbatim strings
+  (`name! <<TAG ... TAG`) as verbatim strings
 - Schema files (§9): `schema`, `capability`, `interface`, `since`,
   `requires`, `suspend`, `optional`, version literals like `v1.4.0`
 

@@ -16,8 +16,8 @@ const USAGE: &str = "Usage: cme <lex|ast|check|run|expand> <file.cm> [--provenan
      \n       cme schema <schema.cm>\
      \n       cme codegen-c <schema.cm>\
      \n       cme lsp\
-     \n  (--provenance is an `expand` option: it annotates each root magic site \
-       with `// @ magic(name) src:line:col`)\
+     \n  (--provenance is an `expand` option: it annotates each root mega site \
+       with `// @ name! src:line:col`)\
      \n  (--schema registers a §9 schema contract; repeatable; a mod's [schemas] \
        table narrows the grant — §9.5)\
      \n  a mod directory holds a mod.toml and a src/ tree (WHITEPAPER §10); \
@@ -436,7 +436,7 @@ fn render_runtime_error(
     }
 }
 
-/// Expands megaprograms when present. Used by `check|run|ast` so magic
+/// Expands megaprograms when present. Used by `check|run|ast` so mega
 /// sources behave like their expansions.
 #[cfg(feature = "cli")]
 fn maybe_expand(source: &str) -> Result<String, CliError> {
@@ -452,7 +452,7 @@ fn maybe_expand(source: &str) -> Result<String, CliError> {
 /// called and writes the pure-Checkmate result to a labeled file side by
 /// side with the original (`magic.cm` → `magic_expanded.cm`), then parses
 /// and checks that file, reporting against it. With `--provenance`, each
-/// root invocation site is annotated with a `// @ magic(name) src:L:C`
+/// root invocation site is annotated with a `// @ name! src:L:C`
 /// comment; without it, the output stays byte-deterministic.
 #[cfg(feature = "cli")]
 fn expand_command(source: &str, path: &str, provenance: bool) -> Result<(), CliError> {

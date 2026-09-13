@@ -15,7 +15,7 @@
 //              html, re, js, ts (extends js, §8.2), nest (context
 //              accumulation, §8.3.4/§8.3.7), py, sql — the §8.8/§8.4
 //              whitepaper shapes.
-//   Part 2   — `magic` declarations (the macros): one entry point per
+//   Part 2   — `mega` declarations (the macros): one entry point per
 //              grammar PLUS the §8.1 inline entry (`agent.spawn`, with
 //              inert #complete/#hover/#token annotations), the §8.3.3
 //              parameterized-$tt and live-island-$template demos, the
@@ -35,10 +35,10 @@
 //              remain (as dead code) in the expanded file.
 //   Part 3   — the consumer program: ordinary Checkmate code calling the
 //              macros in every §8.4 invocation position — declaration
-//              (`magic(def)`), statement (`agent.spawn`), expression
-//              (jsonValue and friends), and type (`magic(listOf) { str }
+//              (`def!`), statement (`agent.spawn`), expression
+//              (jsonValue and friends), and type (`listOf! { str }
 //              banner = …`) — plus the §8.6 heredoc region
-//              (`magic(reCompile) <<REGEX … REGEX`).
+//              (`reCompile! <<REGEX … REGEX`).
 //
 // The regions are real foreign-language source (JSON, TOML, YAML, CSS, HTML,
 // ECMAScript regex, JavaScript, Python, SQL).
@@ -644,10 +644,10 @@ grammar sql {
 }
 
 // ============================================================================
-// PART 2 — MAGIC DECLARATIONS (the macros)
+// PART 2 — MEGA DECLARATIONS (the macros)
 // ============================================================================
-// Each `magic name(pattern) { template }` binds an entry pattern to an
-// expansion template. Invocations are `magic(name) { region }`. Templates are
+// Each `mega name(pattern) { template }` binds an entry pattern to an
+// expansion template. Invocations are `name! { region }`. Templates are
 // now whitepaper-shaped (§8.4/§8.5): the tree-producing macros delegate to
 // compile-time functions with `@`, the pattern guards use `where @isVoid` /
 // `@isRawText`, and `require(@anchorsResolve($doc), …)` validates YAML.
@@ -658,20 +658,20 @@ grammar sql {
 
 // JSON → JsonTree: @toValue turns the capture tree into typed code
 // constructing the JsonTree enum (§8.5's own example shape).
-magic jsonValue(json.value as v) {
+mega jsonValue(json.value as v) {
     @toValue($v)
 }
 
 // TOML → JsonTree: a flat Obj with one entry per document item —
 // "dotted.key": <value tree> for keyvals, "[table.path]": Obj({}) for headers.
-magic tomlValue(toml.document as doc) {
+mega tomlValue(toml.document as doc) {
     require(@tablesConsistent($doc), "table redefined or reopened with a conflicting type")
     @toValue($doc)
 }
 
 // YAML → JsonTree: the require reports an undefined anchor reference at the
 // capture's span before codegen runs (§8.3.4 + §8.5).
-magic yamlValue(yaml.document as doc) {
+mega yamlValue(yaml.document as doc) {
     require(@anchorsResolve($doc), "alias references an undefined anchor")
     @toValue($doc)
 }
@@ -679,7 +679,7 @@ magic yamlValue(yaml.document as doc) {
 // CSS → str[]: one line per declaration, prefixed with its rule's selector.
 // (CSS stays template-level; @emitElement late-parses <style> bodies with
 // cm.parse(css.sheet, …) instead.)
-magic cssSheet(css.sheet as s) {
+mega cssSheet(css.sheet as s) {
     [
         [each in $s.rules {
             match ($item) {
@@ -697,7 +697,7 @@ magic cssSheet(css.sheet as s) {
 // cm.parse(js.program / css.sheet, body) inside the helper — because inline
 // delegation is string-aware and would diverge from HTML's actual raw-text
 // rule (§8.8 conformance notes).
-magic htmlFragment(html.document as doc) {
+mega htmlFragment(html.document as doc) {
     [
         [each in $doc.children {
             @emitElement($item)
@@ -708,12 +708,12 @@ magic htmlFragment(html.document as doc) {
 // ECMAScript regex → ReNode: @emitMatcher inspects the capture tree and
 // generates a structured matcher value (§8.5: "the dispatch is ordinary
 // compile-time Checkmate").
-magic reCompile(re.pattern as p) {
+mega reCompile(re.pattern as p) {
     @emitMatcher($p)
 }
 
 // JavaScript → str[]: one line per top-level statement.
-magic jsRun(js.program as p) {
+mega jsRun(js.program as p) {
     [
         [each in $p.stmts {
             match ($item) {
@@ -731,7 +731,7 @@ magic jsRun(js.program as p) {
 // Python def → a real Checkmate function. The signature stays template-level
 // (params need Checkmate types); the body is @emitBody recursion, which
 // handles nested `if` statements of ANY depth (§8.4's @py.emitBody).
-magic def(py.def as d) {
+mega def(py.def as d) {
     $d.ret $d.fname(each in d.params {
         [when present($ptype) { $ptype $param } else { infer $param }]
     }) {
@@ -743,7 +743,7 @@ magic def(py.def as d) {
 // default profile, with inert editor metadata (#complete/#hover are
 // cme-lsp's alone — §8.1/§8.3.10), binds seeding directly ($model,
 // $effort, $prompt), and a $text tail taking the region remainder.
-magic agent.spawn(
+mega agent.spawn(
     #complete(engine.availableModels)
     #hover("Target model identifier, e.g. claude-opus-latest")
     "model:" $tag model
@@ -760,14 +760,14 @@ magic agent.spawn(
 
 // §8.3.3's parameterized $tt: the balanced token tree roots at the given
 // delimiter pair; braces inside strings stay interior to the tree.
-magic pair($word key "=" $tt<"{{" "}}"> value) {
+mega pair($word key "=" $tt<"{{" "}}"> value) {
     Pair(key: $"{$key}", value: $"{$value.matched}")
 }
 
 // §8.3.3's live-island template (ui.banner's shape): $template splits the
 // region at {{ }} islands into tagged text/expr parts, dispatched with
 // match; islands are real Checkmate expressions, parse-checked at capture.
-magic uiBanner($template body) {
+mega uiBanner($template body) {
     [
         [each in $body {
             match ($item) {
@@ -780,14 +780,14 @@ magic uiBanner($template body) {
 
 // Type-position invocation (§8.4): the template emits a TYPE, so the
 // invocation sits where `str[]` would.
-magic listOf($word base) {
+mega listOf($word base) {
     $base[]
 }
 
 // §8.3.2's remaining combinators in one demo: `each [n, m]` bounds, a
 // `label` diagnostics context, `raw { … }` skipper suspension, the
 // `$ident` fragment, and a parse-integrated `$raw` tail.
-magic bounded(
+mega bounded(
     label "a bounded word list" { each [2, 3] { $ident word } as items }
     $raw tail ";"
 ) {
@@ -799,7 +799,7 @@ magic bounded(
 
 // TS declarations → summary lines (the extends demo; plain statements
 // delegate to the parent grammar).
-magic tsRun(ts.program as p) {
+mega tsRun(ts.program as p) {
     [
         [each in $p.stmts {
             match ($item) {
@@ -811,14 +811,14 @@ magic tsRun(ts.program as p) {
 }
 
 // Nest documents → "name[childCount]" per top-level element.
-magic nestTree(nest.doc as d) {
+mega nestTree(nest.doc as d) {
     [
         [each in $d.items { $"{$item.name}[{$item.children.length}]" }]
     ]
 }
 
 // SQL SELECT → SqlQuery struct value (struct declared in Part 3).
-magic sqlQuery(sql.select as q) {
+mega sqlQuery(sql.select as q) {
     SqlQuery(
         table: $"{$q.table}"
         columns: [
@@ -1584,7 +1584,7 @@ code emitEsc(Capture e, str prefix) {
 // ============================================================================
 // PART 3 — CONSUMER PROGRAM
 // ============================================================================
-// Ordinary Checkmate code. Every `magic(name) { region }` below is expanded
+// Ordinary Checkmate code. Every `name! { region }` below is expanded
 // in place by the megaprogram pass; the expanded program must type-check and
 // run on the tree walker, with main() returning 0 (all checks pass).
 
@@ -1611,20 +1611,20 @@ void usePy(int x) {
 
 // Python-flavored functions expand to real Checkmate function declarations;
 // @emitBody handles the nested `if` recursion.
-magic(def) {
+def! {
     def pyClampFn(v: int, lo: int, hi: int) -> int:
         usePy(lo)
         return v
 }
 
-magic(def) {
+def! {
     def pySign(v: int) -> str:
         if v < 0:
             return "neg"
         return "pos"
 }
 
-magic(def) {
+def! {
     def pyDeep(v: int) -> int:
         if v < 0:
             if v > -100:
@@ -1634,7 +1634,7 @@ magic(def) {
 }
 
 int checkJson() {
-    JsonTree config = magic(jsonValue) {
+    JsonTree config = jsonValue! {
         {
             "host": "db.local",
             "ports": [5432, 6432],
@@ -1673,7 +1673,7 @@ int checkJson() {
 }
 
 int checkToml() {
-    JsonTree doc = magic(tomlValue) {
+    JsonTree doc = tomlValue! {
         title = "checkmate"
 
         # a transparent comment line
@@ -1740,7 +1740,7 @@ int checkYaml() {
     // mapping entries are flush with it. Anchors (&def), aliases (*def)
     // and the << merge key are §8.8's YAML shapes; the require in the
     // magic checks every alias against the anchors (§8.3.4).
-    JsonTree doc = magic(yamlValue) {
+    JsonTree doc = yamlValue! {
     title: Checkmate
 limits:
     fuel: 1000000
@@ -1801,7 +1801,7 @@ production:
 }
 
 int checkCss() {
-    str[] cssLines = magic(cssSheet) {
+    str[] cssLines = cssSheet! {
         body {
             margin: 0
             font: 14px system-ui
@@ -1819,7 +1819,7 @@ int checkCss() {
 }
 
 int checkHtml() {
-    HtmlNode[] nodes = magic(htmlFragment) {
+    HtmlNode[] nodes = htmlFragment! {
         <div class="hud">
             <span class="bar">HP</span>
         </div>
@@ -1857,7 +1857,7 @@ int checkHtml() {
 // A <script> body must parse as a js program (late cm.parse inside
 // @emitElement); this region exists to prove the happy path.
 int checkHtmlScript() {
-    HtmlNode[] nodes = magic(htmlFragment) {
+    HtmlNode[] nodes = htmlFragment! {
         <script>
             let x = 1
         </script>
@@ -1875,7 +1875,7 @@ int checkHtmlScript() {
 }
 
 int checkRe() {
-    ReNode matcher = magic(reCompile) {
+    ReNode matcher = reCompile! {
         ^[\w.+-]+@[\w-]+(\.[\w-]+)+$
     }
     int fails = 0
@@ -1896,7 +1896,7 @@ int checkRe() {
 }
 
 int checkJs() {
-    str[] jsLines = magic(jsRun) {
+    str[] jsLines = jsRun! {
         const greeting = "hello"
         console.log(greeting)
     }
@@ -1907,11 +1907,11 @@ int checkJs() {
     return fails
 }
 
-// §8.6's heredoc regions: `magic(name) <<tag … tag` is verbatim to the tag
+// §8.6's heredoc regions: `name! <<tag … tag` is verbatim to the tag
 // line — the exact escape for content whose braces no composed profile can
 // balance (here: the regex's {2,3} bound under re's empty skip set).
 int checkReHeredoc() {
-    ReNode matcher = magic(reCompile) <<REGEX
+    ReNode matcher = reCompile! <<REGEX
     ^a{2,3}b$
     REGEX
     int fails = 0
@@ -1940,7 +1940,7 @@ int checkReHeredoc() {
 // §8.2's `grammar ts extends js` end to end: the typed declaration is the
 // child's override ($type live island), the call statement delegates.
 int checkTs() {
-    str[] tsLines = magic(tsRun) {
+    str[] tsLines = tsRun! {
         let count: int = 5
         console.log(count)
     }
@@ -1954,7 +1954,7 @@ int checkTs() {
 // §8.3.4/§8.3.7's context accumulation: the open-element list threads down
 // through `with context { open: append(open, name) }` and steers matching.
 int checkNest() {
-    str[] nestLines = magic(nestTree) {
+    str[] nestLines = nestTree! {
         <section>
             <subsection>
                 <p>hello</p>
@@ -1973,7 +1973,7 @@ int checkNest() {
 int checkSpawn() {
     int fails = 0
     // Expression position.
-    str line = magic(agent.spawn) {
+    str line = agent.spawn! {
         model: claude-opus-latest
         effort: high
 
@@ -1981,7 +1981,7 @@ int checkSpawn() {
     }
     if (line != "claude-opus-latest/high") { fails += 1 }
     // Statement position (the generated call is the whole statement).
-    magic(agent.spawn) {
+    agent.spawn! {
         model: gpt-5
         effort: low
         Patrol the east wing.
@@ -1992,7 +1992,7 @@ int checkSpawn() {
 // The parameterized $tt and the live-island $template demos.
 int checkPairAndBanner() {
     int fails = 0
-    Pair p = magic(pair) {
+    Pair p = pair! {
         alpha = {{ f(1) + g(2) }}
     }
     if (p.key != "alpha") { fails += 1 }
@@ -2000,7 +2000,7 @@ int checkPairAndBanner() {
     // Type position: the invocation expands to the element TYPE str[].
     // Interior region whitespace stays verbatim (§8.6 trims only the edges),
     // so the region is authored on one line for stable part text.
-    magic(listOf) { str } banner = magic(uiBanner) {
+    listOf! { str } banner = uiBanner! {
         Welcome back, {{ userName }}! You have {{ score }} points.
     }
     if (banner.length != 5) { fails += 1 }
@@ -2012,7 +2012,7 @@ int checkPairAndBanner() {
 }
 
 int checkBounded() {
-    str[] parts = magic(bounded) {
+    str[] parts = bounded! {
         alpha beta 1 + 2;
     }
     int fails = 0
@@ -2036,7 +2036,7 @@ int checkPy() {
 }
 
 int checkSql() {
-    SqlQuery q = magic(sqlQuery) {
+    SqlQuery q = sqlQuery! {
         SELECT id, name AS n
         FROM users
         WHERE age > 21 AND name != 'bob'  -- fetch the adults

@@ -41,7 +41,7 @@ pub struct ExpansionOutcome {
 }
 
 /// Knobs for the expansion pass. The default is byte-deterministic output
-/// with no annotations; `provenance` adds a `// @ magic(name) src:L:C`
+/// with no annotations; `provenance` adds a `// @ name! src:L:C`
 /// comment above the line of every root invocation of the ORIGINAL file
 /// (§8.6: origin is recorded only for diagnostics — it never affects
 /// processing, and generated code carries no comments of its own).
@@ -70,26 +70,56 @@ pub fn expand_source_with(
 }
 
 /// Cheap pre-check for embedders: does this source mention the megaprogram
-/// subsystem at all (`magic` or `grammar` as a standalone word)? Expansion
-/// is only worth running when the answer is yes — a plain source is
-/// returned unchanged by the pipeline, but skipping the pass entirely keeps
-/// the no-megaprogram path allocation-free. This is the same gate the CLI
-/// applies before `check`/`run`/`ast`; it is a scan, not a parse, so a
-/// source that merely mentions `magic` in a comment still pays one
-/// expansion pass that finds nothing and returns the text unchanged.
+/// subsystem at all (`mega` or `grammar` as a standalone word, or a
+/// `name! { … }` invocation shape)? Expansion is only worth running when
+/// the answer is yes — a plain source is returned unchanged by the
+/// pipeline, but skipping the pass entirely keeps the no-megaprogram path
+/// allocation-free. This is the same gate the CLI applies before
+/// `check`/`run`/`ast`; it is a scan, not a parse, so a source that merely
+/// mentions `mega` in a comment still pays one expansion pass that finds
+/// nothing and returns the text unchanged. Postfix `!` exists nowhere else
+/// in the language (`!=` is one token, `!` is prefix-only), so the
+/// invocation shape is detected without false positives on valid source.
 pub fn mentions_megaprogram(source: &str) -> bool {
+    let bytes = source.as_bytes();
     let mut word = String::new();
-    for c in source.chars() {
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let c = source[index..].chars().next().unwrap();
         if c.is_ascii_alphanumeric() || c == '_' {
             word.push(c);
-        } else {
-            if word == "magic" || word == "grammar" {
+            index += c.len_utf8();
+            continue;
+        }
+        if word == "mega" || word == "grammar" {
+            return true;
+        }
+        // Invocation shape: an identifier, `!` (not `!=`), then — skipping
+        // whitespace and line comments — `{` or `<<`.
+        if !word.is_empty() && c == '!' && bytes.get(index + 1) != Some(&b'=') {
+            let mut probe = index + 1;
+            loop {
+                while matches!(bytes.get(probe), Some(b) if b.is_ascii_whitespace()) {
+                    probe += 1;
+                }
+                if bytes.get(probe) == Some(&b'/') && bytes.get(probe + 1) == Some(&b'/') {
+                    while probe < bytes.len() && bytes[probe] != b'\n' {
+                        probe += 1;
+                    }
+                    continue;
+                }
+                break;
+            }
+            if bytes.get(probe) == Some(&b'{')
+                || (bytes.get(probe) == Some(&b'<') && bytes.get(probe + 1) == Some(&b'<'))
+            {
                 return true;
             }
-            word.clear();
         }
+        word.clear();
+        index += c.len_utf8();
     }
-    word == "magic" || word == "grammar"
+    word == "mega" || word == "grammar"
 }
 
 /// Stack budget of the dedicated expansion thread. Deeply nested rule
@@ -201,7 +231,7 @@ fn expand_source_inner(
             let chain = expansion_stack(&round_scan.invocations);
             for (index, invocation) in chain.iter().enumerate() {
                 message.push_str(&format!(
-                    "\n  {}. magic({}) at {}..{}",
+                    "\n  {}. {}! at {}..{}",
                     index + 1,
                     invocation.name,
                     invocation.span.start,
@@ -238,7 +268,7 @@ fn expand_source_inner(
                 .find(|macro_def| macro_def.name == invocation.name)
             else {
                 diagnostics.push(Diagnostic::parse(
-                    format!("unknown magic macro `{}`", invocation.name),
+                    format!("unknown mega macro `{}`", invocation.name),
                     invocation.header_span,
                 ));
                 continue;
@@ -361,7 +391,7 @@ fn count_newlines(text: &str, span: Span) -> usize {
         .count()
 }
 
-/// Builds the opt-in provenance edits (§8.6): one `// @ magic(name) src:L:C`
+/// Builds the opt-in provenance edits (§8.6): one `// @ name! src:L:C`
 /// comment line inserted at the start of the line containing each ROOT
 /// invocation (an invocation contained in no other). Positions refer to the
 /// ORIGINAL file. A comment inside a foreign region could pollute captures,
@@ -387,7 +417,7 @@ fn provenance_edits(source: &str, scan: &MagicScan) -> Vec<(Span, String)> {
         let (line, column) = line_column(source, invocation.span.start);
         edits.push((
             Span::new(line_start, line_start),
-            format!("// @ magic({}) src:{}:{}\n", invocation.name, line, column),
+            format!("// @ {}! src:{}:{}\n", invocation.name, line, column),
         ));
     }
     edits
@@ -423,7 +453,7 @@ fn region_failure_message(invocation: &InvocationScan, failure: &MatchFailure) -
         .filter(|byte| *byte == b'\n')
         .count();
     let column = region[line_start..offset].chars().count();
-    let mut message = format!("magic pattern did not match: {}", failure.message);
+    let mut message = format!("mega pattern did not match: {}", failure.message);
     message.push_str(&format!("\n  ┆ {line_text}"));
     message.push_str(&format!(
         "\n  ┆ {}^ (region line {line}, column {})",
@@ -551,10 +581,10 @@ struct CompiledMacro {
 }
 
 enum MacroEntry {
-    /// `magic m(grammar.rule as name) { … }` — the matched rule record is
+    /// `mega m(grammar.rule as name) { … }` — the matched rule record is
     /// bound to `name` and seeded as the template's root capture.
     RuleRef { bind: String },
-    /// `magic m(#annot … pattern …) { … }` — an inline pattern; every
+    /// `mega m(#annot … pattern …) { … }` — an inline pattern; every
     /// top-level bind seeds a capture of its own.
     Inline,
 }
@@ -1283,16 +1313,26 @@ mod tests {
 
     #[test]
     fn mentions_megaprogram_spots_standalone_words_only() {
-        assert!(mentions_megaprogram("magic(name) { 1 }"));
+        // Invocation shape (`name! { … }` and the `<<tag` heredoc).
+        assert!(mentions_megaprogram("name! { 1 }"));
+        assert!(mentions_megaprogram("str s = json.value!\n{\n}\n"));
+        assert!(mentions_megaprogram("reCompile! <<REGEX\nDATA\nREGEX\n"));
+        // Declaration keywords as standalone words.
         assert!(mentions_megaprogram("grammar g { }"));
-        assert!(mentions_megaprogram("int x = 1\n// magic\n"));
+        assert!(mentions_megaprogram("mega twice($int v) { $v }"));
+        assert!(mentions_megaprogram("int y = 1\nmega"));
+        // `!=` is one token and `!` is otherwise a prefix operator, so a
+        // bang after an identifier means an invocation and nothing else.
+        assert!(!mentions_megaprogram("bool ok = 1 != 2"));
+        assert!(!mentions_megaprogram("bool ok = !flag"));
         // Substrings of larger identifiers do not count.
         assert!(!mentions_megaprogram("int magical = 1"));
         assert!(!mentions_megaprogram("int grammarian = 1"));
         assert!(!mentions_megaprogram("int x = 1"));
         assert!(!mentions_megaprogram(""));
-        // A trailing word without a terminator still counts.
-        assert!(mentions_megaprogram("int y = 1\nmagic"));
+        // `magic` is an ordinary identifier word now.
+        assert!(!mentions_megaprogram("int x = 1\n// magic\n"));
+        assert!(!mentions_megaprogram("int magic = 1"));
     }
 
     /// The Task 3 acceptance shape: a JSON object region expands to a
@@ -1323,7 +1363,7 @@ grammar json {
     }
 }
 
-magic jsonValue(json.value as v) {
+mega jsonValue(json.value as v) {
     match ($v) {
         null   => "null"
         bool   => $"{$v.matched}"
@@ -1347,7 +1387,7 @@ magic jsonValue(json.value as v) {
     }
 }
 
-map<str, str> config = magic(jsonValue) {
+map<str, str> config = jsonValue! {
     {
         "host": "db.local",
         "retries": 3,
@@ -1376,7 +1416,7 @@ map<str, str> config = magic(jsonValue) {
         assert!(normalized.contains("\"retries\": \"3\""));
         assert!(normalized.contains("\"debug\": \"true\""));
         assert!(normalized.contains("\"name\": \"null\""));
-        assert!(!outcome.expanded.contains("magic(jsonValue)"));
+        assert!(!outcome.expanded.contains("jsonValue!"));
         assert!(!outcome.expanded.contains("grammar json"));
     }
 
@@ -1426,7 +1466,7 @@ grammar py {
     }
 }
 
-magic def(py.def as d) {
+mega def(py.def as d) {
     $d.ret $d.fname(each in d.params {
         [when present($ptype) { $ptype $param } else { infer $param }]
     }) {
@@ -1439,7 +1479,7 @@ magic def(py.def as d) {
     }
 }
 
-magic(def) {
+def! {
     def pyClampFn(v: int, lo: int) -> int:
         usePy(lo)
         return v
@@ -1465,7 +1505,7 @@ magic(def) {
         assert!(normalized.contains("int pyClampFn(int v, int lo)"));
         assert!(normalized.contains("usePy(lo)"));
         assert!(normalized.contains("return v"));
-        assert!(!outcome.expanded.contains("magic(def)"));
+        assert!(!outcome.expanded.contains("def!"));
         assert!(!outcome.expanded.contains("grammar py"));
     }
 
@@ -1496,11 +1536,11 @@ grammar bad {
     }
 }
 
-magic runIt(bad.value as v) {
+mega runIt(bad.value as v) {
     "x"
 }
 
-magic(runIt) {
+runIt! {
     hello
 }
 "#;
@@ -1534,11 +1574,11 @@ grammar bad {
     }
 }
 
-magic runIt(bad.p as v) {
+mega runIt(bad.p as v) {
     "x"
 }
 
-magic(runIt) {
+runIt! {
     !
 }
 "#;
@@ -1568,7 +1608,7 @@ grammar json {
     }
 }
 
-magic jsonValue(json.value as v) {
+mega jsonValue(json.value as v) {
     match ($v) {
         null   => "null"
         string => $v.text
@@ -1576,7 +1616,7 @@ magic jsonValue(json.value as v) {
     }
 }
 
-str config = magic(jsonValue) {
+str config = jsonValue! {
     "db.local"
 }
 "#;
@@ -1616,7 +1656,7 @@ grammar py {
     }
 }
 
-magic def(py.def as d) {
+mega def(py.def as d) {
     $d.ret $d.fname(each in d.params {
         [when present($ptype) { $ptype $param } else { infer $param }]
     }) {
@@ -1641,7 +1681,7 @@ int useTwo(int a, int b) {
     return a
 }
 
-magic(def) {
+def! {
     def pyNestedFn(v: int, lo: int) -> int:
         if useTwo(v, lo) > 0:
             return lo
@@ -1690,11 +1730,11 @@ grammar test {
     }
 }
 
-magic runIt(test.thing as t $raw x) {
+mega runIt(test.thing as t $raw x) {
     "x"
 }
 
-magic(runIt) {
+runIt! {
     hello
 }
 "#;
@@ -1721,13 +1761,13 @@ grammar list {
     }
 }
 
-magic keepers(list.doc as d) {
+mega keepers(list.doc as d) {
     [
         [each in $d.items where $item.flag == "yes" { $item.name }]
     ]
 }
 
-str[] v = magic(keepers) {
+str[] v = keepers! {
     a = yes, b = no, c = yes
 }
 "#;
@@ -1748,11 +1788,11 @@ grammar test {
     }
 }
 
-magic runIt(test.thing as t $raw x "!") {
+mega runIt(test.thing as t $raw x "!") {
     $"{$t.x}"
 }
 
-magic(runIt) {
+runIt! {
     hello world!
 }
 "#;
@@ -1772,7 +1812,7 @@ magic(runIt) {
         // The §8.1 agent.spawn shape: #complete/#hover/#token appear between
         // the pattern's terms and never affect matching.
         let source = r#"
-magic agent.spawn(
+mega agent.spawn(
     #complete(engine.availableModels)
     #hover("Target model identifier")
     "model:" $tag model
@@ -1783,7 +1823,7 @@ magic agent.spawn(
     $"{$model}|{$effort}|{$prompt}"
 }
 
-str cfg = magic(agent.spawn) {
+str cfg = agent.spawn! {
     model: claude-opus-latest
     effort: high
     patrol the routes
@@ -1802,11 +1842,11 @@ str cfg = magic(agent.spawn) {
     #[test]
     fn unknown_annotations_are_rejected() {
         let source = r#"
-magic m(#complete2(x) "a") {
+mega m(#complete2(x) "a") {
     "b"
 }
 
-str v = magic(m) {
+str v = m! {
     a
 }
 "#;
@@ -1823,12 +1863,12 @@ str v = magic(m) {
     fn inline_entry_patterns_expand_without_a_rule_ref() {
         // Pure inline pattern: literals + fragments, no grammar at all.
         let source = r#"
-magic pair("a =" $word left "b =" $word right) {
+mega pair("a =" $word left "b =" $word right) {
     infer both = $"{$left}-{$right}"
     both
 }
 
-str v = magic(pair) {
+str v = pair! {
     a = one b = two
 }
 "#;
@@ -1843,11 +1883,11 @@ str v = magic(pair) {
     #[test]
     fn macros_must_be_declared_before_they_are_invoked() {
         let source = r#"
-str v = magic(later) {
+str v = later! {
     x
 }
 
-magic later($word w) {
+mega later($word w) {
     $"{$w}!"
 }
 "#;
@@ -1862,21 +1902,21 @@ magic later($word w) {
 
     #[test]
     fn invocations_inside_a_template_are_exempt_from_the_order_check() {
-        // The nested `magic(inner)` sits inside `outer`'s TEMPLATE (a
+        // The nested `inner!` sits inside `outer`'s TEMPLATE (a
         // declaration span), so the §8.1 source-order rule does not apply;
         // it expands when `outer` runs.
         let source = r#"
-magic outer($word w) {
-    magic(inner) {
+mega outer($word w) {
+    inner! {
         inner text
     }
 }
 
-magic inner($text t) {
+mega inner($text t) {
     $"[{$t}]"
 }
 
-str v = magic(outer) {
+str v = outer! {
     hello
 }
 "#;
@@ -1897,11 +1937,11 @@ bool isValidTag(str t) {
     return t == "on" || t == "off"
 }
 
-magic flip($word<isValidTag> state) {
+mega flip($word<isValidTag> state) {
     $"{$state}!"
 }
 
-str v = magic(flip) {
+str v = flip! {
     on
 }
 "#;
@@ -1913,11 +1953,11 @@ bool isValidTag(str t) {
     return t == "on" || t == "off"
 }
 
-magic flip($word<isValidTag> state) {
+mega flip($word<isValidTag> state) {
     $"{$state}!"
 }
 
-str v = magic(flip) {
+str v = flip! {
     sideways
 }
 "#;
@@ -1935,11 +1975,11 @@ str v = magic(flip) {
         // §8.3.4's capture accessors include `.span`; two captures over the
         // same extent share one span text, distinct extents differ.
         let source = r#"
-magic twin($word as a $word as b where a.span != b.span) {
+mega twin($word as a $word as b where a.span != b.span) {
     "spans differ"
 }
 
-str v = magic(twin) {
+str v = twin! {
     one two
 }
 "#;
@@ -1951,11 +1991,11 @@ str v = magic(twin) {
         );
 
         let same = r#"
-magic twin($word as a $word as b where a.span == b.span) {
+mega twin($word as a $word as b where a.span == b.span) {
     "same"
 }
 
-str v = magic(twin) {
+str v = twin! {
     echo
 }
 "#;
@@ -1963,7 +2003,7 @@ str v = magic(twin) {
         assert!(
             errors
                 .iter()
-                .any(|message| message.contains("magic pattern did not match")),
+                .any(|message| message.contains("mega pattern did not match")),
             "a single word cannot bind twice, so the where never passes: {errors:?}"
         );
     }
@@ -1991,10 +2031,10 @@ grammar nest {
         where close == name
     }
 }
-magic nestTree(nest.doc as d) {
+mega nestTree(nest.doc as d) {
     [ [each in $d.items { $"{$item.name}" }] ]
 }
-str[] v = magic(nestTree) {
+str[] v = nestTree! {
     <section>
         <section>
             deep
@@ -2006,7 +2046,7 @@ str[] v = magic(nestTree) {
         assert!(
             errors
                 .iter()
-                .any(|message| message.contains("magic pattern did not match")),
+                .any(|message| message.contains("mega pattern did not match")),
             "a nested duplicate tag must fail the match: {errors:?}"
         );
     }
@@ -2029,10 +2069,10 @@ grammar nest {
         where close == name
     }
 }
-magic nestTree(nest.doc as d) {
+mega nestTree(nest.doc as d) {
     [ [each in $d.items { $"{$item.name}[{$item.children.length}]" }] ]
 }
-str[] v = magic(nestTree) {
+str[] v = nestTree! {
     <section>
         <subsection>
             deep
@@ -2103,12 +2143,12 @@ bool tablesConsistent(Capture doc) {
     }
 }
 
-magic tomlValue(toml.document as doc) {
+mega tomlValue(toml.document as doc) {
     require(@tablesConsistent($doc), "table redefined or reopened with a conflicting type")
     "obj"
 }
 
-str v = magic(tomlValue) {
+str v = tomlValue! {
     [a]
     x = 1
 
@@ -2142,10 +2182,10 @@ grammar nest {
         "</" $word close ">"
     }
 }
-magic nestTree(nest.doc as d) {
+mega nestTree(nest.doc as d) {
     [ [each in $d.items { $"{$item.name}" }] ]
 }
-str[] v = magic(nestTree) {
+str[] v = nestTree! {
     <div></div>
 }
 "#;
@@ -2173,10 +2213,10 @@ grammar nest {
         where close == name
     }
 }
-magic nestTree(nest.doc as d) {
+mega nestTree(nest.doc as d) {
     [ [each in $d.items { $"{$item.name}" }] ]
 }
-str[] v = magic(nestTree) {
+str[] v = nestTree! {
     <div></div>
 }
 "#;
@@ -2191,11 +2231,11 @@ str[] v = magic(nestTree) {
         // $tt<"{{" "}}"> roots the balanced tree at the explicit pair;
         // braces inside (even in strings) stay interior to the tree.
         let source = r#"
-magic cell($word key "=" $tt<"{{" "}}"> value) {
+mega cell($word key "=" $tt<"{{" "}}"> value) {
     $"{$key}={$value.matched}"
 }
 
-str v = magic(cell) {
+str v = cell! {
     alpha = {{ f(1, { x: 2 }) + g("}}") }}
 }
 "#;
@@ -2233,11 +2273,11 @@ grammar json {
     }
 }
 
-magic jsonValue(json.value as v) {
+mega jsonValue(json.value as v) {
     "x"
 }
 
-str config = magic(jsonValue) {
+str config = jsonValue! {
     {
         "host" "db.local",
         "retries": 3
@@ -2247,7 +2287,7 @@ str config = magic(jsonValue) {
         let errors = expansion_errors(source);
         let failure = errors
             .iter()
-            .find(|message| message.contains("magic pattern did not match"))
+            .find(|message| message.contains("mega pattern did not match"))
             .expect("a pattern-failure diagnostic");
         // §8.3.9 shape: the embedded region line (interior indentation is
         // verbatim), and the caret annotated with region-relative coords.
@@ -2268,18 +2308,18 @@ grammar test {
     rule thing { $word w }
 }
 
-magic runIt(test.thing as t) {
+mega runIt(test.thing as t) {
     "x"
 }
 
-str s = magic(runIt) {
+str s = runIt! {
     hello world
 }
 "#;
         let errors = expansion_errors(source);
         let failure = errors
             .iter()
-            .find(|message| message.contains("magic pattern did not match"))
+            .find(|message| message.contains("mega pattern did not match"))
             .expect("a leftover-content failure");
         assert!(
             failure.contains("leftover content"),
@@ -2298,32 +2338,28 @@ grammar test {
     rule thing { $word w }
 }
 
-magic runIt(test.thing as t) {
+mega runIt(test.thing as t) {
     "x"
 }
 
-str a = magic(runIt) {
+str a = runIt! {
     alpha
 }
 
-str b = magic(runIt) { beta }
+str b = runIt! { beta }
 "#;
         let with_provenance =
             expand_source_with(source, ExpandOptions { provenance: true }).expect("expands");
-        // Line 10 is `str a = magic(runIt) {`, line 14 is `str b = …`; both
-        // roots are annotated with their ORIGINAL-file position (`magic`
-        // starts at column 9 in both).
+        // Line 10 is `str a = runIt! {`, line 14 is `str b = …`; both
+        // roots are annotated with their ORIGINAL-file position (the macro
+        // name starts at column 9 in both).
         assert!(
-            with_provenance
-                .expanded
-                .contains("// @ magic(runIt) src:10:9"),
+            with_provenance.expanded.contains("// @ runIt! src:10:9"),
             "expected the root-site comment for `a`: {}",
             with_provenance.expanded
         );
         assert!(
-            with_provenance
-                .expanded
-                .contains("// @ magic(runIt) src:14:9"),
+            with_provenance.expanded.contains("// @ runIt! src:14:9"),
             "expected the root-site comment for `b`: {}",
             with_provenance.expanded
         );
@@ -2332,15 +2368,15 @@ str b = magic(runIt) { beta }
         let plain = expand_source(source).expect("expands");
         let stripped = with_provenance
             .expanded
-            .replace("// @ magic(runIt) src:10:9\n", "")
-            .replace("// @ magic(runIt) src:14:9\n", "");
+            .replace("// @ runIt! src:10:9\n", "")
+            .replace("// @ runIt! src:14:9\n", "");
         assert_eq!(plain.expanded, stripped);
-        assert!(!plain.expanded.contains("// @ magic("));
+        assert!(!plain.expanded.contains("// @ "));
     }
 
     #[test]
     fn provenance_covers_only_the_roots_not_nested_sites() {
-        // The inner `magic(b)` is plain foreign text (no island): only the
+        // The inner `b!` is plain foreign text (no island): only the
         // outer invocation is a site, so exactly one comment appears and the
         // region text is never polluted.
         let source = r#"
@@ -2350,18 +2386,18 @@ grammar js {
     rule run { $text body }
 }
 
-magic a(js.run as r) {
+mega a(js.run as r) {
     "A"
 }
 
-str s = magic(a) {
-    magic(b) { 1 }
+str s = a! {
+    b! { 1 }
 }
 "#;
         let with_provenance =
             expand_source_with(source, ExpandOptions { provenance: true }).expect("expands");
         assert_eq!(
-            with_provenance.expanded.matches("// @ magic(").count(),
+            with_provenance.expanded.matches("// @ ").count(),
             1,
             "only the root site is annotated: {}",
             with_provenance.expanded
@@ -2377,12 +2413,12 @@ grammar test {
     rule thing { $word w }
 }
 
-magic runIt(test.thing as t) {
+mega runIt(test.thing as t) {
     require($t.w == "nope", "wrong word")
     "ok"
 }
 
-str s = magic(runIt) {
+str s = runIt! {
     hello
 }
 "#;
@@ -2429,23 +2465,23 @@ grammar ts extends js {
     }
 }
 
-magic runJs(js.program as p) {
+mega runJs(js.program as p) {
     "js"
 }
 
-magic runTs(ts.program as p) {
+mega runTs(ts.program as p) {
     "ts"
 }
 
-str a = magic(runJs) {
+str a = runJs! {
     return done
 }
 
-str b = magic(runTs) {
+str b = runTs! {
     return done
 }
 
-str c = magic(runTs) {
+str c = runTs! {
     let n = 7
 }
 "#;
@@ -2478,11 +2514,11 @@ grammar ts extends js {
     string  ( '\'' )
 }
 
-magic runTs(ts.program as p) {
+mega runTs(ts.program as p) {
     "ts"
 }
 
-str b = magic(runTs) {
+str b = runTs! {
     done
     map('}') called
 }
@@ -2499,11 +2535,11 @@ grammar ts extends ghost {
     rule r { $word w }
 }
 
-magic runIt(ts.r as x) {
+mega runIt(ts.r as x) {
     "x"
 }
 
-str s = magic(runIt) {
+str s = runIt! {
     hi
 }
 "#;
@@ -2527,11 +2563,11 @@ grammar b extends a {
     rule s { $word w }
 }
 
-magic runIt(a.r as x) {
+mega runIt(a.r as x) {
     "x"
 }
 
-str s = magic(runIt) {
+str s = runIt! {
     hi
 }
 "#;
@@ -2555,11 +2591,11 @@ grammar bad {
     }
 }
 
-magic runIt(bad.r as x) {
+mega runIt(bad.r as x) {
     "x"
 }
 
-str s = magic(runIt) {
+str s = runIt! {
     hi
 }
 "#;
@@ -2583,11 +2619,11 @@ grammar pyish {
     }
 }
 
-magic runIt(pyish.def as x) {
+mega runIt(pyish.def as x) {
     "x"
 }
 
-str s = magic(runIt) {
+str s = runIt! {
     def f: x
 }
 "#;
@@ -2614,11 +2650,11 @@ grammar py {
     }
 }
 
-magic runIt(py.def as x) {
+mega runIt(py.def as x) {
     "x"
 }
 
-str s = magic(runIt) {
+str s = runIt! {
     def f: run
 }
 "#;

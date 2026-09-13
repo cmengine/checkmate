@@ -1,9 +1,9 @@
 //! Magic detection (the front-end's only job for megaprograms, per the
-//! owner's architecture mandate): locate `grammar` declarations, `magic`
-//! declarations, and `magic(name) { … }` invocations in raw source text,
-//! handing the code inside the magic blocks to the megaprogram pass.
+//! owner's architecture mandate): locate `grammar` declarations, `mega`
+//! declarations, and `name! { … }` invocations in raw source text, handing
+//! the code inside the mega blocks to the megaprogram pass.
 //!
-//! The scanner runs before the main lexer because magic regions are *not*
+//! The scanner runs before the main lexer because mega regions are *not*
 //! Checkmate — they are arbitrary foreign-language source that the main
 //! lexer must never see. Regions are located by brace balancing under the
 //! composed profile of the entry grammar (§8.6).
@@ -22,7 +22,7 @@ use cme_core::magic::LexProfile;
 /// larger extent; the heredoc form is the zero-approximation escape hatch.
 pub const REGION_SCAN_HINT: &str = "an inner `}` invisible to every composed profile - a brace \
      inside an embedded regex literal, say - may have confused the region balance; the heredoc \
-     form `magic(name) <<tag ... tag` is exact (§8.6)";
+     form `name! <<tag ... tag` is exact (§8.6)";
 
 /// One `grammar name [extends parent] { … }` declaration: verbatim body text
 /// plus the profile extracted from its `skip`/`comment`/`string` declarations.
@@ -45,7 +45,7 @@ pub struct GrammarScan {
     pub skip_declared: bool,
 }
 
-/// One `magic name(pattern) { template }` declaration. Pattern and template
+/// One `mega name(pattern) { template }` declaration. Pattern and template
 /// stay verbatim; the pattern/template parsers (Task 3) give them structure.
 #[derive(Debug, Clone)]
 pub struct MagicDeclScan {
@@ -57,16 +57,16 @@ pub struct MagicDeclScan {
     pub template: String,
 }
 
-/// One `magic(name) { … }` invocation with its normalized region (§8.6):
+/// One `name! { … }` invocation with its normalized region (§8.6):
 /// one line terminator trimmed after `{` and before `}`, horizontal
 /// whitespace trimmed at both edges. `region_span` stays anchored to the
 /// original file so diagnostics keep pointing at the user's source.
 #[derive(Debug, Clone)]
 pub struct InvocationScan {
     pub name: String,
-    /// The whole invocation, `magic` through the closing `}`.
+    /// The whole invocation, the macro name through the closing `}`.
     pub span: Span,
-    /// The `magic ( name )` header, for diagnostics about the macro name.
+    /// The `name!` header, for diagnostics about the macro name.
     pub header_span: Span,
     /// The normalized region's extent in the original source.
     pub region_span: Span,
@@ -144,7 +144,7 @@ pub fn scan_magic(source: &str) -> (MagicScan, Vec<Diagnostic>) {
     let mut cursor = 0usize;
     while cursor < source.len() {
         // Transparent at the Checkmate level: comments and string literals
-        // (so the word `magic` inside either is never detected).
+        // (so the word `mega` inside either is never detected).
         if let Some(len) = comment_len(source, cursor, &scanner) {
             cursor += len;
             continue;
@@ -158,20 +158,32 @@ pub fn scan_magic(source: &str) -> (MagicScan, Vec<Diagnostic>) {
                 .unwrap_or_else(|| advance_after_block(source, cursor));
             continue;
         }
-        if let Some(word) = keyword_at(source, cursor, "magic") {
+        if let Some(word) = keyword_at(source, cursor, "mega") {
             let next = skip_inline_ws(source, cursor + word);
-            let end = if source[next..].starts_with('(') {
-                scan_invocation(source, cursor, &scanner, &mut scan, &mut errors)
-            } else if starts_ident(source, next) {
-                scan_magic_decl(source, cursor, &scanner, &mut scan, &mut errors)
+            if starts_ident(source, next) {
+                cursor = scan_magic_decl(source, cursor, &scanner, &mut scan, &mut errors)
+                    .unwrap_or_else(|| advance_after_block(source, cursor));
             } else {
                 errors.push(Diagnostic::parse(
-                    "expected `(` or a macro name after `magic`",
+                    "expected a macro name after `mega` (invocations are `name! { ... }`)",
                     Span::new(cursor, cursor + word),
                 ));
-                None
-            };
-            cursor = end.unwrap_or_else(|| advance_after_block(source, cursor));
+                cursor = advance_after_block(source, cursor);
+            }
+            continue;
+        }
+        // `name! { … }` invocations (§8.6): a dotted path whose `!` follows
+        // after (only) horizontal whitespace. `!=` is a different token, and
+        // `!` is otherwise a prefix operator, so `identifier … !` never
+        // occurs in ordinary Checkmate source.
+        if let Some((_, after_path)) = dotted_path(source, cursor) {
+            let bang = skip_inline_ws(source, after_path);
+            if source[bang..].starts_with('!') && !source[bang + 1..].starts_with('=') {
+                cursor = scan_invocation(source, cursor, &scanner, &mut scan, &mut errors)
+                    .unwrap_or_else(|| advance_after_block(source, cursor));
+                continue;
+            }
+            cursor = after_path;
             continue;
         }
         cursor += source[cursor..].chars().next().unwrap().len_utf8();
@@ -387,7 +399,7 @@ fn scan_grammar_body(
     }
 }
 
-/// Scans a `magic name(pattern) { template }` declaration. Returns the
+/// Scans a `mega name(pattern) { template }` declaration. Returns the
 /// offset just past the declaration, or `None` after recording a diagnostic.
 fn scan_magic_decl(
     source: &str,
@@ -396,11 +408,11 @@ fn scan_magic_decl(
     scan: &mut MagicScan,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
-    let mut cursor = skip_inline_ws(source, keyword_pos + "magic".len());
+    let mut cursor = skip_inline_ws(source, keyword_pos + "mega".len());
     cursor = skip_ws_and_comments(source, cursor, scanner);
     let Some((name, after_name)) = dotted_path(source, cursor) else {
         errors.push(Diagnostic::parse(
-            "expected a macro name after `magic`",
+            "expected a macro name after `mega`",
             Span::new(cursor, cursor),
         ));
         return None;
@@ -409,7 +421,7 @@ fn scan_magic_decl(
     let pattern_open = skip_ws_and_comments(source, after_name, scanner);
     if !source[pattern_open..].starts_with('(') {
         errors.push(Diagnostic::parse(
-            "expected `(` to open the magic pattern",
+            "expected `(` to open the mega pattern",
             Span::new(pattern_open, pattern_open),
         ));
         return None;
@@ -425,7 +437,7 @@ fn scan_magic_decl(
     let template_open = skip_ws_and_comments(source, pattern_close + 1, scanner);
     if !source[template_open..].starts_with('{') {
         errors.push(Diagnostic::parse(
-            "expected `{` to open the magic template",
+            "expected `{` to open the mega template",
             Span::new(template_open, template_open),
         ));
         return None;
@@ -450,34 +462,33 @@ fn scan_magic_decl(
     Some(template_close + 1)
 }
 
-/// Scans a `magic(name) { region }` invocation. The region is balanced under
-/// the composed profile of the referenced macro's entry grammar (§8.6); an
-/// unknown macro name falls back to the default profile (name resolution is
-/// the expansion pass's job, not the scanner's). Returns the offset just
-/// past the invocation, or `None` after recording a diagnostic.
+/// Scans a `name! { region }` invocation. `name_start` is the start of the
+/// already-spotted dotted path (the caller detected the `!`). The region is
+/// balanced under the composed profile of the referenced macro's entry
+/// grammar (§8.6); an unknown macro name falls back to the default profile
+/// (name resolution is the expansion pass's job, not the scanner's).
+/// Returns the offset just past the invocation, or `None` after recording a
+/// diagnostic.
 fn scan_invocation(
     source: &str,
-    keyword_pos: usize,
+    name_start: usize,
     scanner: &LexProfile,
     scan: &mut MagicScan,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
-    let header_start = keyword_pos;
-    let mut cursor = skip_inline_ws(source, keyword_pos + "magic".len());
-    cursor += 1; // `(`
-    cursor = skip_ws_and_comments(source, cursor, scanner);
-    let Some((path, after_name)) = dotted_path(source, cursor) else {
+    let header_start = name_start;
+    let Some((path, after_name)) = dotted_path(source, name_start) else {
         errors.push(Diagnostic::parse(
-            "expected a macro name inside `magic(…)`",
-            Span::new(cursor, cursor),
+            "expected a macro name before `!`",
+            Span::new(name_start, name_start),
         ));
         return None;
     };
-    let name_span = Span::new(cursor, after_name);
-    cursor = skip_ws_and_comments(source, after_name, scanner);
-    if !source[cursor..].starts_with(')') {
+    let name_span = Span::new(name_start, after_name);
+    let mut cursor = skip_inline_ws(source, after_name);
+    if !source[cursor..].starts_with('!') {
         errors.push(Diagnostic::parse(
-            "expected `)` to close `magic(…)`",
+            "expected `!` after the macro name",
             Span::new(cursor, cursor),
         ));
         return None;
@@ -485,7 +496,7 @@ fn scan_invocation(
     cursor += 1;
     cursor = skip_ws_and_comments(source, cursor, scanner);
     let header_span = Span::new(header_start, cursor);
-    // Heredoc form (§8.6): `magic(name) <<tag … tag` — the region extends
+    // Heredoc form (§8.6): `name! <<tag … tag` — the region extends
     // verbatim to the first line whose content is exactly `tag`; only the
     // edge trims of normalization apply. The zero-approximation escape
     // hatch for regions whose braces no composed profile can balance.
@@ -518,7 +529,7 @@ fn scan_invocation(
     }
     if !source[cursor..].starts_with('{') {
         errors.push(Diagnostic::parse(
-            "expected `{` or `<<tag` to open the magic region",
+            "expected `{` or `<<tag` to open the mega region",
             Span::new(cursor, cursor),
         ));
         return None;
@@ -638,9 +649,9 @@ fn scan_heredoc_region(
     Some(close_line_end)
 }
 
-/// Discovers nested `magic(name) { … }` invocations inside a region's
+/// Discovers nested `name! { … }` invocations inside a region's
 /// ISLANDS (§8.6): an island is a Checkmate hole in a template-literal
-/// string form, so a `magic(…)` there is a real invocation — discovered
+/// string form, so a `…!` there is a real invocation — discovered
 /// recursively, with spans anchored in the original source. Foreign text
 /// outside islands (including plain strings) stays inert.
 fn discover_nested_invocations(
@@ -726,7 +737,7 @@ fn walk_string_for_islands(
 }
 
 /// A miniature Checkmate-level scan over one island's content: finds
-/// `magic(name) { … }` invocations (and `<<tag` heredocs) and recurses into
+/// `name! { … }` invocations (and `<<tag` heredocs) and recurses into
 /// their regions.
 fn scan_island_checkmate(
     source: &str,
@@ -746,13 +757,13 @@ fn scan_island_checkmate(
             cursor += len;
             continue;
         }
-        if let Some(word) = keyword_at(source, cursor, "magic") {
-            let next = skip_inline_ws(source, cursor + word);
-            if source[next..].starts_with('(') {
+        if let Some((_, after_path)) = dotted_path(source, cursor) {
+            let bang = skip_inline_ws(source, after_path);
+            if source[bang..].starts_with('!') && !source[bang + 1..].starts_with('=') {
                 cursor = scan_invocation(source, cursor, &scanner, scan, errors).unwrap_or(end);
                 continue;
             }
-            cursor += word;
+            cursor = after_path;
             continue;
         }
         cursor += source[cursor..].chars().next().unwrap().len_utf8();
@@ -853,7 +864,7 @@ mod tests {
 
     #[test]
     fn finds_invocation_and_normalizes_region() {
-        let source = "int x = 1\nstr s = magic(json.value) {\n    \"host\"\n}\n";
+        let source = "int x = 1\nstr s = json.value! {\n    \"host\"\n}\n";
         let scan = scan_ok(source);
         assert_eq!(scan.invocations.len(), 1);
         let invocation = &scan.invocations[0];
@@ -864,15 +875,13 @@ mod tests {
             &source[invocation.region_span.start..invocation.region_span.end],
             "\"host\""
         );
-        // The invocation span covers `magic … }`.
-        assert!(
-            source[invocation.span.start..invocation.span.end].starts_with("magic(json.value)")
-        );
+        // The invocation span covers `name! … }`.
+        assert!(source[invocation.span.start..invocation.span.end].starts_with("json.value!"));
     }
 
     #[test]
     fn braces_inside_region_strings_do_not_close_the_region() {
-        let source = "magic(js.run) {\n    console.log(\"}\")\n}\nint x = 1\n";
+        let source = "js.run! {\n    console.log(\"}\")\n}\nint x = 1\n";
         let scan = scan_ok(source);
         assert_eq!(scan.invocations.len(), 1);
         assert_eq!(scan.invocations[0].region, "console.log(\"}\")");
@@ -882,7 +891,7 @@ mod tests {
 
     #[test]
     fn html_region_balances_strings_comments_and_prose_apostrophes() {
-        let source = "magic(html.fragment) {\n\
+        let source = "html.fragment! {\n\
             <!-- it's fine -->\n\
             <div class=\"hud\">x</div>\n\
             <p>don't</p>\n\
@@ -897,7 +906,7 @@ mod tests {
 
     #[test]
     fn region_normalization_trims_edges() {
-        let source = "magic(m) {  \n\n   body text   \n\n  }\n";
+        let source = "m! {  \n\n   body text   \n\n  }\n";
         let scan = scan_ok(source);
         assert_eq!(scan.invocations[0].region, "body text");
     }
@@ -914,7 +923,7 @@ grammar yaml {
     rule document { oneof { blockDoc => blockNode } }
 }
 
-magic value(yaml.document as doc) {
+mega value(yaml.document as doc) {
     @toValue($doc)
 }
 ";
@@ -951,10 +960,10 @@ grammar js {
     }
 
     #[test]
-    fn magic_word_inside_strings_and_comments_is_inert() {
+    fn invocation_word_inside_strings_and_comments_is_inert() {
         let source = "\
-// magic(fake) { not real }
-str s = \"magic(fake) { also not }\"
+// fake! { not real }
+str s = \"fake! { also not }\"
 int x = 1
 ";
         let scan = scan_ok(source);
@@ -962,16 +971,63 @@ int x = 1
     }
 
     #[test]
-    fn nested_magic_inside_a_region_stays_wholesale() {
-        let source = "magic(js.run) {\n    magic(json.value) { 1 }\n}\n";
+    fn nested_invocation_inside_a_region_stays_wholesale() {
+        // Outside islands the region text is inert foreign source; only the
+        // §8.6 island discovery may find nested invocations.
+        let source = "js.run! {\n    json.value! { 1 }\n}\n";
         let scan = scan_ok(source);
         assert_eq!(scan.invocations.len(), 1);
-        assert_eq!(scan.invocations[0].region, "magic(json.value) { 1 }");
+        assert_eq!(scan.invocations[0].region, "json.value! { 1 }");
+    }
+
+    #[test]
+    fn invocation_inside_an_island_is_discovered() {
+        let source = "\
+grammar js {
+    string  ( '`' multiline island ( \"${\" \"}\" ) )
+    rule program { each { statement } as stmts }
+}
+
+mega runIt(js.program as p) {
+    @emit($p)
+}
+
+str[] lines = runIt! {
+    const greeting = `Hello, ${ json.value! { \"world\" } }!`
+}
+";
+        let scan = scan_ok(source);
+        // The outer invocation plus the island-discovered nested one.
+        assert_eq!(scan.invocations.len(), 2);
+        let nested = scan
+            .invocations
+            .iter()
+            .find(|invocation| invocation.name == "json.value")
+            .expect("island invocation discovered");
+        assert_eq!(nested.region, "\"world\"");
+    }
+
+    #[test]
+    fn not_equal_does_not_start_an_invocation() {
+        // `!=` is one token: the `!` must never read as an invocation bang.
+        let source = "bool ok = 1 != 2\nbool same = 3 != 4\nint x = 1\n";
+        let scan = scan_ok(source);
+        assert!(scan.is_empty());
+    }
+
+    #[test]
+    fn heredoc_invocation_scans_verbatim_to_the_tag() {
+        let source = "ReNode m = reCompile! <<REGEX\n    ^a{2,3}b$\n    REGEX\nint x = 1\n";
+        let scan = scan_ok(source);
+        assert_eq!(scan.invocations.len(), 1);
+        assert_eq!(scan.invocations[0].name, "reCompile");
+        assert_eq!(scan.invocations[0].region, "^a{2,3}b$");
+        assert_eq!(&source[scan.invocations[0].span.end..], "\nint x = 1\n");
     }
 
     #[test]
     fn unknown_macro_region_uses_default_profile_and_still_scans() {
-        let source = "magic(ghost) {\n    { \"brace\": 1 }\n}\n";
+        let source = "ghost! {\n    { \"brace\": 1 }\n}\n";
         let scan = scan_ok(source);
         assert_eq!(scan.invocations.len(), 1);
         assert_eq!(scan.invocations[0].name, "ghost");
@@ -990,11 +1046,11 @@ grammar toml {
     rule keyval { $word key \"=\" value eol }
 }
 
-magic value(toml.document as doc) {
+mega value(toml.document as doc) {
     @toValue($doc)
 }
 
-str[] lines = magic(value) {
+str[] lines = value! {
     [table]  # { not a brace }
     x = 1
 }
@@ -1013,11 +1069,11 @@ str[] lines = magic(value) {
         // The pattern text contains a brace literal and a paren literal in
         // strings; the declaration balancer must be string-aware.
         let source = "\
-magic bound(re.pattern as p) {
+mega bound(re.pattern as p) {
     reQuantified($p)
 }
 
-magic reQuantified({\"{\" $int min \"}\"} as q) {
+mega reQuantified({\"{\" $int min \"}\"} as q) {
     $q
 }
 ";
@@ -1036,7 +1092,7 @@ magic reQuantified({\"{\" $int min \"}\"} as q) {
                 .any(|error| error.message().contains("grammar name"))
         );
 
-        let (scan, errors) = scan_magic("magic {\nint x = 1\n");
+        let (scan, errors) = scan_magic("mega {\nint x = 1\n");
         assert!(scan.magics.is_empty() && scan.invocations.is_empty());
         assert!(
             errors
@@ -1044,7 +1100,7 @@ magic reQuantified({\"{\" $int min \"}\"} as q) {
                 .any(|error| error.message().contains("macro name"))
         );
 
-        let (_, errors) = scan_magic("magic(m) {\nnever closed\n");
+        let (_, errors) = scan_magic("m! {\nnever closed\n");
         assert!(
             errors
                 .iter()
@@ -1063,11 +1119,11 @@ grammar py {
     rule def { $word name eol }
 }
 
-magic def(py.def as d) {
+mega def(py.def as d) {
     $d.name
 }
 
-magic(def) {
+def! {
     it's the region that never closes
 ";
         let (_, errors) = scan_magic(source);

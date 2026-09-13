@@ -63,12 +63,12 @@ grammar echo {
 __RULES__
 }
 
-magic echoIt(echo.__ENTRY__ as w) {
+mega echoIt(echo.__ENTRY__ as w) {
 __TEMPLATE__
 }
 
 int main() {
-    str got = magic(echoIt) {
+    str got = echoIt! {
 __REGION__
     }
     if (got != "__PIN__") { return 1 }
@@ -165,12 +165,12 @@ grammar g {
     rule ident { scan [A-Za-z0-9_] as name }
 }
 
-magic decl(g.ident as x) {
+mega decl(g.ident as x) {
     int $x.name = 40 + 2
 }
 
 int main() {
-    magic(decl) { answer }
+    decl! { answer }
     if (answer != 42) { return 1 }
     return 0
 }
@@ -200,12 +200,12 @@ grammar lines {
     }
 }
 
-magic linesOut(lines.entry as e) {
+mega linesOut(lines.entry as e) {
     $"{$e.value}|{$e.age}"
 }
 
 int main() {
-    str got = magic(linesOut) {
+    str got = linesOut! {
         name: ada # trailing comment
         age: 36
     }
@@ -234,12 +234,12 @@ grammar lr {
     }
 }
 
-magic lrOut(lr.entry as e) {
+mega lrOut(lr.entry as e) {
     $"{$e.value}|{$e.age}"
 }
 
 int main() {
-    str got = magic(lrOut) {
+    str got = lrOut! {
         name: ada # trailing comment
         age: 36
     }
@@ -262,12 +262,12 @@ grammar flow {
     }
 }
 
-magic listOut(flow.list as l) {
+mega listOut(flow.list as l) {
     $l.items.length
 }
 
 int main() {
-    int n = magic(listOut) {
+    int n = listOut! {
         [11,
          22,
          33]
@@ -299,7 +299,7 @@ grammar tags {
     }
 }
 
-magic tagOut(tags.tag as t) {
+mega tagOut(tags.tag as t) {
     match ($t) {
         br    => "void"
         img   => "void"
@@ -308,9 +308,9 @@ magic tagOut(tags.tag as t) {
 }
 
 int main() {
-    if (magic(tagOut) { br } != "void") { return 1 }
-    if (magic(tagOut) { IMG } != "void") { return 2 }
-    if (magic(tagOut) { div } != "div") { return 3 }
+    if (tagOut! { br } != "void") { return 1 }
+    if (tagOut! { IMG } != "void") { return 2 }
+    if (tagOut! { div } != "div") { return 3 }
     return 0
 }
 "##,
@@ -333,13 +333,13 @@ grammar reps {
     }
 }
 
-magic repOut(reps.digits as r) {
+mega repOut(reps.digits as r) {
     $r.nums.length
 }
 
 int main() {
-    if (magic(repOut) { 1, 2 } != 2) { return 1 }
-    if (magic(repOut) { 1, 2, 3 } != 3) { return 2 }
+    if (repOut! { 1, 2 } != 2) { return 1 }
+    if (repOut! { 1, 2, 3 } != 3) { return 2 }
     return 0
 }
 "##,
@@ -364,13 +364,13 @@ grammar opt {
     }
 }
 
-magic optOut(opt.kv as k) {
+mega optOut(opt.kv as k) {
     [when present($k.value) { $"{$k.key}={$k.value}" } else { $"{$k.key}-none" }]
 }
 
 int main() {
-    if (magic(optOut) { count=7 } != "count=7") { return 1 }
-    if (magic(optOut) { flag } != "flag-none") { return 2 }
+    if (optOut! { count=7 } != "count=7") { return 1 }
+    if (optOut! { flag } != "flag-none") { return 2 }
     return 0
 }
 "##,
@@ -388,13 +388,13 @@ grammar opt2 {
     }
 }
 
-magic optOut2(opt2.kv as k) {
+mega optOut2(opt2.kv as k) {
     [when present($k.rest) { $"{$k.key}={$k.rest}" } else { $"{$k.key}-none" }]
 }
 
 int main() {
-    if (magic(optOut2) { count=7 } != "count=7") { return 1 }
-    if (magic(optOut2) { flag } != "flag-none") { return 2 }
+    if (optOut2! { count=7 } != "count=7") { return 1 }
+    if (optOut2! { flag } != "flag-none") { return 2 }
     return 0
 }
 "##,
@@ -417,12 +417,12 @@ grammar looks {
     }
 }
 
-magic lookOut(looks.item as l) {
+mega lookOut(looks.item as l) {
     $"{$l.w}"
 }
 
 int main() {
-    if (magic(lookOut) { one } != "one") { return 1 }
+    if (lookOut! { one } != "one") { return 1 }
     return 0
 }
 "##,
@@ -441,12 +441,12 @@ grammar raws {
     }
 }
 
-magic rawOut(raws.padded as p) {
+mega rawOut(raws.padded as p) {
     $"{$p.tight}"
 }
 
 int main() {
-    if (magic(rawOut) { a  b } != "a  b") { return 1 }
+    if (rawOut! { a  b } != "a  b") { return 1 }
     return 0
 }
 "##,
@@ -469,12 +469,12 @@ grammar frags {
     }
 }
 
-magic fragOut(frags.all as a) {
+mega fragOut(frags.all as a) {
     $"{$a.w}|{$a.id}|{$a.t}|" + $a.i + "|" + $a.f + "|" + $a.s
 }
 
 int main() {
-    if (magic(fragOut) { hello, world, my-tag, 42, 2.5, "done" }
+    if (fragOut! { hello, world, my-tag, 42, 2.5, "done" }
         != "hello|world|my-tag|42|2.5|done") { return 1 }
     return 0
 }
@@ -496,12 +496,12 @@ grammar tail {
     }
 }
 
-magic tailOut(tail.doc as d) {
+mega tailOut(tail.doc as d) {
     $"{$d.body}"
 }
 
 int main() {
-    str got = magic(tailOut) <<END
+    str got = tailOut! <<END
 intro: everything after, exactly as written
 END
     if (got != "everything after, exactly as written") { return 1 }
@@ -527,7 +527,7 @@ grammar tpl {
     }
 }
 
-magic tplOut(tpl.banner as b) {
+mega tplOut(tpl.banner as b) {
     match ($b) {
         banner => [[each in $body {
             match ($item) {
@@ -539,7 +539,7 @@ magic tplOut(tpl.banner as b) {
 }
 
 int main() {
-    str[] got = magic(tplOut) {
+    str[] got = tplOut! {
         hello {{userName}} !
     }
     if (got.length != 3) { return 1 }
@@ -566,17 +566,17 @@ grammar live {
     }
 }
 
-magic calcEval(live.calc as c) {
+mega calcEval(live.calc as c) {
     ($c.lhs) + ($c.rhs)
 }
 
-magic calcEcho(live.calc as c) {
+mega calcEcho(live.calc as c) {
     $"{$c.lhs}|{$c.rhs}"
 }
 
 int main() {
-    if (magic(calcEval) { 2 + 3 * 4 ; 5 + 6 } != 25) { return 1 }
-    if (magic(calcEcho) { 2 + 3 * 4 ; 5 + 6 } != "2 + 3 * 4|5 + 6") { return 2 }
+    if (calcEval! { 2 + 3 * 4 ; 5 + 6 } != 25) { return 1 }
+    if (calcEcho! { 2 + 3 * 4 ; 5 + 6 } != "2 + 3 * 4|5 + 6") { return 2 }
     return 0
 }
 "##,
@@ -595,13 +595,13 @@ grammar g {
     rule num { $int v }
 }
 
-magic checked(g.num as n) {
+mega checked(g.num as n) {
     require($n.v > 10, "value must exceed ten")
     $n.v
 }
 
 int main() {
-    return magic(checked) { 5 }
+    return checked! { 5 }
 }
 "##;
     expand_err(source, "value must exceed ten");
@@ -623,7 +623,7 @@ grammar inner {
     skip [ ' ' ]
     rule num { $int v }
 }
-magic innerNum(inner.num as n) {
+mega innerNum(inner.num as n) {
     $n.v
 }
 
@@ -632,13 +632,13 @@ grammar outer {
     string ( '`' multiline island ( "${" "}" ) )
     rule line { "say" ":" $str text }
 }
-magic outerSay(outer.line as l) {
+mega outerSay(outer.line as l) {
     $l.text
 }
 
 int main() {
-    str got = magic(outerSay) {
-        say: `value ${magic(innerNum) { 41 }}!`
+    str got = outerSay! {
+        say: `value ${innerNum! { 41 }}!`
     }
     if (got != "value ${41}!") { return 1 }
     return 0
@@ -655,12 +655,12 @@ grammar free {
     skip [ ' ' ]
     rule t { $text x }
 }
-magic freeEcho(free.t as t) {
+mega freeEcho(free.t as t) {
     $"{$t.x}"
 }
 
 int main() {
-    str got = magic(freeEcho) <<RAWTEXT
+    str got = freeEcho! <<RAWTEXT
   keep } braces { and " quotes exactly
 RAWTEXT
     if (got != "keep } braces { and \" quotes exactly") { return 1 }
@@ -681,11 +681,11 @@ grammar g {
     skip [ ' ' ]
     rule num { $int v }
 }
-magic showNum(g.num as n) {
+mega showNum(g.num as n) {
     $n.v
 }
 int main() {
-    return magic(showNum) { 7 }
+    return showNum! { 7 }
 }
 "##;
     let a = expand_source_with(source, ExpandOptions::default()).expect("expand a");
@@ -699,7 +699,7 @@ int main() {
     let provenance =
         expand_source_with(source, ExpandOptions { provenance: true }).expect("expand p");
     assert!(
-        provenance.expanded.contains("// @ magic(showNum)"),
+        provenance.expanded.contains("// @ showNum!"),
         "provenance annotates the root site: {}",
         provenance.expanded
     );
@@ -711,7 +711,7 @@ int main() {
 fn undeclared_macros_are_rejected() {
     let source = r##"
 int main() {
-    str s = magic(nope) { x }
+    str s = nope! { x }
     return 0
 }
 "##;
@@ -726,16 +726,16 @@ grammar g {
     rule t { $text x }
 }
 
-magic loop(g.t as t) {
-    magic(loop) {
-        magic(loop) {
+mega loop(g.t as t) {
+    loop! {
+        loop! {
             $t.x
         }
     }
 }
 
 int main() {
-    str s = magic(loop) { seed }
+    str s = loop! { seed }
     return 0
 }
 "##;

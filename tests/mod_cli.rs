@@ -236,7 +236,7 @@ fn megaprogram_modules_expand_before_linking() {
     temp.write("mod.toml", MANIFEST);
     temp.write(
         "src/gen.cm",
-        "magic stepper($word name \"(\" $int from \"..\" $int to \")\") {\n    int $name(int current) {\n        if (current >= $to) {\n            return $from\n        }\n        return current + 1\n    }\n}\n\nmagic(stepper) { page ( 0 .. 10 ) }\n",
+        "mega stepper($word name \"(\" $int from \"..\" $int to \")\") {\n    int $name(int current) {\n        if (current >= $to) {\n            return $from\n        }\n        return current + 1\n    }\n}\n\nstepper! { page ( 0 .. 10 ) }\n",
     );
     temp.write(
         "src/main.cm",

@@ -215,9 +215,9 @@ mod tests {
     #[test]
     fn expansion_diagnostics_anchor_for_megaprogram_files() {
         let db = Database::default();
-        // An unterminated magic region fails expansion; a clean but broken
+        // An unterminated mega region fails expansion; a clean but broken
         // template body fails expansion too (template compile error).
-        let broken = "magic twice(\n    $int value\n) {\n    ???\n}\n\nmagic(twice) {\n    21\n}\n";
+        let broken = "mega twice(\n    $int value\n) {\n    ???\n}\n\ntwice! {\n    21\n}\n";
         let file = SourceFile::new(&db, broken.to_string(), FileKind::Script);
         let diags = diagnostics(&db, file);
         assert!(!diags.is_empty(), "expansion errors surface to the editor");

@@ -32,7 +32,7 @@
 // `failures=N`, where 0 == success.
 //
 // Deliberately out of scope here (per owner direction): host schema imports
-// and capability namespaces (§2.3, §9), megaprogramming `magic` (§8), and the
+// and capability namespaces (§2.3, §9), megaprogramming `mega` (§8), and the
 // bytecode / AOT backends (§5) — this file targets the tree-walking
 // interpreter. impl targets are therefore local structs/enums or dotted
 // host-style paths (§10.4 syntax); interface completeness against a schema

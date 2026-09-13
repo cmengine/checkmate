@@ -212,9 +212,9 @@ fn megaprogram_sources_expand_before_checking() {
         "rule number {\noptional { \"-\" }\n",
         "oneof { zero => \"0\", pos => ( [1-9] as first scan [0-9] as rest ) }\n",
         "optional { \".\" scan [0-9] as frac }\n}\n}\n",
-        "magic value(json.value as v) {\n@toValue($v)\n}\n",
+        "mega value(json.value as v) {\n@toValue($v)\n}\n",
     );
-    // The grammar/magic DECLARATION alone must expand away cleanly; the
+    // The grammar/mega DECLARATION alone must expand away cleanly; the
     // empty program that remains has no entry points.
     let program = compile(source).expect("declaration-only megaprogram compiles");
     assert!(program.entry_points().is_empty());
@@ -231,8 +231,8 @@ fn a_broken_megaprogram_region_fails_with_rendered_diagnostics() {
     // An invocation whose pattern cannot consume its region fails expansion.
     let error = compile(concat!(
         "grammar g {\nskip [ ' ' ]\nrule item {\n\"a\" $word w\n}\n}\n",
-        "magic item(g.item as i) {\nint x = 1\n}\n",
-        "magic(item) {\nb\n}\n",
+        "mega item(g.item as i) {\nint x = 1\n}\n",
+        "item! {\nb\n}\n",
     ))
     .expect_err("region must fail to match");
     assert!(!error.messages().is_empty(), "rendered: {error}");

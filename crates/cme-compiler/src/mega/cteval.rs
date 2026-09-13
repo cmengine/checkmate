@@ -827,11 +827,11 @@ int twice(int x) {
     return x * 2
 }
 
-magic jsonNum(json.value as v) {
+mega jsonNum(json.value as v) {
     @twice($v.n)
 }
 
-magic jsonStr(json.value as v) {
+mega jsonStr(json.value as v) {
     @twiceText($v.s)
 }
 
@@ -840,7 +840,7 @@ code twiceText(str s) {
 }
 
 int main() {
-    return magic(jsonNum) { 42 }
+    return jsonNum! { 42 }
 }
 "#;
 
@@ -859,8 +859,8 @@ int main() {
     #[test]
     fn code_returning_functions_splice_raw() {
         let source = DOUBLE_PROGRAM.replace(
-            "return magic(jsonNum) { 42 }",
-            "str joined = magic(jsonStr) { \"ab\" }\n    return 0",
+            "return jsonNum! { 42 }",
+            "str joined = jsonStr! { \"ab\" }\n    return 0",
         );
         let outcome = expand_source(&source).expect("expansion succeeds");
         // `code` splices raw: `abab`, unquoted.
@@ -885,12 +885,12 @@ bool isVoid(str name) {
     return name == "br" || name == "img"
 }
 
-magic voidTag(html.tag as t) {
+mega voidTag(html.tag as t) {
     $"void:{ $t.name }"
 }
 
 str main() {
-    return magic(voidTag) { <br> }
+    return voidTag! { <br> }
 }
 "#;
         let outcome = expand_source(source).expect("expansion succeeds");
@@ -910,13 +910,13 @@ grammar json {
     }
 }
 
-magic calc(json.value as v) {
+mega calc(json.value as v) {
     let e = cm.parseExpr("1 + 2 * 3")
     $e
 }
 
 int main() {
-    return magic(calc) { 7 }
+    return calc! { 7 }
 }
 "#;
         let outcome = expand_source(source).expect("expansion succeeds");
@@ -949,7 +949,7 @@ grammar json {
     }
 }
 
-magic greet(json.value as v) {
+mega greet(json.value as v) {
     cm.code.call("usePy", cm.code.str($v.s), 5)
 }
 
@@ -958,7 +958,7 @@ int usePy(str a, int b) {
 }
 
 int main() {
-    return magic(greet) { "x" }
+    return greet! { "x" }
 }
 "#;
         let outcome = expand_source(source).expect("expansion succeeds");
@@ -981,11 +981,11 @@ grammar tag {
     }
 }
 
-magic mkFn(tag.word as t) {
+mega mkFn(tag.word as t) {
     cm.code.fn("int", $"gen{$t.w}", "int x", "return x + 1")
 }
 
-magic(mkFn) {
+mkFn! {
     Double
 }
 
@@ -1023,13 +1023,13 @@ bool isString(Capture v) {
     }
 }
 
-magic pick(json.value as v) {
+mega pick(json.value as v) {
     let again = cm.parse(json.value, "\"hi\"")
     [when @isString(again) { "was-string" } else { "other" }]
 }
 
 str main() {
-    return magic(pick) { 1 }
+    return pick! { 1 }
 }
 "#;
         let outcome = expand_source(source).expect("expansion succeeds");
@@ -1073,12 +1073,12 @@ JsonTree toTree(Capture v) {
     }
 }
 
-magic tree(json.value as v) {
+mega tree(json.value as v) {
     @toTree($v)
 }
 
 int main() {
-    JsonTree t = magic(tree) { 7 }
+    JsonTree t = tree! { 7 }
     match (t) {
         Int(int n) => { if (n != 7) { return 1 } }
         _ => { return 2 }
@@ -1107,7 +1107,7 @@ grammar json {
     }
 }
 
-magic loop(json.value as v) {
+mega loop(json.value as v) {
     @loop(1)
 }
 
@@ -1116,7 +1116,7 @@ int loop(int x) {
 }
 
 int main() {
-    return magic(loop) { 1 }
+    return loop! { 1 }
 }
 "#;
         let error = std::thread::Builder::new()
@@ -1147,12 +1147,12 @@ grammar json {
     }
 }
 
-magic m(json.value as v) {
+mega m(json.value as v) {
     @nope($v)
 }
 
 int main() {
-    return magic(m) { 1 }
+    return m! { 1 }
 }
 "#;
         let error = expand_source(source).expect_err("unknown function is rejected");
@@ -1192,12 +1192,12 @@ int spin(int x) {
     return x
 }
 
-magic jsonSpin(json.value as v) {
+mega jsonSpin(json.value as v) {
     @spin($v.n)
 }
 
 int main() {
-    return magic(jsonSpin) { 1 }
+    return jsonSpin! { 1 }
 }
 "#;
         let error = expand_source(source).expect_err("an infinite loop must not hang");

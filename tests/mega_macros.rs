@@ -86,7 +86,7 @@ grammar cfg {
     }
 }
 
-magic cfgMap(cfg.document as d) {
+mega cfgMap(cfg.document as d) {
     {
         [each in $d.pairs {
             $"{$item.key}": $"{$item.value}"
@@ -95,7 +95,7 @@ magic cfgMap(cfg.document as d) {
 }
 
 int main() {
-    map<str, str> config = magic(cfgMap) {
+    map<str, str> config = cfgMap! {
         host = "db.local",          # the primary host
         port = 5432,
         env = prod-x
@@ -133,7 +133,7 @@ grammar cfg2 {
     }
 }
 
-magic cfgMap2(cfg2.document as d) {
+mega cfgMap2(cfg2.document as d) {
     {
         [each in $d.pairs {
             $"{$item.key}": match ($item) {
@@ -144,7 +144,7 @@ magic cfgMap2(cfg2.document as d) {
 }
 
 int main() {
-    map<str, str> config = magic(cfgMap2) {
+    map<str, str> config = cfgMap2! {
         host = "db.local"
     }
     return 0
@@ -177,7 +177,7 @@ grammar hlist {
     }
 }
 
-magic listStrings(hlist.list as l) {
+mega listStrings(hlist.list as l) {
     [
         [each in $l.items {
             $"li: {$item.body}"
@@ -186,7 +186,7 @@ magic listStrings(hlist.list as l) {
 }
 
 int main() {
-    str[] got = magic(listStrings) {
+    str[] got = listStrings! {
         <ul>
             <li>alpha</li>
             <!-- a comment that must not become an item -->
@@ -233,13 +233,13 @@ code mkArray(str unit, int n) {
     return "[" + repeated(unit, n) + "]"
 }
 
-magic mkFill(fill.shape as s) {
+mega mkFill(fill.shape as s) {
     int[] $s.name = @mkArray($"{$s.unit}", $s.count)
 }
 
 int main() {
-    magic(mkFill) { ones = 4 ; "1" }
-    magic(mkFill) { squares = 3 ; "9" }
+    mkFill! { ones = 4 ; "1" }
+    mkFill! { squares = 3 ; "9" }
     if (ones.length != 4 || ones[3] != 1) { return 1 }
     if (squares.length != 3 || squares[2] != 9) { return 2 }
     return 0
@@ -262,11 +262,11 @@ grammar tag {
     }
 }
 
-magic mkGetter(tag.shape as s) {
+mega mkGetter(tag.shape as s) {
     @emitGetter($"{$s.name}", $s.v)
 }
 
-magic(mkGetter) { answer ; 42 }
+mkGetter! { answer ; 42 }
 
 code emitGetter(str name, int v) {
     return "int " + name + "_value() {\n    return " + v + "\n}"
@@ -335,14 +335,14 @@ int leaves(Capture v) {
     }
 }
 
-magic leafCount(tree.node as n) {
+mega leafCount(tree.node as n) {
     @leaves($n)
 }
 
 int main() {
-    if (magic(leafCount) { 5 } != 1) { return 1 }
-    if (magic(leafCount) { (1, 2, 3) } != 3) { return 2 }
-    if (magic(leafCount) { (1, (2, 3), ((4, 5), 6)) } != 6) { return 3 }
+    if (leafCount! { 5 } != 1) { return 1 }
+    if (leafCount! { (1, 2, 3) } != 3) { return 2 }
+    if (leafCount! { (1, (2, 3), ((4, 5), 6)) } != 6) { return 3 }
     return 0
 }
 "##,
@@ -380,14 +380,14 @@ grammar jext extends base {
     }
 }
 
-magic baseLit(base.lit as b) {
+mega baseLit(base.lit as b) {
     match ($b) {
         quoted => $"q:{ $b.text }"
         word   => $"w:{ $b.text }"
     }
 }
 
-magic jextLit(jext.lit as j) {
+mega jextLit(jext.lit as j) {
     match ($j) {
         word   => $"w:{ $j.text }"
         quoted => $"q:{ $j.text }"
@@ -395,10 +395,10 @@ magic jextLit(jext.lit as j) {
 }
 
 int main() {
-    if (magic(baseLit) { "hi" } != "q:hi") { return 1 }
-    if (magic(baseLit) { yo } != "w:yo") { return 2 }
-    if (magic(jextLit) { yo } != "w:yo") { return 3 }
-    if (magic(jextLit) { "hi" } != "q:hi") { return 4 }
+    if (baseLit! { "hi" } != "q:hi") { return 1 }
+    if (baseLit! { yo } != "w:yo") { return 2 }
+    if (jextLit! { yo } != "w:yo") { return 3 }
+    if (jextLit! { "hi" } != "q:hi") { return 4 }
     return 0
 }
 "##,
@@ -415,7 +415,7 @@ int main() {
 fn inline_entry_generates_stepper_functions() {
     expand_run(
         r##"
-magic stepper($word name "(" $int from ".." $int to ")") {
+mega stepper($word name "(" $int from ".." $int to ")") {
     int $name(int current) {
         if (current >= $to) {
             return $from
@@ -424,8 +424,8 @@ magic stepper($word name "(" $int from ".." $int to ")") {
     }
 }
 
-magic(stepper) { page ( 0 .. 10 ) }
-magic(stepper) { depth ( 1 .. 5 ) }
+stepper! { page ( 0 .. 10 ) }
+stepper! { depth ( 1 .. 5 ) }
 
 int main() {
     if (page(9) != 10) { return 1 }
@@ -467,7 +467,7 @@ grammar nest2 {
     }
 }
 
-magic nestStrings(nest2.doc as d) {
+mega nestStrings(nest2.doc as d) {
     [
         [each in $d.items {
             $"node:{ $item.name }"
@@ -476,7 +476,7 @@ magic nestStrings(nest2.doc as d) {
 }
 
 int main() {
-    str[] got = magic(nestStrings) {
+    str[] got = nestStrings! {
         <html>
             <body>hi</body>
         </html>
@@ -507,12 +507,12 @@ grammar nest4 {
     }
 }
 
-magic nestEcho(nest4.element as e) {
+mega nestEcho(nest4.element as e) {
     $"ok"
 }
 
 int main() {
-    str s = magic(nestEcho) {
+    str s = nestEcho! {
         <a><a>x</a></a>
     }
     return 0
@@ -549,7 +549,7 @@ grammar tpl2 {
     }
 }
 
-magic bannerParts(tpl2.banner as b) {
+mega bannerParts(tpl2.banner as b) {
     [
         [each in $b.parts {
             match ($item) {
@@ -561,7 +561,7 @@ magic bannerParts(tpl2.banner as b) {
 }
 
 int main() {
-    str[] got = magic(bannerParts) {
+    str[] got = bannerParts! {
         total [[count]] and [[42]] end
     }
     if (got.length != 5) { return 1 }
@@ -598,7 +598,7 @@ grammar json2 {
     }
 }
 
-magic pairEcho(json2.pair as p) {
+mega pairEcho(json2.pair as p) {
     match ($p.v) {
         number => $"{$p.key}=<num {$p.v.n}>"
         text   => $"{$p.key}=<str {$p.v.s}>"
@@ -606,8 +606,8 @@ magic pairEcho(json2.pair as p) {
 }
 
 int main() {
-    if (magic(pairEcho) { "port" : 8080 } != "port=<num 8080>") { return 1 }
-    if (magic(pairEcho) { "name" : "atlas" } != "name=<str atlas>") { return 2 }
+    if (pairEcho! { "port" : 8080 } != "port=<num 8080>") { return 1 }
+    if (pairEcho! { "name" : "atlas" } != "name=<str atlas>") { return 2 }
     return 0
 }
 "##,
@@ -644,12 +644,12 @@ bool positive(int n) {
     return n > 0
 }
 
-magic shapeEcho(valid.shape as s) {
+mega shapeEcho(valid.shape as s) {
     $"{$s.code}/{$s.n}"
 }
 
 int main() {
-    if (magic(shapeEcho) { code ; 7 } != "code/7") { return 1 }
+    if (shapeEcho! { code ; 7 } != "code/7") { return 1 }
     return 0
 }
 "##,
@@ -668,12 +668,12 @@ grammar valid2 {
     }
 }
 
-magic shapeEcho(valid2.shape as s) {
+mega shapeEcho(valid2.shape as s) {
     $"{$s.code}"
 }
 
 int main() {
-    str s = magic(shapeEcho) { mixedCase }
+    str s = shapeEcho! { mixedCase }
     return 0
 }
 "##,
@@ -693,12 +693,12 @@ grammar valid3 {
     }
 }
 
-magic shapeEcho(valid3.shape as s) {
+mega shapeEcho(valid3.shape as s) {
     $"{$s.code}"
 }
 
 int main() {
-    str s = magic(shapeEcho) { mixedCase }
+    str s = shapeEcho! { mixedCase }
     return 0
 }
 "##,

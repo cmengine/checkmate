@@ -300,11 +300,11 @@ fn megaprogram_modules_expand_before_linking() {
             "rule number {\noptional { \"-\" }\n",
             "oneof { zero => \"0\", pos => ( [1-9] as first scan [0-9] as rest ) }\n",
             "optional { \".\" scan [0-9] as frac }\n}\n}\n",
-            "magic value(json.value as v) {\n@toValue($v)\n}\n",
+            "mega value(json.value as v) {\n@toValue($v)\n}\n",
             "int total() {\nreturn 21\n}\n",
         ),
     );
-    // The module contains only a grammar/magic DECLARATION; expansion must
+    // The module contains only a grammar/mega DECLARATION; expansion must
     // strip it, leaving the function to link and run. A mod's top level
     // admits only declarations — no loose statements.
     let program = Engine::new()

@@ -54,6 +54,16 @@ cargo run --features cli -- expand magic.cm
 
 This writes `magic_expanded.cm` side by side with the original — pure Checkmate, every magic invocation replaced by its generated code — and then parses and checks that file. Add `--provenance` to annotate each root magic site with a `// @ magic(name) src:line:col` comment; without the flag the output is byte-deterministic. Expansion runs per file inside a mod too: each module's megaprograms expand before the mod links into one program.
 
+## Language Server: `cme lsp`
+
+The developer toolchain ships as one binary, and the language server rides in it:
+
+```sh
+cargo run --features cli -- lsp
+```
+
+`cme lsp` speaks LSP over stdio (WHITEPAPER §14). Diagnostics stream on open and edit — lexer, parser, validator, type checker, §8 megaprogram expansion, and §9 schema pipelines all report into the editor. Hover shows resolved signatures and crystallized `infer` types, completion covers struct fields and enum variants after `.`, named arguments inside calls, import segments, and scope names, and go-to-definition, find-references, document symbols, and semantic tokens are shadowing-aware. Files that mention megaprograms surface expansion diagnostics (anchored in the original text) plus a `cme/expand` custom request returning the expansion preview; their parse/check spans live in expanded-text coordinates, so they are not published into such buffers. The analysis is incremental through [salsa](https://github.com/salsa-rs/salsa): every document is a query input, and an edit recomputes only what it invalidated. The [Zed extension](editors/zed/README.md) launches `cme lsp` automatically.
+
 ## Host Embedding APIs (Rust and C)
 
 Checkmate embeds through the WHITEPAPER §13 host APIs over the shipped front end and tree-walking interpreter. Programs load from a source text, a `.cm` file, or a whole §10 mod tree; every load applies the same gate the CLI applies (megaprogram expansion when present, parse, standalone-import check, type check), so a program that produced a diagnostic is never invocable. Contexts carry the §5.5 execution limits — fuel, wall-clock deadline, call depth — per invocation, and hosts invoke top-level functions or §10.4 impl members (`engine.gamemode.OnTick`-style) — with the §9 schema system active, loads gate on the registered contract and capability calls dispatch to host providers. Invocations also enforce the §5.7 reentrancy prohibition: a capability dispatched mid-invocation cannot invoke back into the same context (the nested call fails with `ErrorKind::Reentrant`; the C ABI reports it as `CM_ERROR_INVALID_ARG`), while different contexts and other threads stay free.
@@ -150,12 +160,13 @@ The repository is a Cargo workspace with focused crates:
 | `cme-api` | Rust host embedding API (§13.1): `Engine`, `CompiledProgram`, `Context`, `ExecutionLimits`, schema registration, capability providers | Working over source files and mod trees, schema-gated |
 | `cme-ffi` | Stable C host API (§13.2): `cme.h`, `cm_*` ABI, staticlib + cdylib, schema + provider surface | Working; the C host app runs in `cargo test` |
 | `cme-schema-macro` | `cme_schema_bindings!` — compile-time-verified Rust host bindings from `.cm` schema files (§9.6) | Working; capability traits, proxies, descriptors |
+| `cme-lsp` | Language server (`cme lsp`): salsa incremental analysis, real-time diagnostics, hover, completion, definition, references, document symbols, semantic tokens, megaprogram expansion preview | Working over single files and §9 schema files; serves stdio from the unified `cme` binary |
 | `cme-runtime` | Runtime services and built-ins | Placeholder |
 | `cme` | Facade package and optional CLI | Working lex/ast/check/run/expand/schema/codegen-c toolchain; check/ast/run accept mod directories and `--schema` contracts |
 | `apps/rust_host` | Rust host application (§13.1 consumer) | Loads file/mod, limits flags, `--schema` registration, and `--schema-demo`: the full generated-bindings flow (compile-time-verified provider, typed proxies) |
 | `apps/c_host` | C host application (§13.2 consumer) | 246 self-checks incl. the schema flow, the §5.7 reentrancy rejection, AND the generated schema header consumed for real, run by `cargo test` and standalone |
 
-The root `cme` package exposes workspace crates through optional `core`, `compiler`, `interp`, `runtime`, `api`, and `schema-macro` features. Enabling `cli` enables the toolchain crates; `api` enables the Rust host API (flat re-exports `Engine`, `ExecutionLimits`, `CompiledProgram`, `Context`, `Value`); `schema-macro` enables `cme::cme_schema_bindings`. The default build intentionally exposes no root APIs.
+The root `cme` package exposes workspace crates through optional `core`, `compiler`, `interp`, `runtime`, `api`, `schema-macro`, and `lsp` features. Enabling `cli` enables the toolchain crates plus the language server; `api` enables the Rust host API (flat re-exports `Engine`, `ExecutionLimits`, `CompiledProgram`, `Context`, `Value`); `schema-macro` enables `cme::cme_schema_bindings`. The default build intentionally exposes no root APIs.
 
 ## Development
 

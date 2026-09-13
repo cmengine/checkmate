@@ -1,12 +1,16 @@
 id = "checkmate"
 name = "Checkmate"
-version = "0.1.0"
+version = "0.2.0"
 schema_version = 1
 authors = ["cmengine"]
-description = "Checkmate (CME) language support: syntax highlighting, brackets, outline, indentation, and text objects for .cm scripts, mods, and schema files."
+description = "Checkmate (CME) language support: syntax highlighting, brackets, outline, indentation, text objects, and the `cme` language server (diagnostics, hover, completion, definition, references, semantic tokens) for .cm scripts, mods, and schema files."
 repository = "https://github.com/cmengine/checkmate"
 
 [grammars.checkmate]
 repository = "file:///Users/matin/source/checkmate"
 rev = "e630671e1c565a6df25bde7de0e41a4f5bb0b42a"
 path = "grammars/tree-sitter-checkmate"
+
+[language_servers.cme]
+name = "Checkmate LSP"
+languages = ["Checkmate"]

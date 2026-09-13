@@ -1,0 +1,15 @@
+[package]
+name = "checkmate-zed"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# The extension is built by Zed against the wasm32-wasip1 target, outside
+# the compiler workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

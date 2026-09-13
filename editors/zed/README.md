@@ -13,6 +13,19 @@ schema files.
 - **Syntax highlighting** mapped onto standard Zed captures (`@keyword`,
   `@type`, `@function`, `@string.special`, `@embedded`, ...), so every theme
   works out of the box.
+- **Language server** (`cme lsp`, WHITEPAPER §14) with
+  - real-time diagnostics (parse, type check, §8 megaprogram expansion, §9
+    schema validation),
+  - hover documentation (locals, functions, structs, enums, variants,
+    fields, imports, built-in constructors),
+  - completion: struct fields and enum variants after `.` (including array
+    `.length`), named arguments in calls and constructions, import path
+    segments, and scope/keyword suggestions,
+  - go-to-definition and find-references (shadowing-aware),
+  - document symbols (functions, structs, enums, impl blocks with members),
+  - semantic tokens that complement the tree-sitter highlights, and
+  - a `cme/expand` custom request returning the megaprogram expansion
+    preview.
 - **Bracket matching** with rainbow-bracket colorization (quotes excluded).
 - **Code outline** for functions, structs, enums, impl targets, imports,
   grammar rules, magic declarations, and schema members.
@@ -25,7 +38,9 @@ schema files.
 
 ```
 editors/zed/
-├── extension.toml                  # extension manifest + grammar registration
+├── extension.toml                  # extension manifest + grammar/language-server registration
+├── Cargo.toml                      # the extension crate (wasm) — language server launch
+├── src/lib.rs                      # resolves the `cme` binary, starts `cme lsp`
 └── languages/checkmate/
     ├── config.toml                 # language metadata, brackets, indent patterns
     ├── highlights.scm              # syntax highlighting queries
@@ -35,10 +50,34 @@ editors/zed/
     └── textobjects.scm             # Vim-mode text objects
 ```
 
-There is intentionally no Rust code and no language server: the extension is
-purely declarative (grammar + queries), matching Zed's guidance for language
-extensions without an LSP. When `cme-lsp` (WHITEPAPER §14) lands, it plugs in
-as a `[language_servers]` entry here.
+## The language server
+
+The server is the same single `cme` binary as the CLI toolchain
+(WHITEPAPER: one binary for the whole developer setup). The extension
+resolves it in this order:
+
+1. **Your setting** — point at any binary:
+   ```json
+   {
+     "lsp": {
+       "cme": {
+         "binary": { "path": "/path/to/cme", "args": ["lsp"] }
+       }
+     }
+   }
+   ```
+2. **`cme` on your `$PATH`** — e.g. after
+   `cargo install --path . --features cli` from the checkmate repository.
+3. **The repository's own build** — when the opened project IS the
+   checkmate repository and `cargo` has built it, `target/debug/cme` is
+   used, so LSP changes can be exercised against the source tree.
+
+Anchoring notes: megaprogram (§8) files surface expansion diagnostics —
+those are anchored in the original text — while the expansion preview is
+available through the `cme/expand` server request; parse/check spans of
+expanded programs live in expanded-text coordinates, so they are not
+published into such buffers. Schema (§9) files get schema diagnostics.
+Everything else gets the full feature set.
 
 ## Installing for development
 
@@ -81,7 +120,6 @@ This extension follows the [Zed publishing prerequisites](https://zed.dev/docs/e
 
 - kebab-case id (`checkmate`), no `zed`/`extension` in the id,
 - grammars defined for every language provided,
-- no Rust code (no language server is shipped),
 - user-facing text in English.
 
 Once the repository is public, publishing reduces to adding the extension as

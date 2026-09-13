@@ -17,6 +17,8 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/cme-compiler/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/cme-schema-macro/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/cme-schema-macro/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cme-lsp/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/cme-lsp/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

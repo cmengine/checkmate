@@ -36,3 +36,5 @@ c_host_app
 # grammar repo and writes the compiled parser inside the extension dir.
 # Recreated on every local install, never committed.
 /editors/zed/grammars/
+
+*.wasm

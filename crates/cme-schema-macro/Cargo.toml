@@ -15,10 +15,10 @@ publish = true
 proc-macro = true
 
 [dependencies]
-cme-compiler = { path = "../cme-compiler", version = "0.2.0" }
-cme-core = { path = "../cme-core", version = "0.2.0" }
+cme-compiler = { path = "../cme-compiler", version = "0.3.0" }
+cme-core = { path = "../cme-core", version = "0.3.0" }
 
 # Test-only: the generated bindings reference the host API, so the
 # integration tests compile and run them end to end.
 [dev-dependencies]
-cme-api = { path = "../cme-api", version = "0.2.0" }
+cme-api = { path = "../cme-api", version = "0.3.0" }

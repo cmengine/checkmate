@@ -12,8 +12,8 @@ categories.workspace = true
 publish = true
 
 [dependencies]
-cme-core = { path = "../cme-core", version = "0.2.0" }
-cme-compiler = { path = "../cme-compiler", version = "0.2.0" }
+cme-core = { path = "../cme-core", version = "0.3.0" }
+cme-compiler = { path = "../cme-compiler", version = "0.3.0" }
 tower-lsp-server = "0.23.0"
 salsa = "0.28.2"
 tokio = { version = "1", features = ["rt", "io-util", "io-std", "macros", "time"] }

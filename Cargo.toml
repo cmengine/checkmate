@@ -3,7 +3,7 @@ members = ["crates/*", "apps/rust_host"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Matin Mohammadi"]
 license = "Apache-2.0"
@@ -27,19 +27,19 @@ categories.workspace = true
 publish = true
 
 [dependencies]
-cme-core = { path = "crates/cme-core", version = "0.2.0", optional = true }
-cme-compiler = { path = "crates/cme-compiler", version = "0.2.0", optional = true }
-cme-interp = { path = "crates/cme-interp", version = "0.2.0", optional = true }
-cme-runtime = { path = "crates/cme-runtime", version = "0.2.0", optional = true }
-cme-api = { path = "crates/cme-api", version = "0.2.0", optional = true }
-cme-schema-macro = { path = "crates/cme-schema-macro", version = "0.2.0", optional = true }
-cme-lsp = { path = "crates/cme-lsp", version = "0.2.0", optional = true }
+cme-core = { path = "crates/cme-core", version = "0.3.0", optional = true }
+cme-compiler = { path = "crates/cme-compiler", version = "0.3.0", optional = true }
+cme-interp = { path = "crates/cme-interp", version = "0.3.0", optional = true }
+cme-runtime = { path = "crates/cme-runtime", version = "0.3.0", optional = true }
+cme-api = { path = "crates/cme-api", version = "0.3.0", optional = true }
+cme-schema-macro = { path = "crates/cme-schema-macro", version = "0.3.0", optional = true }
+cme-lsp = { path = "crates/cme-lsp", version = "0.3.0", optional = true }
 
 # The root integration tests drive the real front end and interpreter.
 [dev-dependencies]
-cme-core = { path = "crates/cme-core", version = "0.2.0" }
-cme-compiler = { path = "crates/cme-compiler", version = "0.2.0" }
-cme-interp = { path = "crates/cme-interp", version = "0.2.0" }
+cme-core = { path = "crates/cme-core", version = "0.3.0" }
+cme-compiler = { path = "crates/cme-compiler", version = "0.3.0" }
+cme-interp = { path = "crates/cme-interp", version = "0.3.0" }
 
 [features]
 default = []

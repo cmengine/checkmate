@@ -69,6 +69,10 @@ pub struct LocalSymbol {
     pub kind: LocalKind,
     /// Index into [`Analysis::functions`] of the enclosing function.
     pub function: usize,
+    /// The block the declaration lives in. The checker scopes locals to
+    /// their enclosing block (`check_block` pushes one scope per block), so
+    /// resolution and completion must not surface a local outside it.
+    pub scope: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +81,15 @@ pub enum LocalKind {
     Variable,
     ForBinding,
     MatchBinding,
+}
+
+impl LocalSymbol {
+    /// True when `offset` is inside this local's block scope (§2.10): the
+    /// checker declares locals per block, so a local of a finished `if`
+    /// body is invisible after it.
+    pub fn contains(&self, offset: usize) -> bool {
+        self.scope.start <= offset && offset <= self.scope.end
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +325,7 @@ impl<'a> Analysis<'a> {
                     span: name_span,
                     kind: LocalKind::Param,
                     function: function_index,
+                    scope: body.span,
                 });
             }
         }
@@ -468,14 +482,20 @@ impl<'a> Analysis<'a> {
         // Variants sit between the braces: `Name` or `Name(payload...)`
         // (§2.7). The variant NAME spans come from the token stream; the
         // payloads are aligned with the AST declarations below (the source
-        // of truth for spelling and field types).
+        // of truth for spelling and field types). Payload identifiers are
+        // NOT variant names: every Ident inside a parenthesized payload
+        // (`Damage(int amount)`) is skipped, so only top-level identifiers
+        // of the enum body register.
         let (start, end) = self.token_range(statement.span);
-        let mut brace = 0;
+        let mut brace = 0i32;
+        let mut paren = 0i32;
         for index in start..end {
             match &self.tokens[index].kind {
                 Tok::LBrace => brace += 1,
                 Tok::RBrace => brace -= 1,
-                Tok::Ident(variant) if brace > 0 => {
+                Tok::LParen => paren += 1,
+                Tok::RParen => paren -= 1,
+                Tok::Ident(variant) if brace > 0 && paren == 0 => {
                     symbol.variants.push(VariantSymbol {
                         name: variant.clone(),
                         name_span: self.tokens[index].span,
@@ -601,8 +621,10 @@ impl<'a> Analysis<'a> {
     }
 
     /// Collects locals in a statement list, recursing into every nested
-    /// block (if/else, while, for, match arms).
+    /// block (if/else, while, for, match arms). A declaration's scope is
+    /// the block that directly contains it (§2.10 block scoping).
     fn collect_locals(&mut self, block: &'a Block, function: usize) {
+        let scope = block.span;
         for statement in &block.stmts {
             match &statement.kind {
                 StmtKind::VarDecl { name, ty, expr } => {
@@ -614,6 +636,7 @@ impl<'a> Analysis<'a> {
                         span,
                         kind: LocalKind::Variable,
                         function,
+                        scope,
                     });
                     if is_infer {
                         self.infer_initializers.push((self.locals.len() - 1, expr));
@@ -634,6 +657,7 @@ impl<'a> Analysis<'a> {
                         span,
                         kind: LocalKind::ForBinding,
                         function,
+                        scope: body.span,
                     });
                     self.collect_locals(body, function);
                 }
@@ -711,6 +735,7 @@ impl<'a> Analysis<'a> {
                         span,
                         kind: LocalKind::MatchBinding,
                         function,
+                        scope: arm.body.span,
                     });
                 }
             }

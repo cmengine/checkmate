@@ -41,7 +41,9 @@ pub fn signature(resolved: &Resolved<'_>) -> String {
         Resolved::Struct(struct_type) => format!("struct {}", struct_type.name),
         Resolved::Enum(enum_type) => format!("enum {}", enum_type.name),
         Resolved::Variant { enum_type, variant } => format!("{}.{}", enum_type.name, variant.name),
-        Resolved::Field { struct_type, index } => {
+        Resolved::Field {
+            struct_type, index, ..
+        } => {
             let (name, ty, _) = &struct_type.fields[*index];
             format!("{}: {}", name, crate::analysis::render_type(ty))
         }

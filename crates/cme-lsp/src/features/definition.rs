@@ -21,7 +21,9 @@ pub fn declaration_span(resolved: &Resolved<'_>) -> Option<Span> {
         Resolved::Struct(struct_type) => Some(struct_type.name_span),
         Resolved::Enum(enum_type) => Some(enum_type.name_span),
         Resolved::Variant { variant, .. } => Some(variant.name_span),
-        Resolved::Field { struct_type, index } => Some(struct_type.fields[*index].2),
+        Resolved::Field {
+            struct_type, index, ..
+        } => Some(struct_type.fields[*index].2),
         Resolved::ImportSegment { import, segment } => {
             import.segments.get(*segment).map(|(_, span)| *span)
         }
@@ -76,7 +78,9 @@ fn name_of<'a>(resolved: &'a Resolved<'_>) -> Option<&'a str> {
         Resolved::Struct(struct_type) => Some(&struct_type.name),
         Resolved::Enum(enum_type) => Some(&enum_type.name),
         Resolved::Variant { variant, .. } => Some(&variant.name),
-        Resolved::Field { struct_type, index } => Some(&struct_type.fields[*index].0),
+        Resolved::Field {
+            struct_type, index, ..
+        } => Some(&struct_type.fields[*index].0),
         Resolved::ImportSegment { import, segment } => {
             import.segments.get(*segment).map(|(name, _)| name.as_str())
         }
@@ -102,10 +106,12 @@ fn same_symbol(left: &Resolved<'_>, right: &Resolved<'_>) -> bool {
             Resolved::Field {
                 struct_type: a,
                 index: i,
+                ..
             },
             Resolved::Field {
                 struct_type: b,
                 index: j,
+                ..
             },
         ) => a.name_span == b.name_span && i == j,
         (

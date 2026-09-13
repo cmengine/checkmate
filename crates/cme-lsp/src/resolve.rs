@@ -37,10 +37,14 @@ pub enum Resolved<'a> {
         enum_type: &'a EnumSymbol,
         variant: &'a crate::analysis::VariantSymbol,
     },
-    /// A struct field accessed through a value (`position.x`).
+    /// A struct field accessed through a value (`position.x`). `resolved`
+    /// carries the field's type after generic substitution when the
+    /// receiver pins concrete type arguments (`pair<int, str>`'s `first`
+    /// resolves to `int`).
     Field {
         struct_type: &'a StructSymbol,
         index: usize,
+        substituted: Option<Type>,
     },
     /// One segment of an `import` path (§2.3).
     ImportSegment {
@@ -70,13 +74,14 @@ pub const BUILTIN_CONSTRUCTORS: [(&str, &str); 4] = [
 ];
 
 /// The built-in type names reachable as identifiers (`int` and friends are
-/// keywords; `map` is a keyword too).
-const BUILTIN_TYPE_NAMES: [(&str, &str); 2] = [
+/// keywords; `map` lexes as an identifier and resolves through this table).
+const BUILTIN_TYPE_NAMES: [(&str, &str); 3] = [
     ("option", "`option<T>`: `Some(T value)` or `None()` (§2.8)"),
     (
         "result",
         "`result<T, E>`: `Ok(T value)` or `Err(E error)` (§2.8)",
     ),
+    ("map", "`map<K, V>` keyed collection (§11)"),
 ];
 
 impl<'a> Analysis<'a> {
@@ -96,12 +101,40 @@ impl<'a> Analysis<'a> {
             .map(|index| &self.functions[index])
     }
 
-    /// The token containing `offset` (inclusive at both ends so a cursor
-    /// sitting right after an identifier still resolves).
+    /// The token containing `offset`. Strict containment wins; at a token
+    /// boundary the preference is an identifier STARTING there (so the
+    /// first character of `p.hp` hovers the field, and a cursor right
+    /// after a word still resolves the word) over the token ending there.
     fn token_at(&self, offset: usize) -> Option<usize> {
-        self.tokens
+        if let Some(index) = self
+            .tokens
             .iter()
-            .position(|token| token.span.start <= offset && offset <= token.span.end)
+            .position(|token| token.span.start < offset && offset < token.span.end)
+        {
+            return Some(index);
+        }
+        let ends_here = self
+            .tokens
+            .iter()
+            .position(|token| token.span.start < offset && offset <= token.span.end);
+        let starts_here = self
+            .tokens
+            .iter()
+            .position(|token| token.span.start == offset && offset < token.span.end);
+        match (ends_here, starts_here) {
+            (Some(ending), Some(starting)) => {
+                let prefer_starting = matches!(self.tokens[starting].kind, Tok::Ident(_))
+                    && !matches!(self.tokens[ending].kind, Tok::Ident(_));
+                if prefer_starting {
+                    Some(starting)
+                } else {
+                    Some(ending)
+                }
+            }
+            (Some(ending), None) => Some(ending),
+            (None, Some(starting)) => Some(starting),
+            (None, None) => None,
+        }
     }
 
     /// Resolves the identifier (or type keyword) under `offset`.
@@ -227,7 +260,13 @@ impl<'a> Analysis<'a> {
             }
             for (index, (field_name, _, field_span)) in struct_type.fields.iter().enumerate() {
                 if *field_span == span && field_name == name {
-                    return Some(Resolved::Field { struct_type, index });
+                    // The declaration site has no concrete receiver, so
+                    // the declared (unsubstituted) type is the truth.
+                    return Some(Resolved::Field {
+                        struct_type,
+                        index,
+                        substituted: None,
+                    });
                 }
             }
         }
@@ -258,18 +297,53 @@ impl<'a> Analysis<'a> {
         )?;
         match &ty {
             Type::Named {
-                name: type_name, ..
+                name: type_name,
+                args,
             } => {
-                if let Some(struct_type) = self.structs.iter().find(|s| &s.name == type_name) {
-                    let index = struct_type
+                // A struct receiver that is not a field, or an enum
+                // receiver that is not a variant, falls through to the
+                // impl-member check below.
+                if let Some(struct_type) = self.structs.iter().find(|s| &s.name == type_name)
+                    && let Some(index) = struct_type
                         .fields
                         .iter()
-                        .position(|(field_name, _, _)| field_name == name)?;
-                    return Some(Resolved::Field { struct_type, index });
+                        .position(|(field_name, _, _)| field_name == name)
+                {
+                    let substituted =
+                        substitute(&struct_type.fields[index].1, &struct_type.type_params, args);
+                    return Some(Resolved::Field {
+                        struct_type,
+                        index,
+                        substituted: (substituted != struct_type.fields[index].1)
+                            .then_some(substituted),
+                    });
                 }
-                if let Some(enum_type) = self.enums.iter().find(|e| &e.name == type_name) {
-                    let variant = enum_type.variants.iter().find(|v| v.name == name)?;
+                if let Some(enum_type) = self.enums.iter().find(|e| &e.name == type_name)
+                    && let Some(variant) = enum_type.variants.iter().find(|v| v.name == name)
+                {
                     return Some(Resolved::Variant { enum_type, variant });
+                }
+                // An impl member call (`vec2.dot(v)` — §10.4): the member
+                // names a function of an impl block whose target's last
+                // segment is this type.
+                if let Some(function) = self.functions.iter().find(|function| {
+                    function.name == *name
+                        && function.impl_index.is_some()
+                        && function
+                            .impl_index
+                            .and_then(|index| self.impls.get(index))
+                            .and_then(|impl_block| impl_block.target.last())
+                            .map(|(segment, _)| segment == type_name)
+                            .unwrap_or(false)
+                }) {
+                    let impl_target = function
+                        .impl_index
+                        .and_then(|index| self.impls.get(index))
+                        .map(|impl_block| impl_block.target.as_slice());
+                    return Some(Resolved::Function {
+                        function,
+                        impl_target,
+                    });
                 }
                 None
             }
@@ -471,15 +545,20 @@ impl<'a> Analysis<'a> {
     }
 
     /// The visible declaration of `name` at `offset`: the latest matching
-    /// local of the enclosing function declared before the use site; a use
-    /// before any declaration falls back to the first match so hover still
-    /// answers.
+    /// local of the enclosing function declared before the use site and
+    /// scoped to a block containing it (the checker scopes locals to their
+    /// block, so a local of a finished `if` body is not visible after it);
+    /// a use before any declaration falls back to the first in-scope match
+    /// so hover still answers.
     fn resolve_local(&'a self, name: &str, offset: usize) -> Option<&'a LocalSymbol> {
         let function_index = self.enclosing_function_index(offset)?;
         let mut best_before: Option<&LocalSymbol> = None;
         let mut first: Option<&LocalSymbol> = None;
         for local in &self.locals {
             if local.name != name || local.function != function_index {
+                continue;
+            }
+            if !local.contains(offset) {
                 continue;
             }
             if first.is_none() {
@@ -638,25 +717,24 @@ fn builtin_type_from_keyword(kind: &Tok) -> Option<Resolved<'static>> {
 /// `A first` with args `[int, str]` → `int first`).
 pub fn substitute(ty: &Type, params: &[String], args: &[Type]) -> Type {
     match ty {
-        Type::Named { name, args: inner } if args.is_empty() => {
-            // The type could BE a parameter, or a parametric use of one.
-            if let Some(position) = params.iter().position(|param| param == name)
+        Type::Named { name, args: inner } => {
+            // A bare reference to one of the parameters crystallizes to
+            // its concrete argument; a parametric use (`pair<A, B> next`)
+            // substitutes recursively.
+            if inner.is_empty()
+                && let Some(position) = params.iter().position(|param| param == name)
                 && let Some(concrete) = args.get(position)
             {
                 return concrete.clone();
             }
             Type::Named {
                 name: name.clone(),
-                args: inner.clone(),
+                args: inner
+                    .iter()
+                    .map(|arg| substitute(arg, params, args))
+                    .collect(),
             }
         }
-        Type::Named { name, args: inner } => Type::Named {
-            name: name.clone(),
-            args: inner
-                .iter()
-                .map(|arg| substitute(arg, params, args))
-                .collect(),
-        },
         Type::Array(elem) => Type::Array(Box::new(substitute(elem, params, args))),
         Type::Map { key, value } => Type::Map {
             key: Box::new(substitute(key, params, args)),
@@ -873,13 +951,19 @@ pub fn hover_markdown(resolved: &Resolved<'_>) -> String {
                 fields.join(", ")
             )
         }
-        Resolved::Field { struct_type, index } => {
+        Resolved::Field {
+            struct_type,
+            index,
+            substituted,
+        } => {
             let (name, ty, _) = &struct_type.fields[*index];
+            let rendered = substituted
+                .as_ref()
+                .map(render_type)
+                .unwrap_or_else(|| render_type(ty));
             format!(
                 "```checkmate\n{}: {}\n```\n*field of* `{}`",
-                name,
-                render_type(ty),
-                struct_type.name
+                name, rendered, struct_type.name
             )
         }
         Resolved::ImportSegment { import, segment } => {

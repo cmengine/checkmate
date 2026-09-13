@@ -55,14 +55,16 @@ pub fn semantic_tokens(
                     (1, token.span == function.name_span)
                 }
             }
-            Resolved::Field { .. } => (3, false),
+            Resolved::Field {
+                struct_type, index, ..
+            } => (3, token.span == struct_type.fields[*index].2),
             Resolved::Local(local) => match local.kind {
                 crate::analysis::LocalKind::Param => (5, token.span == local.span),
                 _ => (4, token.span == local.span),
             },
-            Resolved::Variant { .. } => (6, false),
-            Resolved::Enum(_) => (7, false),
-            Resolved::Struct(_) => (8, false),
+            Resolved::Variant { variant, .. } => (6, token.span == variant.name_span),
+            Resolved::Enum(enum_type) => (7, token.span == enum_type.name_span),
+            Resolved::Struct(struct_type) => (8, token.span == struct_type.name_span),
             // Built-ins are keywords or carry no semantics worth painting.
             Resolved::BuiltinType { .. }
             | Resolved::BuiltinConstructor { .. }

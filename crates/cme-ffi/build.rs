@@ -1,32 +1,41 @@
-//! Build script: compiles the C host application (apps/c_host/main.c) into
-//! this crate so the `cargo test` run exercises the real C consumer of the
-//! ABI end to end — the same source file the standalone Makefile builds
-//! against the shipped static library. The `CME_HOST_EMBEDDED` define swaps
-//! the app's `main` for a plain entry function so it links harmlessly
-//! alongside Rust's own test harness.
+//! Build script: compiles the C host application into this crate so the
+//! `cargo test` run exercises the real C consumer of the ABI end to end —
+//! the same source file the standalone Makefile builds against the shipped
+//! static library. The `CME_HOST_EMBEDDED` define swaps the app's `main`
+//! for a plain entry function so it links harmlessly alongside Rust's own
+//! test harness.
 //!
 //! The §9.6 half of the story happens HERE too: the build generates the C
-//! schema header from `apps/c_host/engine.cm` through the real front end
+//! schema header from the host's `engine.cm` through the real front end
 //! (`cme-compiler`), and the consumer compiles against it with
 //! `CME_HOST_HAS_SCHEMA_GEN` defined — so the REGISTER macro's
 //! `_Static_assert`s and the typed pack/unpack helpers are exercised by
 //! every `cargo test` run, exactly as a real host build would.
+//!
+//! Source layout: in a repo checkout the build uses `apps/c_host/` (the
+//! files the Makefile consumes). A published crate cannot see outside its
+//! own directory, so byte-identical fallbacks live in `c_src/` and are
+//! used when the `apps/` tree is absent. A drift test pins the copies
+//! together; refresh `c_src/` whenever `apps/c_host/` changes.
 
 use std::env;
 use std::path::PathBuf;
 
+fn resolve_host_source(manifest_dir: &std::path::Path, name: &str) -> PathBuf {
+    let repo = manifest_dir.join("../../apps/c_host").join(name);
+    if repo.is_file() {
+        return repo.canonicalize().expect("repo host source resolves");
+    }
+    let vendored = manifest_dir.join("c_src").join(name);
+    vendored
+        .canonicalize()
+        .expect("vendored host source exists")
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let c_app = manifest_dir
-        .join("../..")
-        .join("apps/c_host/main.c")
-        .canonicalize()
-        .expect("apps/c_host/main.c exists");
-    let schema = manifest_dir
-        .join("../..")
-        .join("apps/c_host/engine.cm")
-        .canonicalize()
-        .expect("apps/c_host/engine.cm exists");
+    let c_app = resolve_host_source(&manifest_dir, "main.c");
+    let schema = resolve_host_source(&manifest_dir, "engine.cm");
     let header_dir = manifest_dir.join("include");
 
     // The §9.6 schema header, generated from the same file the script

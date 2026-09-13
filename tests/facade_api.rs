@@ -42,3 +42,38 @@ fn default_features_expose_nothing() {
     // assertion that matters is: the default build must not leak the
     // names. That is pinned by the fact this file's imports are gated.
 }
+
+#[test]
+fn explicit_limits_let_bounded_work_complete() {
+    let engine = Engine::new();
+    let program: CompiledProgram = engine
+        .load_source("int main() {\nreturn 40 + 2\n}\n")
+        .expect("clean source compiles");
+    let context: Context<'_> = engine.create_context(
+        &program,
+        ExecutionLimits {
+            fuel: Some(1_000_000),
+            deadline_ms: Some(50),
+            max_call_depth: 64,
+        },
+    );
+    assert_eq!(context.invoke("main", &[]), Ok(cme::Value::Int(42)));
+}
+
+#[test]
+fn fuel_exhaustion_reports_a_budget_error() {
+    let engine = Engine::new();
+    let program: CompiledProgram = engine
+        .load_source("int spin() {\nwhile (true) {\n}\nreturn 0\n}\n")
+        .expect("clean source compiles");
+    let context: Context<'_> = engine.create_context(
+        &program,
+        ExecutionLimits {
+            fuel: Some(10),
+            deadline_ms: None,
+            max_call_depth: 64,
+        },
+    );
+    let error = context.invoke("spin", &[]).unwrap_err();
+    assert_eq!(error.kind, cme::api::ErrorKind::Budget);
+}

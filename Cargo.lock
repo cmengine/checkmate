@@ -71,7 +71,6 @@ dependencies = [
 name = "cme-api"
 version = "0.3.0"
 dependencies = [
- "cme",
  "cme-compiler",
  "cme-core",
  "cme-interp",
@@ -104,7 +103,6 @@ dependencies = [
 name = "cme-interp"
 version = "0.3.0"
 dependencies = [
- "cme-compiler",
  "cme-core",
 ]
 

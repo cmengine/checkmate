@@ -12,9 +12,3 @@ publish = true
 cme-core = { path = "../cme-core", version = "0.3.0" }
 cme-compiler = { path = "../cme-compiler", version = "0.3.0" }
 cme-interp = { path = "../cme-interp", version = "0.3.0" }
-
-# The facade test compiles the root `cme` package with its `api` feature to
-# pin the WHITEPAPER §13.1 import shape (`use cme::{Engine, ExecutionLimits}`)
-# from a consumer's point of view.
-[dev-dependencies]
-cme = { path = "../..", features = ["api"] }

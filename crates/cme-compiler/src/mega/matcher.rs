@@ -22,7 +22,7 @@
 use std::collections::{HashMap, HashSet};
 
 use cme_core::Span;
-use cme_core::magic::{
+use cme_core::mega::{
     Capture, CaptureKind, CtxExpr, FragKind, LexProfile, PatElem, PatKind, Pattern, TextKind,
 };
 
@@ -40,7 +40,7 @@ pub struct CompiledGrammar {
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
     pub name: String,
-    pub context: Vec<cme_core::magic::ContextField>,
+    pub context: Vec<cme_core::mega::ContextField>,
     pub pattern: Pattern,
 }
 
@@ -263,7 +263,7 @@ const FUEL_BUDGET: u64 = 1_000_000;
 /// budget-error shape) instead of aborting the process.
 const MAX_RULE_DEPTH: usize = 256;
 
-/// Matches `pattern` (a magic's entry pattern) against the whole region and
+/// Matches `pattern` (a mega's entry pattern) against the whole region and
 /// returns the root capture. The pattern must consume the entire region
 /// (§8.3.9): only skippable trailing characters may remain.
 pub fn match_entry(
@@ -3039,7 +3039,7 @@ fn has_effective_tail(cont: &Continuation<'_>) -> bool {
 mod tests {
     use super::*;
     use crate::mega::pattern::parse_rule_declaration;
-    use cme_core::magic::CharSet;
+    use cme_core::mega::CharSet;
 
     /// Compiles a grammar body (rules only, default profile) into a set.
     fn compile_rules(rules: &[&str]) -> GrammarSet {

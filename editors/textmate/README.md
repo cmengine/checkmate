@@ -14,7 +14,7 @@ consumes `.tmLanguage` grammars.
   (fragments `$str`/`$tt<...>`, character classes, annotations
   `#complete`/`#hover`/`#token`), and templates (`$splice`, `@fn(...)`,
   `[each ...]`, `[when ... else ...]`)
-- Magic invocation regions rendered as embedded foreign content
+- mega invocation regions rendered as embedded foreign content
   (brace-balanced, string/comment aware) and heredoc regions
   (`name! <<TAG ... TAG`) as verbatim strings
 - Schema files (§9): `schema`, `capability`, `interface`, `since`,

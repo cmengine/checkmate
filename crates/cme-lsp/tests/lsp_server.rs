@@ -242,14 +242,14 @@ async fn expand_preview_returns_expanded_text() {
     let (mut service, mut messages) = setup().await;
     handshake(&mut service).await;
 
-    let magic_source = "int log(int x) {\n    return x\n}\n\nmega twice(\n    $int value\n) {\n    log($value)\n}\n\nint main() {\n    twice! {\n        21\n    }\n    return 0\n}\n";
-    open(&mut service, "file:///magic.cm", magic_source).await;
+    let mega_source = "int log(int x) {\n    return x\n}\n\nmega twice(\n    $int value\n) {\n    log($value)\n}\n\nint main() {\n    twice! {\n        21\n    }\n    return 0\n}\n";
+    open(&mut service, "file:///mega.cm", mega_source).await;
     let _ = next_publish(&mut messages).await; // drain the open publish
 
     let response = request(
         &mut service,
         "cme/expand",
-        json!({ "uri": "file:///magic.cm" }),
+        json!({ "uri": "file:///mega.cm" }),
     )
     .await;
     assert!(response.is_ok(), "cme/expand succeeds: {response:?}");

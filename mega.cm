@@ -1,13 +1,13 @@
 // ============================================================================
-// magic.cm — the megaprogramming (WHITEPAPER §8) TDD fixture
+// mega.cm — the megaprogramming (WHITEPAPER §8) TDD fixture
 // ============================================================================
 //
 // This file is the acceptance test for the megaprogramming subsystem. It is
 // a COMPLETE Checkmate program after expansion:
 //
-//   cme expand magic.cm      →  writes magic_expanded.cm (pure Checkmate)
-//   cme check magic.cm       →  expands, then checks the expanded program
-//   cme run magic.cm         →  expands, then runs; main() returns 0 when
+//   cme expand mega.cm      →  writes mega_expanded.cm (pure Checkmate)
+//   cme check mega.cm       →  expands, then checks the expanded program
+//   cme run mega.cm         →  expands, then runs; main() returns 0 when
 //                               every megaprogram expanded and verified
 //
 // Layout:
@@ -860,7 +860,7 @@ enum Capture {
     Absent()
 }
 
-// The tree the JSON/TOML/YAML magics produce. Numbers keep their source text
+// The tree the JSON/TOML/YAML megas produce. Numbers keep their source text
 // (`Num("5432")`) — source-faithful, and the compile-time side never needs
 // arithmetic on them.
 enum JsonTree {
@@ -1739,7 +1739,7 @@ int checkYaml() {
     // indented relative to the first line's (trimmed) column — here the
     // mapping entries are flush with it. Anchors (&def), aliases (*def)
     // and the << merge key are §8.8's YAML shapes; the require in the
-    // magic checks every alias against the anchors (§8.3.4).
+    // mega checks every alias against the anchors (§8.3.4).
     JsonTree doc = yamlValue! {
     title: Checkmate
 limits:

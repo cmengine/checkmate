@@ -9,10 +9,10 @@
 
 use crate::diagnostics::Diagnostic;
 use cme_core::Span;
-use cme_core::magic::{CharItem, CharSet, CommentForm, LexProfile, StringForm};
+use cme_core::mega::{CharItem, CharSet, CommentForm, LexProfile, StringForm};
 
 /// The default profile (§8.2, §8.6): horizontal and newline skipping, `"`
-/// strings, no comments. Used for magics with inline entry patterns and as
+/// strings, no comments. Used for megas with inline entry patterns and as
 /// the fallback for regions whose grammar profile declares no string forms.
 pub fn default_profile() -> LexProfile {
     LexProfile {
@@ -35,7 +35,7 @@ pub fn default_profile() -> LexProfile {
 }
 
 /// The profile used to balance Checkmate-shaped regions: grammar bodies and
-/// magic-declaration headers (pattern parens, template braces). It covers
+/// mega-declaration headers (pattern parens, template braces). It covers
 /// every quoting form Checkmate pattern text uses, plus line and block
 /// comments, so pattern literals like `"("` never confuse the balance.
 pub fn checkmate_scan_profile() -> LexProfile {
@@ -699,7 +699,7 @@ mod tests {
             "str t = \"escapes \\n\\t\\\\ ok\"".into(),
             "// it's \"quoted\" in a comment\nint a = 1".into(),
             "/* braces { } parens ( ) */ int b = 2".into(),
-            "str c = \"{ } magic() { } braces\"".into(),
+            "str c = \"{ } mega() { } braces\"".into(),
             "int d = 1\n/* never closed and the rest is comment".into(),
             "a // trailing comment with \"quotes\" and /* markers */\nb".into(),
             "/* multi\nline\ncomment */ int e = 3".into(),

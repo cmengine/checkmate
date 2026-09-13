@@ -1,4 +1,4 @@
-//! Magic detection (the front-end's only job for megaprograms, per the
+//! mega detection (the front-end's only job for megaprograms, per the
 //! owner's architecture mandate): locate `grammar` declarations, `mega`
 //! declarations, and `name! { … }` invocations in raw source text, handing
 //! the code inside the mega blocks to the megaprogram pass.
@@ -14,7 +14,7 @@ use crate::mega::profile::{
     string_len, with_default_strings,
 };
 use cme_core::Span;
-use cme_core::magic::LexProfile;
+use cme_core::mega::LexProfile;
 
 /// The §8.6 region-scan hint, appended to diagnostics whose most plausible
 /// cause is a brace the composed profile mis-read (swallowed by a string or
@@ -48,7 +48,7 @@ pub struct GrammarScan {
 /// One `mega name(pattern) { template }` declaration. Pattern and template
 /// stay verbatim; the pattern/template parsers (Task 3) give them structure.
 #[derive(Debug, Clone)]
-pub struct MagicDeclScan {
+pub struct MegaDeclScan {
     pub name: String,
     pub span: Span,
     pub pattern_span: Span,
@@ -75,17 +75,17 @@ pub struct InvocationScan {
 
 /// The result of scanning a source file for megaprogram constructs.
 #[derive(Debug, Clone, Default)]
-pub struct MagicScan {
+pub struct MegaScan {
     pub grammars: Vec<GrammarScan>,
-    pub magics: Vec<MagicDeclScan>,
+    pub megas: Vec<MegaDeclScan>,
     pub invocations: Vec<InvocationScan>,
 }
 
-impl MagicScan {
+impl MegaScan {
     /// True when the file contains anything megaprogram-shaped. The CLI uses
     /// this as the fast path to skip expansion entirely.
     pub fn is_empty(&self) -> bool {
-        self.grammars.is_empty() && self.magics.is_empty() && self.invocations.is_empty()
+        self.grammars.is_empty() && self.megas.is_empty() && self.invocations.is_empty()
     }
 
     /// The profile of the named grammar.
@@ -136,8 +136,8 @@ impl MagicScan {
 
 /// Scans `source` for megaprogram constructs. Never fails: malformed
 /// constructs produce diagnostics and the scan continues at the next line.
-pub fn scan_magic(source: &str) -> (MagicScan, Vec<Diagnostic>) {
-    let mut scan = MagicScan::default();
+pub fn scan_mega(source: &str) -> (MegaScan, Vec<Diagnostic>) {
+    let mut scan = MegaScan::default();
     let mut errors = Vec::new();
     let scanner = checkmate_scan_profile();
 
@@ -161,7 +161,7 @@ pub fn scan_magic(source: &str) -> (MagicScan, Vec<Diagnostic>) {
         if let Some(word) = keyword_at(source, cursor, "mega") {
             let next = skip_inline_ws(source, cursor + word);
             if starts_ident(source, next) {
-                cursor = scan_magic_decl(source, cursor, &scanner, &mut scan, &mut errors)
+                cursor = scan_mega_decl(source, cursor, &scanner, &mut scan, &mut errors)
                     .unwrap_or_else(|| advance_after_block(source, cursor));
             } else {
                 errors.push(Diagnostic::parse(
@@ -285,7 +285,7 @@ fn scan_grammar(
     keyword_pos: usize,
     keyword_len: usize,
     scanner: &LexProfile,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
     let mut cursor = skip_inline_ws(source, keyword_pos + keyword_len);
@@ -369,7 +369,7 @@ fn scan_grammar_body(
     extends_span: Option<Span>,
     body_open: usize,
     scanner: &LexProfile,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
     match balance(source, body_open, '{', '}', scanner) {
@@ -401,11 +401,11 @@ fn scan_grammar_body(
 
 /// Scans a `mega name(pattern) { template }` declaration. Returns the
 /// offset just past the declaration, or `None` after recording a diagnostic.
-fn scan_magic_decl(
+fn scan_mega_decl(
     source: &str,
     keyword_pos: usize,
     scanner: &LexProfile,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
     let mut cursor = skip_inline_ws(source, keyword_pos + "mega".len());
@@ -450,7 +450,7 @@ fn scan_magic_decl(
         }
     };
     let template_span = Span::new(template_open + 1, template_close);
-    scan.magics.push(MagicDeclScan {
+    scan.megas.push(MegaDeclScan {
         name: name.join("."),
         span: Span::new(keyword_pos, template_close + 1),
         pattern_span,
@@ -473,7 +473,7 @@ fn scan_invocation(
     source: &str,
     name_start: usize,
     scanner: &LexProfile,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
     let header_start = name_start;
@@ -581,7 +581,7 @@ fn scan_heredoc_region(
     name: String,
     tag: String,
     after_tag: usize,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) -> Option<usize> {
     // The region starts after the tag's line terminator.
@@ -658,7 +658,7 @@ fn discover_nested_invocations(
     source: &str,
     region: Span,
     profile: &LexProfile,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) {
     let mut cursor = region.start;
@@ -681,7 +681,7 @@ fn string_form_at(
     source: &str,
     pos: usize,
     profile: &LexProfile,
-) -> Option<cme_core::magic::StringForm> {
+) -> Option<cme_core::mega::StringForm> {
     let first = source[pos..].chars().next()?;
     profile
         .strings
@@ -695,9 +695,9 @@ fn string_form_at(
 fn walk_string_for_islands(
     source: &str,
     string_start: usize,
-    form: &cme_core::magic::StringForm,
+    form: &cme_core::mega::StringForm,
     region_end: usize,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) -> usize {
     let Some((open, close)) = &form.island else {
@@ -743,7 +743,7 @@ fn scan_island_checkmate(
     source: &str,
     start: usize,
     end: usize,
-    scan: &mut MagicScan,
+    scan: &mut MegaScan,
     errors: &mut Vec<Diagnostic>,
 ) {
     let scanner = checkmate_scan_profile();
@@ -775,12 +775,12 @@ fn scan_island_checkmate(
 /// form when it declares none. The entry grammar is recovered by peeking at
 /// the macro's declared pattern (its first rule reference, e.g.
 /// `json.value`); unknown macros get the default profile.
-fn composed_region_profile(scan: &MagicScan, macro_name: &str) -> LexProfile {
+fn composed_region_profile(scan: &MegaScan, macro_name: &str) -> LexProfile {
     let entry_grammar = scan
-        .magics
+        .megas
         .iter()
-        .find(|magic| magic.name == macro_name)
-        .and_then(|magic| entry_grammar_name(&magic.pattern))
+        .find(|mega| mega.name == macro_name)
+        .and_then(|mega| entry_grammar_name(&mega.pattern))
         .and_then(|grammar| scan.inherited_profile(&grammar));
     match entry_grammar {
         Some(profile) => with_default_strings(&profile),
@@ -853,8 +853,8 @@ fn normalize_region(source: &str, open: usize, close: usize) -> (Span, String) {
 mod tests {
     use super::*;
 
-    fn scan_ok(source: &str) -> MagicScan {
-        let (scan, errors) = scan_magic(source);
+    fn scan_ok(source: &str) -> MegaScan {
+        let (scan, errors) = scan_mega(source);
         assert!(
             errors.is_empty(),
             "{source:?} should scan cleanly: {errors:?}"
@@ -937,11 +937,11 @@ mega value(yaml.document as doc) {
         assert_eq!(grammar.profile.strings.len(), 2);
         assert_eq!(grammar.profile.strings[0].quote, '"');
 
-        assert_eq!(scan.magics.len(), 1);
-        let magic = &scan.magics[0];
-        assert_eq!(magic.name, "value");
-        assert_eq!(magic.pattern, "yaml.document as doc");
-        assert_eq!(magic.template, "\n    @toValue($doc)\n");
+        assert_eq!(scan.megas.len(), 1);
+        let mega = &scan.megas[0];
+        assert_eq!(mega.name, "value");
+        assert_eq!(mega.pattern, "yaml.document as doc");
+        assert_eq!(mega.template, "\n    @toValue($doc)\n");
     }
 
     #[test]
@@ -1078,13 +1078,13 @@ mega reQuantified({\"{\" $int min \"}\"} as q) {
 }
 ";
         let scan = scan_ok(source);
-        assert_eq!(scan.magics.len(), 2);
-        assert_eq!(scan.magics[1].pattern, "{\"{\" $int min \"}\"} as q");
+        assert_eq!(scan.megas.len(), 2);
+        assert_eq!(scan.megas[1].pattern, "{\"{\" $int min \"}\"} as q");
     }
 
     #[test]
     fn malformed_constructs_report_and_recover() {
-        let (scan, errors) = scan_magic("grammar {\nint x = 1\n");
+        let (scan, errors) = scan_mega("grammar {\nint x = 1\n");
         assert!(scan.grammars.is_empty());
         assert!(
             errors
@@ -1092,15 +1092,15 @@ mega reQuantified({\"{\" $int min \"}\"} as q) {
                 .any(|error| error.message().contains("grammar name"))
         );
 
-        let (scan, errors) = scan_magic("mega {\nint x = 1\n");
-        assert!(scan.magics.is_empty() && scan.invocations.is_empty());
+        let (scan, errors) = scan_mega("mega {\nint x = 1\n");
+        assert!(scan.megas.is_empty() && scan.invocations.is_empty());
         assert!(
             errors
                 .iter()
                 .any(|error| error.message().contains("macro name"))
         );
 
-        let (_, errors) = scan_magic("m! {\nnever closed\n");
+        let (_, errors) = scan_mega("m! {\nnever closed\n");
         assert!(
             errors
                 .iter()
@@ -1126,7 +1126,7 @@ mega def(py.def as d) {
 def! {
     it's the region that never closes
 ";
-        let (_, errors) = scan_magic(source);
+        let (_, errors) = scan_mega(source);
         assert!(
             errors
                 .iter()

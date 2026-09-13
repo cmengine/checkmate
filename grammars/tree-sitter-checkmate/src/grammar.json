@@ -250,7 +250,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "magic_invocation"
+          "name": "mega_invocation"
         }
       ]
     },
@@ -459,7 +459,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "magic_declaration"
+          "name": "mega_declaration"
         },
         {
           "type": "SYMBOL",
@@ -1777,7 +1777,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "magic_invocation"
+          "name": "mega_invocation"
         }
       ]
     },
@@ -4361,7 +4361,7 @@
         }
       ]
     },
-    "magic_declaration": {
+    "mega_declaration": {
       "type": "SEQ",
       "members": [
         {
@@ -4426,7 +4426,7 @@
         }
       ]
     },
-    "magic_invocation": {
+    "mega_invocation": {
       "type": "PREC",
       "value": 1,
       "content": {

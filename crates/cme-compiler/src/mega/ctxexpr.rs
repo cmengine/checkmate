@@ -10,7 +10,7 @@
 use crate::diagnostics::Diagnostic;
 use crate::mega::profile::{parse_char_literal, parse_string_literal, skip_ws_and_comments};
 use cme_core::Span;
-use cme_core::magic::{Accessor, CtxBinOp, CtxExpr};
+use cme_core::mega::{Accessor, CtxBinOp, CtxExpr};
 
 /// Parses one condition expression from `text` starting at `cursor`.
 /// Returns the expression and the cursor just past it. `span` anchors

@@ -396,7 +396,7 @@ mega bounded(
 ---
 
 (source_file
-  (magic_declaration
+  (mega_declaration
     (dotted_path
       (identifier))
     (pattern_rule_ref
@@ -412,7 +412,7 @@ mega bounded(
         (arguments
           (splice
             (identifier))))))
-  (magic_declaration
+  (mega_declaration
     (dotted_path
       (identifier))
     (pattern_rule_ref
@@ -464,7 +464,7 @@ mega bounded(
               (splice
                 (identifier))
               (identifier)))))))
-  (magic_declaration
+  (mega_declaration
     (dotted_path
       (identifier)
       (identifier))
@@ -501,7 +501,7 @@ mega bounded(
               (interpolation
                 (splice
                   (identifier)))))))))
-  (magic_declaration
+  (mega_declaration
     (dotted_path
       (identifier))
     (pattern_fragment
@@ -531,7 +531,7 @@ mega bounded(
                   (splice
                     (identifier))
                   (identifier)))))))))
-  (magic_declaration
+  (mega_declaration
     (dotted_path
       (identifier))
     (pattern_fragment
@@ -541,7 +541,7 @@ mega bounded(
       (splice_array
         (splice
           (identifier)))))
-  (magic_declaration
+  (mega_declaration
     (dotted_path
       (identifier))
     (pattern_label
@@ -627,7 +627,7 @@ jsRun! {
     (identifier))
   (assignment_statement
     (identifier)
-    (magic_invocation
+    (mega_invocation
       (dotted_path
         (identifier))
       (region
@@ -640,16 +640,7 @@ jsRun! {
         (region_string)
         (region_text))))
   (expression_statement
-    (magic_invocation
-      (dotted_path
-        (identifier))
-      (region
-        (region_text))))
-  (expression_statement
-    (identifier))
-  (assignment_statement
-    (identifier)
-    (magic_invocation
+    (mega_invocation
       (dotted_path
         (identifier))
       (region
@@ -658,7 +649,16 @@ jsRun! {
     (identifier))
   (assignment_statement
     (identifier)
-    (magic_invocation
+    (mega_invocation
+      (dotted_path
+        (identifier))
+      (region
+        (region_text))))
+  (expression_statement
+    (identifier))
+  (assignment_statement
+    (identifier)
+    (mega_invocation
       (dotted_path
         (identifier))
       (heredoc_region)))
@@ -667,7 +667,7 @@ jsRun! {
     (identifier)
     (int_literal))
   (expression_statement
-    (magic_invocation
+    (mega_invocation
       (dotted_path
         (identifier))
       (region
@@ -676,7 +676,7 @@ jsRun! {
         (region_text)
         (region_string))))
   (expression_statement
-    (magic_invocation
+    (mega_invocation
       (dotted_path
         (identifier))
       (region

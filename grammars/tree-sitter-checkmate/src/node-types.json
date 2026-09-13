@@ -48,7 +48,7 @@
         "named": true
       },
       {
-        "type": "magic_invocation",
+        "type": "mega_invocation",
         "named": true
       },
       {
@@ -246,7 +246,7 @@
         "named": true
       },
       {
-        "type": "magic_invocation",
+        "type": "mega_invocation",
         "named": true
       },
       {
@@ -1304,7 +1304,7 @@
     }
   },
   {
-    "type": "magic_declaration",
+    "type": "mega_declaration",
     "named": true,
     "fields": {
       "name": {
@@ -1346,7 +1346,7 @@
     }
   },
   {
-    "type": "magic_invocation",
+    "type": "mega_invocation",
     "named": true,
     "fields": {
       "macro": {
@@ -2715,7 +2715,7 @@
           "named": true
         },
         {
-          "type": "magic_declaration",
+          "type": "mega_declaration",
           "named": true
         },
         {

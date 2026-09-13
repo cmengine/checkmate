@@ -6,8 +6,8 @@
                 { "include": "#comments" },
                 { "include": "#schema-declarations" },
                 { "include": "#grammar-declaration" },
-                { "include": "#magic-declaration" },
-                { "include": "#magic-invocation" },
+                { "include": "#mega-declaration" },
+                { "include": "#mega-invocation" },
                 { "include": "#import" },
                 { "include": "#impl-declaration" },
                 { "include": "#struct-enum-declaration" },
@@ -360,7 +360,7 @@
                         "end": "(?<=\\})",
                         "patterns": [{ "include": "#pattern-language" }]
                 },
-                "magic-declaration": {
+                "mega-declaration": {
                         "begin": "\\b(mega)\\s+([A-Za-z_][A-Za-z0-9_.]*)\\s*(\\()",
                         "beginCaptures": {
                                 "1": { "name": "keyword.other.checkmate" },
@@ -375,16 +375,16 @@
                                 { "include": "$self" }
                         ]
                 },
-                "magic-invocation": {
+                "mega-invocation": {
                         "comment": "name! { region } or name! <<TAG ... TAG — the region is foreign-language content. The bang is postfix (`!=` is one token, `!` is otherwise a prefix operator), and the region opener is required.",
                         "begin": "\\b([A-Za-z_][A-Za-z0-9_.]*)\\s*!(?!=)(?=\\s*(?:\\{|<<))",
                         "beginCaptures": {
                                 "1": { "name": "entity.name.function.checkmate" }
                         },
                         "end": "(?<=\\})",
-                        "patterns": [{ "include": "#magic-region" }]
+                        "patterns": [{ "include": "#mega-region" }]
                 },
-                "magic-region": {
+                "mega-region": {
                         "patterns": [
                                 {
                                         "comment": "Brace-balanced region with string/comment awareness",

@@ -23,7 +23,7 @@
 (grammar_declaration
   name: (identifier) @name) @item
 
-(magic_declaration
+(mega_declaration
   name: (dotted_path) @name) @item
 
 (rule_declaration

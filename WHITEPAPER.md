@@ -636,7 +636,7 @@ The acid test is not "can macros generate boilerplate" but "can a macro author w
 Megaprograms are purely script-side: no host capabilities, no ambient compiler state. Expansion happens after parsing and before name resolution, so generated code is type-checked against the host schema exactly like hand-written code (§5):
 
 ```text
-        magic(name) { …region… }
+        mega(name) { …region… }
                      │
                      ▼
         ┌──────────────────────────┐
@@ -656,7 +656,7 @@ Megaprograms are purely script-side: no host capabilities, no ambient compiler s
         │  sandboxed interpreter)   │
         └────────────┬─────────────┘
                      ▼
-        repeat until no magic() invocation remains
+        repeat until no mega() invocation remains
                      ▼
         Name Resolution & Type Checking  (validated against host schema)
 ```
@@ -677,13 +677,13 @@ Existing macro systems offer these powers separately (token-level patterns, unre
 | Artifact              | Role                                                      | Analogy             |
 | --------------------- | --------------------------------------------------------- | ------------------- |
 | `grammar`             | A named library of matching rules                         | The lexer + parser  |
-| `magic`               | An entry point binding a pattern to an expansion template | The semantic action |
+| `mega`               | An entry point binding a pattern to an expansion template | The semantic action |
 | Compile-time function | An ordinary pure Checkmate function invoked with `@`      | The code generator  |
 
-Simple megaprograms need only a `magic` declaration — pattern in the parentheses, template in the braces:
+Simple megaprograms need only a `mega` declaration — pattern in the parentheses, template in the braces:
 
 ```checkmate
-magic agent.spawn(
+mega agent.spawn(
     #complete(engine.availableModels)
     #hover("Target model identifier, e.g. claude-opus-latest")
     "model:" $tag model
@@ -699,7 +699,7 @@ magic agent.spawn(
 }
 
 // Consumer code:
-magic(agent.spawn) {
+mega(agent.spawn) {
     model: claude-opus-latest
     effort: high
 
@@ -707,9 +707,9 @@ magic(agent.spawn) {
 }
 ```
 
-`#complete` / `#hover` are inert editor metadata consumed by `cme-lsp` (§8.9); they never affect matching, and they are the _only_ place host registries are visible (§8.5). Invocation is `magic(name) { … }`; the declaration form `magic name(…) { … }` is distinguished by the identifier between `magic` and `(`.
+`#complete` / `#hover` are inert editor metadata consumed by `cme-lsp` (§8.9); they never affect matching, and they are the _only_ place host registries are visible (§8.5). Invocation is `mega(name) { … }`; the declaration form `mega name(…) { … }` is distinguished by the identifier between `mega` and `(`.
 
-**Names.** Magics are module-scope declarations, qualified by their module: the `value` macro of `std.json` is invoked as `magic(json.value)`. Grammar rules are qualified by their grammar: `json.value`. The two namespaces never meet — `magic(…)` resolves macro names, pattern positions resolve rule names — and the standard library names each grammar after its module, so the spellings coincide in §8.8's examples. Which is intended is decided by syntactic position, never by search. Invocation names resolve at parse time (§8.6): a macro must be imported, or declared earlier in the same file, before it is invoked.
+**Names.** megas are module-scope declarations, qualified by their module: the `value` macro of `std.json` is invoked as `mega(json.value)`. Grammar rules are qualified by their grammar: `json.value`. The two namespaces never meet — `mega(…)` resolves macro names, pattern positions resolve rule names — and the standard library names each grammar after its module, so the spellings coincide in §8.8's examples. Which is intended is decided by syntactic position, never by search. Invocation names resolve at parse time (§8.6): a macro must be imported, or declared earlier in the same file, before it is invoked.
 
 ### 8.2. Grammars
 
@@ -754,7 +754,7 @@ Interior comments are matched explicitly, as pattern alternatives. The consequen
 
 - **Rules** reference each other by bare name (recursion is a self-reference) or qualified name across grammars. `recur` is sugar for the innermost enclosing rule.
 - Grammars **extend** others: `grammar ts extends js { rule type { … } }` — overriding or adding rules. This is how user megaprograms patch the shipped grammars. **Lexical profile inheritance:** a child grammar inherits the parent's `skip`, `comment`, `string`, and `island` declarations. The child may override them or append to them.
-- **Profile inheritance:** a magic whose entry pattern is a rule reference inherits that grammar's lexical profile for matching _and_ region scanning; a magic with an inline pattern uses the default profile (horizontal and newline skipping, `"` strings, no comments). `indent`, `eol`, and `line` are reachable only through line-oriented grammars, and the compiler rejects them in flow-oriented contexts and inside `soft`.
+- **Profile inheritance:** a mega whose entry pattern is a rule reference inherits that grammar's lexical profile for matching _and_ region scanning; a mega with an inline pattern uses the default profile (horizontal and newline skipping, `"` strings, no comments). `indent`, `eol`, and `line` are reachable only through line-oriented grammars, and the compiler rejects them in flow-oriented contexts and inside `soft`.
 
 ### 8.3. The Pattern Language
 
@@ -842,7 +842,7 @@ Any fragment accepts a **validator** — `$ident<self.notReserved>`, `$word<std.
 Live islands make embedded data contain real, type-checked Checkmate expressions:
 
 ```checkmate
-magic ui.banner($template body) {
+mega ui.banner($template body) {
     ui.compound([each in body {
         match ($item) {
             text => ui.label($"{$item.text}")
@@ -1002,7 +1002,7 @@ Delegation relies on **grammar-local termination**: a sub-grammar's top-level re
 Matching failures are reported at the **furthest position reached**, with the set of alternatives expected there, contextualized by enclosing `label` blocks and rule names. `where` failures participate like any element. Committed-block failures (§8.3.5) are reported in preference to ordinary furthest failures — "this line belonged to this block" is a better diagnosis than whatever far-away alternative happened to be tried last. If a match later succeeds through another branch, all recorded failures are discarded:
 
 ```text
-error[magic]: mods/hud/src/hud.cm:17:5
+error[mega]: mods/hud/src/hud.cm:17:5
     constraint failed: close == name  ('div' ≠ 'p')
     element opened at mods/hud/src/hud.cm:15:5
     ┆ <p class="hud">
@@ -1011,7 +1011,7 @@ error[magic]: mods/hud/src/hud.cm:17:5
     ┆  ^^^ while matching 'html.element' → branch 'normal' → 'close'
 ```
 
-A magic invocation's pattern must consume the entire region; leftover content is reported the same way, along with any region-scan hint from §8.6.
+A mega invocation's pattern must consume the entire region; leftover content is reported the same way, along with any region-scan hint from §8.6.
 
 #### 8.3.10. Pattern Grammar (Condensed)
 
@@ -1087,7 +1087,7 @@ grammar py {
     }
 }
 
-magic def(py.def as d) {
+mega def(py.def as d) {
     $d.ret $d.fname(each in d.params {
         [when present($ptype) { $ptype $param } else { infer $param }]
     }) {
@@ -1103,7 +1103,7 @@ magic def(py.def as d) {
 ```
 
 ```checkmate
-magic(def) {
+mega(def) {
     def clamp(v: int, lo: int, hi: int) -> int:
         if v < lo:
             return lo
@@ -1135,30 +1135,30 @@ Templates can call any pure Checkmate function with the `@` prefix. Unmarked cal
 
 Compile-time functions receive capture values (records, lists, texts, numbers, spans) and return values or `code` — a compile-time-only syntax-fragment type, constructed by the parsers (`$raw`, `$expr`, `$type`), by a builder API (`cm.code.call`, `cm.code.fn`, …), or by parsing text. **Parsing API:**
 
-- `cm.parseExpr(text, span)` / `cm.parseStmts(text, span)` — Checkmate expressions and statements; the text may contain `magic(…) { … }` invocations, which enter the expansion queue of §8.6 like any other.
+- `cm.parseExpr(text, span)` / `cm.parseStmts(text, span)` — Checkmate expressions and statements; the text may contain `mega(…) { … }` invocations, which enter the expansion queue of §8.6 like any other.
 - `cm.parse(grammar.rule, text, span)` — delegate to any grammar rule (late delegation, §8.3.8).
 
 The `span` argument threads provenance: every node parsed from the text carries it. Nodes built by `cm.code.*` inherit the span of the `@`-call's template element unless given one explicitly. Diagnostics for generated code therefore keep pointing at embedded-language source even through recursive generators — `@py.emitBody`, `@std.html.emitElement`, `@std.re.emitMatcher` are ordinary recursive Checkmate functions. `code` exists only during compilation: §5.2 is strict AOT, so this is metaprogramming, not dynamic code execution.
 
 ### 8.6. Invocation and Post-Expansion
 
-**Region location.** `magic(name) { …region… }` — the parser resolves `name` in the macro namespace (imports precede use; unresolved names are parse errors), then locates the region by brace balancing under the **composed profile**: the comment, string, and island forms of the entry grammar _and of every grammar its entry pattern references_, transitively. At each position the scanner tries comment forms longest-first, then string forms longest-first. If a string form declares an **island** (e.g., `${` to `}`), the scanner recursively balances braces inside the island, allowing nested macro invocations to be discovered and expanded. A single-line string form that does not close on the same line is treated as ordinary text (an apostrophe in prose cannot swallow the file); forms declared `multiline` may span. Everything else counts braces.
+**Region location.** `mega(name) { …region… }` — the parser resolves `name` in the macro namespace (imports precede use; unresolved names are parse errors), then locates the region by brace balancing under the **composed profile**: the comment, string, and island forms of the entry grammar _and of every grammar its entry pattern references_, transitively. At each position the scanner tries comment forms longest-first, then string forms longest-first. If a string form declares an **island** (e.g., `${` to `}`), the scanner recursively balances braces inside the island, allowing nested macro invocations to be discovered and expanded. A single-line string form that does not close on the same line is treated as ordinary text (an apostrophe in prose cannot swallow the file); forms declared `multiline` may span. Everything else counts braces.
 
-Composition is what makes nesting Just Work: an HTML region containing `console.log("}")` (js strings composed in), `// it's fine` (js comments, matched before strings), `` `a ${b} c` `` (js multiline strings), or `console.log(\`val: ${ magic(json.value) { 1 } }\`)` (js island composed in, balancing the inner `{`) all balance correctly — no single profile could know all three, but the pattern's own reference graph does.
+Composition is what makes nesting Just Work: an HTML region containing `console.log("}")` (js strings composed in), `// it's fine` (js comments, matched before strings), `` `a ${b} c` `` (js multiline strings), or `console.log(\`val: ${ mega(json.value) { 1 } }\`)` (js island composed in, balancing the inner `{`) all balance correctly — no single profile could know all three, but the pattern's own reference graph does.
 
-**Region normalization.** The region excludes one line terminator immediately after `{`, one immediately before `}`, and horizontal whitespace at the region's start and end. Line-oriented grammars therefore begin matching at the first content character — `magic(def) {⏎    def clamp(…` matches `def` directly, and `magic(re.compile) {⏎    ^[\w.…` does not silently absorb the indentation into the regex (std.re's skip set is empty). Flow-oriented grammars skip the trimmed whitespace anyway; the rule is uniform and harmless to them.
+**Region normalization.** The region excludes one line terminator immediately after `{`, one immediately before `}`, and horizontal whitespace at the region's start and end. Line-oriented grammars therefore begin matching at the first content character — `mega(def) {⏎    def clamp(…` matches `def` directly, and `mega(re.compile) {⏎    ^[\w.…` does not silently absorb the indentation into the regex (std.re's skip set is empty). Flow-oriented grammars skip the trimmed whitespace anyway; the rule is uniform and harmless to them.
 
 **No speculative extension.** If the pattern fails at the region's last character, the diagnostic reports the furthest failure and adds the scan hint where relevant: _an inner `}` invisible to every composed profile — a brace inside an embedded regex literal, say — may have closed the region early; the heredoc form is exact._ The scanner never guesses a larger extent: a wrong guess can silently absorb host code into the macro, and no syntactic signal distinguishes that case from a genuine truncation. Heredocs are the zero-approximation escape hatch:
 
 ```checkmate
-magic(name) <<tag … tag
+mega(name) <<tag … tag
 ```
 
 — the region extends verbatim to the first line whose content is exactly `tag`; only the edge trims of normalization apply.
 
-A magic invocation's pattern must consume the entire region; leftover content is reported with the furthest-failure diagnostics.
+A mega invocation's pattern must consume the entire region; leftover content is reported with the furthest-failure diagnostics.
 
-**One AST, one queue.** Expansion is a worklist over a single AST representation. `magic()` invocation nodes enter that tree from exactly three places, and all three are processed identically:
+**One AST, one queue.** Expansion is a worklist over a single AST representation. `mega()` invocation nodes enter that tree from exactly three places, and all three are processed identically:
 
 1. literal template text;
 2. text parsed at compile time — `$raw` captures, `$expr`/`$type`/`$block` islands, and `cm.parse*` results;
@@ -1220,7 +1220,7 @@ grammar json {
     }
 }
 
-magic value(json.value as v) {
+mega value(json.value as v) {
     @toValue($v)
 }
 ```
@@ -1228,7 +1228,7 @@ magic value(json.value as v) {
 ```checkmate
 import std.json
 
-infer config = magic(json.value) {
+infer config = mega(json.value) {
     {
         "host": "db.local",
         "ports": [5432, 6432],
@@ -1283,7 +1283,7 @@ grammar toml {
     // (dec, 0x, 0o, 0b), rule floatV, rule datetime — elided
 }
 
-magic value(toml.document as doc) {
+mega value(toml.document as doc) {
     require(@tablesConsistent($doc), "table redefined or reopened with a conflicting type")
     @toValue($doc)
 }
@@ -1347,7 +1347,7 @@ grammar yaml {
     // tags ("!!str" …), merge keys ("<<") — elided
 }
 
-magic value(yaml.document as doc) {
+mega value(yaml.document as doc) {
     require(@anchorsResolve($doc), "alias references an undefined anchor")
     @toValue($doc)
 }
@@ -1356,7 +1356,7 @@ magic value(yaml.document as doc) {
 ```checkmate
 import std.yaml
 
-infer settings = magic(yaml.value) {
+infer settings = mega(yaml.value) {
     ---
     title: Checkmate
     limits:
@@ -1459,7 +1459,7 @@ grammar re {
     }
 }
 
-magic compile(re.pattern as p) {
+mega compile(re.pattern as p) {
     @emitMatcher($p)
 }
 ```
@@ -1469,7 +1469,7 @@ Three guards make the shipped example parse correctly. Class items refuse `]` �
 ```checkmate
 import std.re
 
-infer isEmail = magic(re.compile) {
+infer isEmail = mega(re.compile) {
     ^[\w.+-]+@[\w-]+(\.[\w-]+)+$
 }
 ```
@@ -1542,7 +1542,7 @@ grammar html {
     }
 }
 
-magic fragment(html.document as doc) {
+mega fragment(html.document as doc) {
     engine.ui.mount([each in doc.children {
         match ($item) {
             element => @emitElement($item)
@@ -1555,7 +1555,7 @@ magic fragment(html.document as doc) {
 ```checkmate
 import std.html
 
-magic(html.fragment) {
+mega(html.fragment) {
     <!doctype html>
     <html>
         <style>
@@ -1655,7 +1655,7 @@ grammar js {
     }
 }
 
-magic run(js.program as program) {
+mega run(js.program as program) {
     engine.javascript.Execute(@emitSource($program))
 }
 ```
@@ -1663,13 +1663,13 @@ magic run(js.program as program) {
 ```checkmate
 import std.js
 
-magic(js.run) {
-    const greeting = `Hello, ${ magic(json.value) { "world" } }!`
+mega(js.run) {
+    const greeting = `Hello, ${ mega(json.value) { "world" } }!`
     console.log(greeting)
 }
 ```
 
-Because JS template literals are declared with an `island ( "${" "}" )` in the grammar profile (§8.2), the region scanner pierces the string literal, discovers the nested `magic(json.value)`, and expands it before handing the text to the JS parser. The generated JS becomes ``const greeting = `Hello, world!`;``. ASI works correctly: `return` followed by a newline matches `semi`'s `inserted => eol` branch, terminating the statement exactly where JavaScript specifies.
+Because JS template literals are declared with an `island ( "${" "}" )` in the grammar profile (§8.2), the region scanner pierces the string literal, discovers the nested `mega(json.value)`, and expands it before handing the text to the JS parser. The generated JS becomes ``const greeting = `Hello, world!`;``. ASI works correctly: `return` followed by a newline matches `semi`'s `inserted => eol` branch, terminating the statement exactly where JavaScript specifies.
 
 ---
 

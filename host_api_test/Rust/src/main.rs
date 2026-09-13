@@ -8,7 +8,7 @@
 //!
 //! What this program proves, in order:
 //!   1. The `cme_schema_bindings!` proc macro turns `schemas/shop.cm` into
-//!      Rust scaffolding at HOST COMPILE TIME (no Checkmate magic macros
+//!      Rust scaffolding at HOST COMPILE TIME (no Checkmate mega macros
 //!      involved; this is 100% a Rust proc macro reading the schema file).
 //!   2. The host implements the GENERATED capability trait, registers the
 //!      GENERATED schema descriptor, and loads a whole `shop_mod/` MODULE

@@ -40,7 +40,7 @@ Every valid fixture in the repository parses without ERROR or MISSING nodes:
 
 ```sh
 tree-sitter parse ../../syntax.cm   # the full-language surface fixture
-tree-sitter parse ../../magic.cm    # the megaprogramming fixture
+tree-sitter parse ../../mega.cm    # the megaprogramming fixture
 ```
 
 `boom.cm`, `broken_syntax.cm`, and `tests/fixtures/recovery/*` are

@@ -15,7 +15,7 @@
 //! in both positions.
 
 use cme_core::Span;
-use cme_core::magic::{Accessor, Capture, CaptureKind, CtxBinOp, CtxExpr, TextKind};
+use cme_core::mega::{Accessor, Capture, CaptureKind, CtxBinOp, CtxExpr, TextKind};
 
 use crate::mega::cteval::CtEngine;
 

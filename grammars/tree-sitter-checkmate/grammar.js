@@ -168,7 +168,7 @@ module.exports = grammar({
         $.generic_type,
         $.array_type,
         alias($.identifier, $.type_identifier),
-        $.magic_invocation,
+        $.mega_invocation,
       ),
 
     primitive_type: ($) => choice('int', 'float', 'bool', 'str', 'void'),
@@ -216,8 +216,8 @@ module.exports = grammar({
         $.function_declaration,
         $.impl_declaration,
         $.grammar_declaration,
-        $.magic_declaration,
-        // magic_invocation at top level arrives wrapped in an
+        $.mega_declaration,
+        // mega_invocation at top level arrives wrapped in an
         // expression_statement via _statement, keeping one canonical shape.
         $.schema_declaration,
         $.capability_declaration,
@@ -459,7 +459,7 @@ module.exports = grammar({
         $.splice_array,
         $.compile_time_call,
         $.quantifier_expression,
-        $.magic_invocation,
+        $.mega_invocation,
       ),
 
     _parenthesized: ($) =>
@@ -1000,9 +1000,9 @@ module.exports = grammar({
     // §8.1/§8.4/§8.6 — mega declarations, invocations, regions
     // ------------------------------------------------------------------
 
-    // Magic names are module-qualified: `mega agent.spawn(...)`,
+    // mega names are module-qualified: `mega agent.spawn(...)`,
     // `mega jsonValue(...)` (§8.1 names).
-    magic_declaration: ($) =>
+    mega_declaration: ($) =>
       seq(
         'mega',
         field('name', $.dotted_path),
@@ -1018,7 +1018,7 @@ module.exports = grammar({
     // `agent.spawn! <<TAG ... TAG`. Postfix `!` exists nowhere else in the
     // language (`!=` is one token, `!` is a prefix operator), so prec(1)
     // settles the dotted-path-vs-field-expression ambiguity in the GLR.
-    magic_invocation: ($) =>
+    mega_invocation: ($) =>
       prec(
         1,
         seq(

@@ -19,7 +19,7 @@
 //!   `bool` receives the scalar; a parameter declared as the `Capture` enum
 //!   a megaprogram file declares receives the full tree:
 //!   `enum Capture { Text(str), Int(int), Float(float), List(Capture[]),
-//!   Rec(str, map<str, Capture>), Absent() }` — magic.cm declares exactly
+//!   Rec(str, map<str, Capture>), Absent() }` — mega.cm declares exactly
 //!   this shape, and any file whose templates pass records to `@`-functions
 //!   must declare it; the bridge constructs the enum by name.
 //! * interpreter values → captures, for `let` bindings and template
@@ -38,11 +38,11 @@ use std::collections::{HashMap, HashSet};
 
 use cme_core::Span;
 use cme_core::ast::{PrimitiveType, Stmt, StmtKind, Type};
-use cme_core::magic::{Capture, CaptureKind, PatKind, Pattern, TextKind};
+use cme_core::mega::{Capture, CaptureKind, PatKind, Pattern, TextKind};
 use cme_interp::{CtHost, Interpreter, Value};
 
 use crate::mega::matcher::{GrammarSet, MatchRegion, match_entry};
-use crate::mega::scan::MagicScan;
+use crate::mega::scan::MegaScan;
 use crate::mega::template::escape_checkmate;
 
 /// The compile-time fuel budget (§5.5): one unit per `@`-call / `cm.*`
@@ -66,8 +66,8 @@ pub struct CtResult {
 
 /// The compile-time evaluator for one expansion run.
 ///
-/// Owns the host program: the file's Checkmate statements with every magic
-/// construct (grammar declarations, magic declarations, invocation sites)
+/// Owns the host program: the file's Checkmate statements with every mega
+/// construct (grammar declarations, mega declarations, invocation sites)
 /// blanked out — the `@`-functions, their helper types, and everything they
 /// reference parse from the remainder. Tolerant parsing keeps unrelated
 /// blanks as `Invalid` nodes; only the functions actually invoked must be
@@ -99,14 +99,14 @@ impl<'g> CtEngine<'g> {
     /// Builds the engine from the file being expanded. `scan` must be the
     /// scan of `source` (its spans drive the blanking); `set` is the
     /// compiled grammar set used by late delegation (`cm.parse`).
-    pub fn new(source: &str, scan: &MagicScan, set: &'g GrammarSet) -> Self {
+    pub fn new(source: &str, scan: &MegaScan, set: &'g GrammarSet) -> Self {
         let mut blanked = source.to_string();
         let mut spans: Vec<Span> = Vec::new();
         for grammar in &scan.grammars {
             spans.push(grammar.span);
         }
-        for magic in &scan.magics {
-            spans.push(magic.span);
+        for mega in &scan.megas {
+            spans.push(mega.span);
         }
         for invocation in &scan.invocations {
             spans.push(invocation.span);

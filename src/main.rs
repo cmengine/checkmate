@@ -226,7 +226,7 @@ fn mod_command(
     }
 
     let mut modules = loaded.modules;
-    // Megaprogram expansion stays per file (magics are module-scope
+    // Megaprogram expansion stays per file (megas are module-scope
     // declarations resolved before linking); expansion diagnostics render
     // against the module's ORIGINAL text, like single-file mode.
     for index in 0..modules.len() {
@@ -450,7 +450,7 @@ fn maybe_expand(source: &str) -> Result<String, CliError> {
 
 /// `cme expand <file.cm>`: expands megaprograms in the places they were
 /// called and writes the pure-Checkmate result to a labeled file side by
-/// side with the original (`magic.cm` → `magic_expanded.cm`), then parses
+/// side with the original (`mega.cm` → `mega_expanded.cm`), then parses
 /// and checks that file, reporting against it. With `--provenance`, each
 /// root invocation site is annotated with a `// @ name! src:L:C`
 /// comment; without it, the output stays byte-deterministic.
@@ -485,7 +485,7 @@ fn expand_command(source: &str, path: &str, provenance: bool) -> Result<(), CliE
     render_diagnostics(errors, &text)
 }
 
-/// `magic.cm` → `magic_expanded.cm`, side by side with the original.
+/// `mega.cm` → `mega_expanded.cm`, side by side with the original.
 #[cfg(feature = "cli")]
 fn expanded_path_for(path: &str) -> String {
     let stem = std::path::Path::new(path)

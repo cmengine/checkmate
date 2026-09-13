@@ -1,5 +1,5 @@
-//! The pattern-text parser (WHITEPAPER §8.3): turns a `magic` declaration's
-//! pattern source into a `cme_core::magic::Pattern`.
+//! The pattern-text parser (WHITEPAPER §8.3): turns a `mega` declaration's
+//! pattern source into a `cme_core::mega::Pattern`.
 //!
 //! Bind syntax reconciliation (plan §1.4.5): both `ruleref IDENT` /
 //! `$fragment IDENT` (the §8.8 house style) and the EBNF's `as BIND` are
@@ -10,7 +10,7 @@ use crate::diagnostics::Diagnostic;
 use crate::mega::ctxexpr;
 use crate::mega::profile::{parse_string_literal, skip_ws_and_comments};
 use cme_core::Span;
-use cme_core::magic::{
+use cme_core::mega::{
     AnnotationKind, CharItem, CharSet, ContextField, CtxExpr, FragKind, PatElem, PatKind, Pattern,
 };
 
@@ -37,7 +37,7 @@ pub(crate) const RESERVED: &[&str] = &[
     "verbatim", "in",
 ];
 
-/// Parses a whole pattern (the text inside a magic declaration's parens or a
+/// Parses a whole pattern (the text inside a mega declaration's parens or a
 /// rule body's braces).
 pub fn parse_pattern(text: &str, span: Span) -> Result<Pattern, Diagnostic> {
     let mut parser = PatternParser {
@@ -64,7 +64,7 @@ pub fn parse_rule_declaration(
     text: &str,
     start: usize,
     span: Span,
-) -> Result<(String, Vec<cme_core::magic::ContextField>, Pattern, usize), Diagnostic> {
+) -> Result<(String, Vec<cme_core::mega::ContextField>, Pattern, usize), Diagnostic> {
     let mut parser = PatternParser {
         text,
         span,

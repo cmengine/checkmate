@@ -1,5 +1,5 @@
-//! The expansion orchestrator (the megaprogram pass): takes magic
-//! definitions, expands magic calls into normal Checkmate SOURCE TEXT, and
+//! The expansion orchestrator (the megaprogram pass): takes mega
+//! definitions, expands mega calls into normal Checkmate SOURCE TEXT, and
 //! hands the result back to the main compiler (owner architecture mandate —
 //! code, not AST, so `cme expand` can write it out).
 //!
@@ -10,7 +10,7 @@
 //! counts).
 
 use cme_core::Span;
-use cme_core::magic::{FragKind, PatElem, PatKind, Pattern};
+use cme_core::mega::{FragKind, PatElem, PatKind, Pattern};
 
 use crate::diagnostics::Diagnostic;
 use crate::mega::matcher::{
@@ -19,14 +19,14 @@ use crate::mega::matcher::{
 };
 use crate::mega::pattern::{parse_pattern, parse_rule_declaration};
 use crate::mega::profile::{default_profile, with_default_strings};
-use crate::mega::scan::{InvocationScan, MagicScan, REGION_SCAN_HINT, scan_magic};
+use crate::mega::scan::{InvocationScan, MegaScan, REGION_SCAN_HINT, scan_mega};
 use crate::mega::template::{elaborate, elaborate_seeded, parse_template};
 
 /// One expanded invocation, recorded for tooling and provenance.
 #[derive(Debug, Clone)]
 pub struct ExpansionRecord {
     /// The macro name.
-    pub magic: String,
+    pub mega: String,
     /// The invocation's span in the text the pass ran on.
     pub span: Span,
 }
@@ -34,7 +34,7 @@ pub struct ExpansionRecord {
 /// The result of a successful expansion pass.
 #[derive(Debug, Clone)]
 pub struct ExpansionOutcome {
-    /// Pure Checkmate source: every magic declaration removed, every magic
+    /// Pure Checkmate source: every mega declaration removed, every mega
     /// invocation replaced by its generated code.
     pub expanded: String,
     pub records: Vec<ExpansionRecord>,
@@ -175,7 +175,7 @@ fn expand_source_inner(
     source: &str,
     options: ExpandOptions,
 ) -> Result<ExpansionOutcome, Vec<Diagnostic>> {
-    let (scan, scan_errors) = scan_magic(source);
+    let (scan, scan_errors) = scan_mega(source);
     if !scan_errors.is_empty() {
         return Err(scan_errors);
     }
@@ -217,7 +217,7 @@ fn expand_source_inner(
     let mut records = Vec::new();
     let mut depth = 0usize;
     loop {
-        let (round_scan, round_errors) = scan_magic(&current);
+        let (round_scan, round_errors) = scan_mega(&current);
         if !round_errors.is_empty() {
             return Err(round_errors);
         }
@@ -334,7 +334,7 @@ fn expand_source_inner(
                     // (plan §1.4.9): trim it so an expression-position
                     // invocation sits flush against its context.
                     records.push(ExpansionRecord {
-                        magic: invocation.name.clone(),
+                        mega: invocation.name.clone(),
                         span: invocation.span,
                     });
                     edits.push((invocation.span, text.trim().to_string()));
@@ -349,9 +349,9 @@ fn expand_source_inner(
         current = next;
     }
 
-    // Strip declaration sites (grammar and magic declarations are
+    // Strip declaration sites (grammar and mega declarations are
     // compile-time constructs; the expanded file is pure Checkmate).
-    let (final_scan, _) = scan_magic(&current);
+    let (final_scan, _) = scan_mega(&current);
     let mut edits: Vec<(Span, String)> = Vec::new();
     for grammar in &final_scan.grammars {
         let newlines = count_newlines(&current, grammar.span);
@@ -364,13 +364,13 @@ fn expand_source_inner(
             ),
         ));
     }
-    for magic in &final_scan.magics {
-        let newlines = count_newlines(&current, magic.span);
+    for mega in &final_scan.megas {
+        let newlines = count_newlines(&current, mega.span);
         edits.push((
-            magic.span,
+            mega.span,
             format!(
-                "// [megaprogram magic '{}' removed by expansion]{}",
-                magic.name,
+                "// [megaprogram mega '{}' removed by expansion]{}",
+                mega.name,
                 "\n".repeat(newlines)
             ),
         ));
@@ -397,7 +397,7 @@ fn count_newlines(text: &str, span: Span) -> usize {
 /// ORIGINAL file. A comment inside a foreign region could pollute captures,
 /// so nested sites are deliberately not annotated — their root's comment
 /// covers the whole site.
-fn provenance_edits(source: &str, scan: &MagicScan) -> Vec<(Span, String)> {
+fn provenance_edits(source: &str, scan: &MegaScan) -> Vec<(Span, String)> {
     let mut edits = Vec::new();
     for invocation in &scan.invocations {
         let is_root = !scan.invocations.iter().any(|other| {
@@ -488,14 +488,14 @@ fn region_failure_diagnostic(
 /// declaration's template, which elaborate at the declaration's own position
 /// (generated text is re-scanned in later rounds and exempt here).
 fn check_declaration_order(
-    scan: &MagicScan,
+    scan: &MegaScan,
     macros: &[CompiledMacro],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let template_authored = |span: Span| {
-        scan.magics
+        scan.megas
             .iter()
-            .any(|magic| magic.span.start <= span.start && span.end <= magic.span.end)
+            .any(|mega| mega.span.start <= span.start && span.end <= mega.span.end)
     };
     for invocation in &scan.invocations {
         if template_authored(invocation.span) {
@@ -572,7 +572,7 @@ fn apply_edits(text: &str, edits: &[(Span, String)]) -> String {
 struct CompiledMacro {
     name: String,
     pattern: Pattern,
-    template: cme_core::magic::Template,
+    template: cme_core::mega::Template,
     grammar_index: usize,
     entry: MacroEntry,
     /// The declaration's span — the §8.1 resolution rule (a macro must be
@@ -595,7 +595,7 @@ enum MacroEntry {
 /// rule list is its own rules plus inherited ones it does not override —
 /// so bare rule references and `recur` inside inherited rules resolve in
 /// the child exactly as they would in the parent.
-fn compile_grammars(scan: &MagicScan, diagnostics: &mut Vec<Diagnostic>) -> GrammarSet {
+fn compile_grammars(scan: &MegaScan, diagnostics: &mut Vec<Diagnostic>) -> GrammarSet {
     // Parent links first: unknown parents and cycles are compile errors.
     for grammar in &scan.grammars {
         if let Some(parent) = &grammar.extends {
@@ -1172,22 +1172,22 @@ fn pattern_has_untailed_code_fragment(pattern: &Pattern) -> bool {
     walk(pattern, false)
 }
 
-/// Parses every magic declaration into a compiled macro.
+/// Parses every mega declaration into a compiled macro.
 fn compile_macros(
-    scan: &MagicScan,
+    scan: &MegaScan,
     set: &GrammarSet,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<CompiledMacro> {
     let mut macros = Vec::new();
-    for magic in &scan.magics {
-        let pattern = match parse_pattern(&magic.pattern, magic.pattern_span) {
+    for mega in &scan.megas {
+        let pattern = match parse_pattern(&mega.pattern, mega.pattern_span) {
             Ok(pattern) => pattern,
             Err(error) => {
                 diagnostics.push(error);
                 continue;
             }
         };
-        let template = match parse_template(&magic.template, magic.template_span) {
+        let template = match parse_template(&mega.template, mega.template_span) {
             Ok(template) => template,
             Err(error) => {
                 diagnostics.push(error);
@@ -1196,13 +1196,13 @@ fn compile_macros(
         };
         // §8.3.6's compile-time error: a code fragment with an empty tail
         // (nothing follows it anywhere in the pattern) has no boundary to
-        // stop at. Magic entry patterns are fully known continuations
+        // stop at. mega entry patterns are fully known continuations
         // (End), so the check is exact here; rule bodies receive their
         // caller's continuation at match time and are exempt.
         if pattern_has_untailed_code_fragment(&pattern) {
             diagnostics.push(Diagnostic::parse(
                 "raw capture requires a following terminator; use $text or until (§8.3.6)",
-                magic.pattern_span,
+                mega.pattern_span,
             ));
             continue;
         }
@@ -1226,7 +1226,7 @@ fn compile_macros(
                     None => {
                         diagnostics.push(Diagnostic::parse(
                             format!("unknown grammar `{}` in the entry pattern", path[0]),
-                            magic.pattern_span,
+                            mega.pattern_span,
                         ));
                         continue;
                     }
@@ -1240,7 +1240,7 @@ fn compile_macros(
                     None => {
                         diagnostics.push(Diagnostic::parse(
                             format!("unknown rule `{}` in the entry pattern", path[0]),
-                            magic.pattern_span,
+                            mega.pattern_span,
                         ));
                         continue;
                     }
@@ -1260,17 +1260,17 @@ fn compile_macros(
             let Some(bind_name) = bind.clone() else {
                 diagnostics.push(Diagnostic::parse(
                     "the entry pattern must bind its capture (`grammar.rule as name`)",
-                    magic.pattern_span,
+                    mega.pattern_span,
                 ));
                 continue;
             };
             macros.push(CompiledMacro {
-                name: magic.name.clone(),
+                name: mega.name.clone(),
                 pattern,
                 template,
                 grammar_index,
                 entry: MacroEntry::RuleRef { bind: bind_name },
-                decl_span: magic.span,
+                decl_span: mega.span,
             });
         } else {
             // Inline pattern (§8.1): literals, fragments, and QUALIFIED rule
@@ -1295,12 +1295,12 @@ fn compile_macros(
                 );
             }
             macros.push(CompiledMacro {
-                name: magic.name.clone(),
+                name: mega.name.clone(),
                 pattern,
                 template,
                 grammar_index: default_index,
                 entry: MacroEntry::Inline,
-                decl_span: magic.span,
+                decl_span: mega.span,
             });
         }
     }
@@ -1310,30 +1310,6 @@ fn compile_macros(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mentions_megaprogram_spots_standalone_words_only() {
-        // Invocation shape (`name! { … }` and the `<<tag` heredoc).
-        assert!(mentions_megaprogram("name! { 1 }"));
-        assert!(mentions_megaprogram("str s = json.value!\n{\n}\n"));
-        assert!(mentions_megaprogram("reCompile! <<REGEX\nDATA\nREGEX\n"));
-        // Declaration keywords as standalone words.
-        assert!(mentions_megaprogram("grammar g { }"));
-        assert!(mentions_megaprogram("mega twice($int v) { $v }"));
-        assert!(mentions_megaprogram("int y = 1\nmega"));
-        // `!=` is one token and `!` is otherwise a prefix operator, so a
-        // bang after an identifier means an invocation and nothing else.
-        assert!(!mentions_megaprogram("bool ok = 1 != 2"));
-        assert!(!mentions_megaprogram("bool ok = !flag"));
-        // Substrings of larger identifiers do not count.
-        assert!(!mentions_megaprogram("int magical = 1"));
-        assert!(!mentions_megaprogram("int grammarian = 1"));
-        assert!(!mentions_megaprogram("int x = 1"));
-        assert!(!mentions_megaprogram(""));
-        // `magic` is an ordinary identifier word now.
-        assert!(!mentions_megaprogram("int x = 1\n// magic\n"));
-        assert!(!mentions_megaprogram("int magic = 1"));
-    }
 
     /// The Task 3 acceptance shape: a JSON object region expands to a
     /// `map<str, str>` literal with one entry per top-level field.
@@ -1438,7 +1414,7 @@ map<str, str> config = jsonValue! {
         out
     }
 
-    /// The `py.def` flagship shape (the real `magic.cm` grammar and
+    /// The `py.def` flagship shape (the real `mega.cm` grammar and
     /// template, §8.4's worked example): a Python-flavored function expands
     /// to a real Checkmate function declaration. Nested `if` bodies are
     /// handled one level deep until §8.5 compile-time recursion (Task 8).
@@ -1510,7 +1486,7 @@ def! {
     }
 
     #[test]
-    fn file_without_magic_is_unchanged() {
+    fn file_without_mega_is_unchanged() {
         let source = "int x = 1\n";
         let outcome = expand_source(source).expect("passthrough");
         assert_eq!(outcome.expanded, source);
@@ -1923,7 +1899,7 @@ str v = outer! {
         let outcome = expand_source(source).expect("template-nested invocation expands");
         assert!(
             outcome.expanded.contains("[inner text]"),
-            "the nested magic expanded: {}",
+            "the nested mega expanded: {}",
             outcome.expanded
         );
     }

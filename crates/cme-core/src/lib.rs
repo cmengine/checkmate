@@ -27,7 +27,7 @@
 //! assert_eq!(stmt.span.end, 13);
 //! ```
 
-pub mod magic;
+pub mod mega;
 /// The §9 host-contract data model: versions, schema files, capabilities,
 /// interfaces, and the shared FFI boundary types. The shapes live here;
 /// recognition and parsing stay in `cme-compiler`.

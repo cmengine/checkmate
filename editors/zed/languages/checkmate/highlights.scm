@@ -190,10 +190,10 @@
 (rule_declaration
   name: (identifier) @function)
 
-(magic_declaration
+(mega_declaration
   name: (dotted_path) @function)
 
-(magic_invocation
+(mega_invocation
   macro: (dotted_path) @function.call)
 
 (pattern_rule_ref
@@ -244,7 +244,7 @@
 "?" @operator
 
 ; --------------------------------------------------------------------------
-; Magic regions: foreign-language content inside name! { ... } and
+; mega regions: foreign-language content inside name! { ... } and
 ; heredocs. Rendered as embedded/special strings by themes.
 ; --------------------------------------------------------------------------
 

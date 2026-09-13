@@ -1,5 +1,5 @@
 //! Expansion templates (WHITEPAPER §8.4): parsing template text into a
-//! `cme_core::magic::Template` and elaborating it with a capture tree into
+//! `cme_core::mega::Template` and elaborating it with a capture tree into
 //! generated Checkmate SOURCE TEXT.
 //!
 //! Template constructs: `$cap` / `$cap.field` splices (with `.matched` /
@@ -19,7 +19,7 @@
 
 use crate::diagnostics::Diagnostic;
 use cme_core::Span;
-use cme_core::magic::{
+use cme_core::mega::{
     Accessor, Capture, CaptureKind, CtxExpr, Template, TextKind, TmplNode, TmplStrPart, TmplValue,
 };
 
@@ -29,7 +29,7 @@ use super::matcher::MatchRegion;
 use super::profile::{parse_string_literal, skip_ws_and_comments};
 use cme_interp::Value;
 
-/// Parses a whole template (the text inside a magic declaration's braces).
+/// Parses a whole template (the text inside a mega declaration's braces).
 pub fn parse_template(text: &str, span: Span) -> Result<Template, Diagnostic> {
     let mut parser = TmplParser {
         text,

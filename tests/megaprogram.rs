@@ -2,7 +2,7 @@
 //! `cme expand` sidecar file, and clean parse/check of expanded output.
 //!
 //! Task 3 pins the JSON and `py.def` acceptance shapes plus the CLI; the
-//! full `magic.cm` run-through (every megaprogram returning 0) is Task 5.
+//! full `mega.cm` run-through (every megaprogram returning 0) is Task 5.
 
 use cme_compiler::diagnostics::ParseOutcome;
 
@@ -211,19 +211,19 @@ def! {
 
 /// Files without megaprogram constructs pass through byte-for-byte.
 #[test]
-fn expansion_passthrough_without_magic() {
+fn expansion_passthrough_without_mega() {
     let source = "int x = 1\nint y = x + 2\n";
     let outcome = cme_compiler::mega::expand::expand_source(source).unwrap();
     assert_eq!(outcome.expanded, source);
     assert!(outcome.records.is_empty());
 }
 
-/// The REAL `magic.cm` fixture end to end (Task 5): expand → parse → check →
+/// The REAL `mega.cm` fixture end to end (Task 5): expand → parse → check →
 /// run on the tree walker → `main` returns 0, meaning every megaprogram
 /// (JSON, TOML, YAML, CSS, HTML, RE, JS, Python, SQL) expanded and verified.
 #[test]
-fn magic_cm_expands_checks_and_runs_clean() {
-    let source = include_str!("../magic.cm");
+fn mega_cm_expands_checks_and_runs_clean() {
+    let source = include_str!("../mega.cm");
     let outcome = cme_compiler::mega::expand::expand_source(source).unwrap();
 
     // Every macro in the fixture was invoked, and no invocation or
@@ -233,9 +233,9 @@ fn magic_cm_expands_checks_and_runs_clean() {
     // $template demos, the type-position listOf, the §8.2 extends demo, the
     // §8.3.4 context-accumulation demo, and the §8.6 heredoc region.
     assert_eq!(outcome.records.len(), 21, "expected 21 invocations");
-    let rescan = cme_compiler::mega::scan::scan_magic(&outcome.expanded).0;
+    let rescan = cme_compiler::mega::scan::scan_mega(&outcome.expanded).0;
     assert!(rescan.invocations.is_empty(), "invocations remain");
-    assert!(rescan.magics.is_empty(), "magic declarations remain");
+    assert!(rescan.megas.is_empty(), "mega declarations remain");
     assert!(rescan.grammars.is_empty(), "grammar declarations remain");
 
     // The expanded program is pure Checkmate: clean parse and type-check.
@@ -243,7 +243,7 @@ fn magic_cm_expands_checks_and_runs_clean() {
     let type_errors = cme_compiler::check::check(&parsed.statements);
     assert!(
         type_errors.is_empty(),
-        "expanded magic.cm failed to check: {:?}",
+        "expanded mega.cm failed to check: {:?}",
         type_errors
             .iter()
             .map(|error| error.message().to_string())
@@ -255,11 +255,11 @@ fn magic_cm_expands_checks_and_runs_clean() {
         .statements
         .iter()
         .any(|stmt| matches!(&stmt.kind, cme_core::ast::StmtKind::FuncDecl { name, .. } if name == "main"));
-    assert!(has_main, "magic.cm must declare main");
+    assert!(has_main, "mega.cm must declare main");
     let interpreter = cme_interp::Interpreter::new(&parsed.statements);
     let result = interpreter
         .invoke("main", &[])
-        .expect("magic.cm must run without interpreter errors");
+        .expect("mega.cm must run without interpreter errors");
     assert_eq!(
         result,
         cme_interp::Value::Int(0),
@@ -367,7 +367,7 @@ int main() {
         "nested expansion should be inside the island: {}",
         outcome.expanded
     );
-    let rescan = cme_compiler::mega::scan::scan_magic(&outcome.expanded).0;
+    let rescan = cme_compiler::mega::scan::scan_mega(&outcome.expanded).0;
     assert!(rescan.invocations.is_empty(), "invocations remain");
 
     let parsed = parse_clean(&outcome.expanded);
@@ -422,16 +422,16 @@ END
     assert_eq!(result, cme_interp::Value::Int(0));
 }
 
-/// `cme expand magic.cm` writes a labeled sidecar file next to the original
-/// whose parse+check is clean; `cme run magic.cm` runs the expansion.
+/// `cme expand mega.cm` writes a labeled sidecar file next to the original
+/// whose parse+check is clean; `cme run mega.cm` runs the expansion.
 #[cfg(feature = "cli")]
 #[test]
 fn cme_expand_writes_the_sidecar_file() {
     use std::process::Command;
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let fixture = std::path::Path::new(manifest_dir).join("magic.cm");
-    let sidecar = std::path::Path::new(manifest_dir).join("magic_expanded.cm");
+    let fixture = std::path::Path::new(manifest_dir).join("mega.cm");
+    let sidecar = std::path::Path::new(manifest_dir).join("mega_expanded.cm");
     let _ = std::fs::remove_file(&sidecar);
 
     let output = Command::new(env!("CARGO_BIN_EXE_cme"))
@@ -443,7 +443,7 @@ fn cme_expand_writes_the_sidecar_file() {
     assert!(output.status.success(), "cme expand failed: {stderr}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("magic_expanded.cm"),
+        stdout.contains("mega_expanded.cm"),
         "expand should name the sidecar: {stdout}"
     );
     assert!(sidecar.exists(), "the sidecar file must exist");

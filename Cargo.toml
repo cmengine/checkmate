@@ -33,6 +33,7 @@ cme-interp = { path = "crates/cme-interp", version = "0.2.0", optional = true }
 cme-runtime = { path = "crates/cme-runtime", version = "0.2.0", optional = true }
 cme-api = { path = "crates/cme-api", version = "0.2.0", optional = true }
 cme-schema-macro = { path = "crates/cme-schema-macro", version = "0.2.0", optional = true }
+cme-lsp = { path = "crates/cme-lsp", version = "0.2.0", optional = true }
 
 # The root integration tests drive the real front end and interpreter.
 [dev-dependencies]
@@ -49,8 +50,13 @@ runtime = ["dep:cme-runtime"]
 # The Rust host embedding API (WHITEPAPER §13.1): Engine, CompiledProgram,
 # Context, ExecutionLimits.
 api = ["dep:cme-api"]
-# The CLI toolchain requires these crates to function
-cli = ["core", "compiler", "interp", "runtime"]
+# The language server (WHITEPAPER §12, §14): the salsa-backed `cme lsp`
+# pipeline served over stdio by the same binary.
+lsp = ["dep:cme-lsp"]
+# The CLI toolchain requires these crates to function. The language server
+# is part of the developer binary (`cme lsp`), so `cli` pulls it in; the
+# default build stays dependency-free.
+cli = ["core", "compiler", "interp", "runtime", "lsp"]
 # Compile-time-verified host bindings from .cm schema files (§9.6); pulls
 # in `api` because the generated code references the host API surface.
 schema-macro = ["api", "dep:cme-schema-macro"]

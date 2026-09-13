@@ -15,12 +15,14 @@ const USAGE: &str = "Usage: cme <lex|ast|check|run|expand> <file.cm> [--provenan
      \n       cme <check|ast|run> <mod_dir | path/to/mod.toml> [--schema <schema.cm>]\
      \n       cme schema <schema.cm>\
      \n       cme codegen-c <schema.cm>\
+     \n       cme lsp\
      \n  (--provenance is an `expand` option: it annotates each root magic site \
        with `// @ magic(name) src:line:col`)\
      \n  (--schema registers a §9 schema contract; repeatable; a mod's [schemas] \
        table narrows the grant — §9.5)\
      \n  a mod directory holds a mod.toml and a src/ tree (WHITEPAPER §10); \
-       lex and expand stay single-file commands";
+       lex and expand stay single-file commands\
+     \n  `cme lsp` serves the Checkmate language server (§14) over stdio";
 
 #[cfg(feature = "cli")]
 enum CliError {
@@ -56,6 +58,11 @@ fn run() -> Result<(), CliError> {
         } else {
             positional.push(arg);
         }
+    }
+    // `cme lsp` runs the language server over stdio; it takes no file and
+    // no schema arguments.
+    if positional.as_slice() == ["lsp"] {
+        return lsp_command();
     }
     // `expand` accepts an optional `--provenance` flag; other commands take
     // exactly one file argument.
@@ -134,6 +141,22 @@ fn run() -> Result<(), CliError> {
             "unknown command: {command}\n{USAGE}"
         ))),
     }
+}
+
+/// `cme lsp`: the language server (WHITEPAPER §12, §14). Serves JSON-RPC
+/// over stdio until the client disconnects; the analysis is salsa-backed
+/// (see `cme-lsp`).
+#[cfg(feature = "cli")]
+fn lsp_command() -> Result<(), CliError> {
+    #[cfg(feature = "lsp")]
+    return cme_lsp::run_stdio().map_err(CliError::Io);
+
+    #[cfg(not(feature = "lsp"))]
+    Err(CliError::Usage(
+        "the 'lsp' command requires the 'lsp' feature on the root package\
+         \nTry compiling with: cargo build --features cli"
+            .to_string(),
+    ))
 }
 
 /// The resolved root of a mod: where to load from and how to prefix module

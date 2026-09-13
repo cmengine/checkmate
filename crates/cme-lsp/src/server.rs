@@ -189,6 +189,11 @@ impl LanguageServer for CheckmateLsp {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        // The document is no longer open: drop it so later requests answer
+        // empty, exactly like requests for never-opened documents.
+        if let Ok(mut state) = self.state.lock() {
+            state.files.remove(&params.text_document.uri);
+        }
         self.client
             .publish_diagnostics(params.text_document.uri, Vec::new(), None)
             .await;

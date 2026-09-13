@@ -1,0 +1,248 @@
+//! The salsa incremental database (WHITEPAPER §14).
+//!
+//! Every opened document is a salsa [`SourceFile`] input. Parsing,
+//! megaprogram expansion, and type checking are tracked queries, so an edit
+//! recomputes only the queries the edit invalidated and results for
+//! unchanged inputs are reused from the memo tables.
+//!
+//! Anchoring rule: editor-visible diagnostics always refer to the text the
+//! user sees. For files that mention megaprogram constructs (§8) the
+//! compiler pipeline expands them to a virtual text first, and diagnostics
+//! from that virtual text cannot be trusted to anchor against the original
+//! buffer — so such files surface ONLY the expansion diagnostics, which the
+//! expander anchors in the original file (plan §2). Pure-Checkmate files
+//! surface the full parse + check pipeline.
+
+use cme_compiler::diagnostics::Diagnostic;
+use cme_core::ast::Stmt;
+use salsa::Database as Db;
+
+/// What pipeline a document runs through. Detected once per edit by
+/// [`sniff_kind`] and stored as part of the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileKind {
+    /// A `.cm` script (the §2 language surface, possibly with §8
+    /// megaprogramming).
+    Script,
+    /// A §9 schema file: its first significant token is `schema`.
+    Schema,
+}
+
+/// Decides the pipeline for a document from its text. Schema files start
+/// with the `schema` keyword (after comments and whitespace); everything
+/// else is a script. The main lexer has no schema keywords — §9 files go
+/// through a dedicated scanner — so the keyword arrives as an identifier.
+pub fn sniff_kind(text: &str) -> FileKind {
+    let (tokens, _) = cme_compiler::lexer::lex_with_errors(text);
+    for token in &tokens {
+        match token.token {
+            // Newline tokens carry the line breaks that comments leave
+            // behind, so they (and block comments) do not settle the kind.
+            cme_compiler::lexer::Token::Newline | cme_compiler::lexer::Token::BlockComment => {
+                continue;
+            }
+            cme_compiler::lexer::Token::Ident("schema") => return FileKind::Schema,
+            _ => return FileKind::Script,
+        }
+    }
+    FileKind::Script
+}
+
+/// An opened document: its text plus the pipeline it runs through.
+#[salsa::input]
+pub struct SourceFile {
+    #[returns(deref)]
+    pub text: String,
+    #[returns(copy)]
+    pub kind: FileKind,
+}
+
+/// The §8 megaprogram expansion of a document. For files that do not
+/// mention megaprogram constructs this is the identity; for schema files
+/// expansion never runs.
+#[salsa::tracked]
+pub struct Expansion<'db> {
+    /// The expanded (pure Checkmate) text. Empty when expansion failed.
+    #[tracked]
+    #[returns(deref)]
+    pub text: String,
+
+    /// Expansion diagnostics, anchored in the ORIGINAL file text.
+    #[tracked]
+    #[returns(deref)]
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// The recovered AST of the analysis text plus its parse-stage diagnostics.
+/// The analysis text is the expanded text for megaprogram files and the
+/// original text otherwise; spans always refer to that analysis text.
+#[salsa::tracked]
+pub struct Parsed<'db> {
+    #[tracked]
+    #[returns(deref)]
+    pub statements: Vec<Stmt>,
+
+    #[tracked]
+    #[returns(deref)]
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Step 1: expand megaprograms (§8). Identity for plain scripts and schema
+/// files.
+#[salsa::tracked]
+pub fn expansion(db: &dyn Db, file: SourceFile) -> Expansion<'_> {
+    let text = file.text(db);
+    if file.kind(db) != FileKind::Script || !cme_compiler::mega::expand::mentions_megaprogram(text)
+    {
+        return Expansion::new(db, text.to_string(), Vec::new());
+    }
+    match cme_compiler::mega::expand::expand_source(text) {
+        Ok(outcome) => Expansion::new(db, outcome.expanded, Vec::new()),
+        // Expansion failed: the expander's diagnostics anchor in the
+        // original text, so they are editor-visible as-is.
+        Err(diagnostics) => Expansion::new(db, String::new(), diagnostics),
+    }
+}
+
+/// Step 2: the tolerant parse of the analysis text. Never fails: the parser
+/// plants `Invalid` placeholders and keeps every diagnostic it can.
+#[salsa::tracked(returns(copy))]
+pub fn parse(db: &dyn Db, file: SourceFile) -> Parsed<'_> {
+    let expansion = expansion(db, file);
+    if !expansion.diagnostics(db).is_empty() {
+        // A failed expansion leaves nothing to parse.
+        return Parsed::new(db, Vec::new(), Vec::new());
+    }
+    let text = expansion.text(db);
+    let outcome = cme_compiler::parse_source(text);
+    let mut diagnostics = outcome.diagnostics;
+    // Single-file builds reject self-rooted imports (§10.3), matching the
+    // CLI's standalone gate.
+    diagnostics.extend(cme_compiler::mods::standalone_import_diagnostics(
+        &outcome.statements,
+    ));
+    Parsed::new(db, outcome.statements, diagnostics)
+}
+
+/// Step 3: type-check the recovered program (§2.6–§2.16, §11, §A.4–§A.7).
+/// Runs on the recovered AST so partial results survive parse errors, just
+/// like the CLI's `check`.
+#[salsa::tracked]
+pub fn check_diags(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagnostic>> {
+    let parsed = parse(db, file);
+    Arc::new(cme_compiler::check::check(parsed.statements(db)))
+}
+
+use std::sync::Arc;
+
+/// The editor-visible diagnostics for a document, anchored in the text the
+/// user sees (see the module docs for the anchoring rule).
+#[salsa::tracked]
+pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagnostic>> {
+    match file.kind(db) {
+        FileKind::Schema => {
+            let text = file.text(db);
+            let outcome = cme_compiler::schema::parse_schema_file(text);
+            Arc::new(outcome.diagnostics)
+        }
+        FileKind::Script => {
+            let expansion = expansion(db, file);
+            if !expansion.diagnostics(db).is_empty() {
+                return Arc::new(expansion.diagnostics(db).to_vec());
+            }
+            let parsed = parse(db, file);
+            let mut all = parsed.diagnostics(db).to_vec();
+            all.extend(check_diags(db, file).iter().cloned());
+            Arc::new(all)
+        }
+    }
+}
+
+/// The salsa database for the Checkmate language server. Handlers share one
+/// database behind a mutex; every document operation is a short synchronous
+/// query burst, so there is nothing to await while holding it.
+#[salsa::db]
+#[derive(Clone, Default)]
+pub struct Database {
+    storage: salsa::Storage<Self>,
+}
+
+#[salsa::db]
+impl salsa::Database for Database {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use salsa::Setter;
+
+    #[test]
+    fn sniff_detects_schema_files() {
+        assert_eq!(sniff_kind("schema engine v1.4.0\n"), FileKind::Schema);
+        // Comments and blank lines precede the keyword.
+        assert_eq!(
+            sniff_kind("// engine contract\n\nschema engine v1.0.0\n"),
+            FileKind::Schema
+        );
+        assert_eq!(sniff_kind("int hp = 100\n"), FileKind::Script);
+        assert_eq!(sniff_kind(""), FileKind::Script);
+    }
+
+    #[test]
+    fn script_diagnostics_flow_through_the_pipeline() {
+        let mut db = Database::default();
+        let file = SourceFile::new(
+            &db,
+            "int main() {\n    int hp = 100\n    return hp\n}\n".to_string(),
+            FileKind::Script,
+        );
+        assert!(diagnostics(&db, file).is_empty());
+
+        file.set_text(&mut db)
+            .to("int main() {\n    int hp = tr\n    return hp\n}\n".to_string());
+        let diags = diagnostics(&db, file);
+        assert_eq!(diags.len(), 1, "one type error: bool into int");
+    }
+
+    #[test]
+    fn schema_diagnostics_flow_through_their_pipeline() {
+        let mut db = Database::default();
+        let file = SourceFile::new(&db, "schema engine v1.4.0\n".to_string(), FileKind::Schema);
+        assert!(diagnostics(&db, file).is_empty());
+        file.set_text(&mut db).to("schema 1.4.0\n".to_string());
+        assert!(!diagnostics(&db, file).is_empty());
+    }
+
+    #[test]
+    fn expansion_diagnostics_anchor_for_megaprogram_files() {
+        let db = Database::default();
+        // An unterminated magic region fails expansion; a clean but broken
+        // template body fails expansion too (template compile error).
+        let broken = "magic twice(\n    $int value\n) {\n    ???\n}\n\nmagic(twice) {\n    21\n}\n";
+        let file = SourceFile::new(&db, broken.to_string(), FileKind::Script);
+        let diags = diagnostics(&db, file);
+        assert!(!diags.is_empty(), "expansion errors surface to the editor");
+    }
+
+    #[test]
+    fn parse_exposes_recovered_statements_for_broken_code() {
+        let db = Database::default();
+        // The trailing valid declaration survives the broken one.
+        let file = SourceFile::new(
+            &db,
+            "int = ???\nint hp = 100\n".to_string(),
+            FileKind::Script,
+        );
+        let parsed = parse(&db, file);
+        assert!(
+            !parsed.diagnostics(&db).is_empty(),
+            "parse reports the broken statement"
+        );
+        assert!(
+            parsed
+                .statements(&db)
+                .iter()
+                .any(|stmt| matches!(&stmt.kind, cme_core::ast::StmtKind::VarDecl { name, .. } if name == "hp")),
+            "the healthy declaration is still in the tree"
+        );
+    }
+}

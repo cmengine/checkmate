@@ -50,22 +50,30 @@ Zed loads extensions from disk in development mode:
 3. Zed builds the grammar from `grammars/tree-sitter-checkmate` and
    registers `Checkmate` for `.cm` files.
 
-The grammar entry in `extension.toml` points at this repository at a pinned
-revision (`rev`). After pulling changes to the grammar, bump `rev` to the new
-commit so Zed rebuilds against it:
+Even for a local dev install, Zed fetches the grammar through git: it
+clones `[grammars.checkmate] repository` at `rev` and builds the parser from
+`path` inside that checkout. It never uses grammar files sitting next to the
+extension, so `repository`/`rev` must resolve to a checkout that contains the
+grammar. While the grammar commits live only on this machine, `extension.toml`
+points at a local `file://` URL:
+
+```toml
+[grammars.checkmate]
+repository = "file:///absolute/path/to/checkmate"
+rev = "<commit containing grammars/tree-sitter-checkmate>"
+path = "grammars/tree-sitter-checkmate"
+```
+
+After changing the grammar, commit it and bump `rev` to the new commit so Zed
+rebuilds against it (uncommitted edits are invisible to the clone):
 
 ```sh
 git rev-parse HEAD   # then set [grammars.checkmate] rev in extension.toml
 ```
 
-If Zed runs on a machine where the pinned revision is unavailable (no push
-access yet), replace `repository`/`rev` with a local `file://` URL:
-
-```toml
-[grammars.checkmate]
-repository = "file:///absolute/path/to/checkmate/grammars/tree-sitter-checkmate"
-rev = "main"
-```
+Once the grammar commits are pushed, switch `repository` back to
+`https://github.com/cmengine/checkmate` with the pushed `rev` so the
+extension also installs on other machines.
 
 ## Publishing
 

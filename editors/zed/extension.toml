@@ -7,6 +7,6 @@ description = "Checkmate (CME) language support: syntax highlighting, brackets, 
 repository = "https://github.com/cmengine/checkmate"
 
 [grammars.checkmate]
-repository = "https://github.com/cmengine/checkmate"
-rev = "88b78162a213d24f0290f221b3c0344bb8501461"
+repository = "file:///Users/matin/source/checkmate"
+rev = "e630671e1c565a6df25bde7de0e41a4f5bb0b42a"
 path = "grammars/tree-sitter-checkmate"

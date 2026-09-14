@@ -27,6 +27,12 @@ pub fn declaration_span(resolved: &Resolved<'_>) -> Option<Span> {
         Resolved::ImportSegment { import, segment } => {
             import.segments.get(*segment).map(|(_, span)| *span)
         }
+        // Schema-owned symbols have no declaration in this file: §9.3
+        // boundary types and contract members live in the schema document.
+        Resolved::SchemaStruct(_)
+        | Resolved::SchemaEnum(_)
+        | Resolved::SchemaContract { .. }
+        | Resolved::SchemaMember { .. } => None,
         // Built-ins have no declaration in this file.
         Resolved::BuiltinType { .. }
         | Resolved::BuiltinConstructor { .. }
@@ -84,6 +90,10 @@ fn name_of<'a>(resolved: &'a Resolved<'_>) -> Option<&'a str> {
         Resolved::ImportSegment { import, segment } => {
             import.segments.get(*segment).map(|(name, _)| name.as_str())
         }
+        Resolved::SchemaStruct(struct_type) => Some(&struct_type.name),
+        Resolved::SchemaEnum(enum_type) => Some(&enum_type.name),
+        Resolved::SchemaContract { contract, .. } => Some(&contract.name),
+        Resolved::SchemaMember { member, .. } => Some(&member.name),
         Resolved::BuiltinType { name, .. } => Some(name),
         Resolved::BuiltinConstructor { name, .. } => Some(name),
         Resolved::ArrayLength => Some("length"),
@@ -130,6 +140,15 @@ fn same_symbol(left: &Resolved<'_>, right: &Resolved<'_>) -> bool {
             Resolved::BuiltinConstructor { name: b, .. },
         ) => a == b,
         (Resolved::ArrayLength, Resolved::ArrayLength) => true,
+        (Resolved::SchemaStruct(a), Resolved::SchemaStruct(b)) => a.name_span == b.name_span,
+        (Resolved::SchemaEnum(a), Resolved::SchemaEnum(b)) => a.name_span == b.name_span,
+        (
+            Resolved::SchemaContract { contract: a, .. },
+            Resolved::SchemaContract { contract: b, .. },
+        ) => std::ptr::eq(a, b),
+        (Resolved::SchemaMember { member: a, .. }, Resolved::SchemaMember { member: b, .. }) => {
+            std::ptr::eq(a, b)
+        }
         _ => false,
     }
 }

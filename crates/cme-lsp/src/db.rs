@@ -14,6 +14,7 @@
 //! surface the full parse + check pipeline.
 
 use cme_compiler::diagnostics::Diagnostic;
+use cme_compiler::schema::SchemaContext;
 use cme_core::ast::Stmt;
 use salsa::Database as Db;
 
@@ -124,21 +125,36 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parsed<'_> {
     Parsed::new(db, outcome.statements, diagnostics)
 }
 
-/// Step 3: type-check the recovered program (§2.6–§2.16, §11, §A.4–§A.7).
-/// Runs on the recovered AST so partial results survive parse errors, just
-/// like the CLI's `check`.
-#[salsa::tracked]
-pub fn check_diags(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagnostic>> {
+/// Step 3: type-check the recovered program (§2.6–§2.16, §11, §A.4–§A.7,
+/// and §9 when a schema contract is active). Runs on the recovered AST so
+/// partial results survive parse errors, just like the CLI's `check`.
+/// The single-file pipeline serves loose sources; a document inside a mod
+/// is checked through the mod assembly instead (see
+/// [`crate::workspace::ModPlan`]).
+///
+/// This step is deliberately NOT a tracked query: a `SchemaContext` cannot
+/// be a salsa argument (it is not internable), and the parse beneath it is
+/// memoized, which is where the reuse matters.
+pub fn check_diags(
+    db: &dyn Db,
+    file: SourceFile,
+    schema: Option<&SchemaContext>,
+) -> Vec<Diagnostic> {
     let parsed = parse(db, file);
-    Arc::new(cme_compiler::check::check(parsed.statements(db)))
+    cme_compiler::check::check_with_schema(parsed.statements(db), schema)
 }
 
 use std::sync::Arc;
 
-/// The editor-visible diagnostics for a document, anchored in the text the
-/// user sees (see the module docs for the anchoring rule).
-#[salsa::tracked]
-pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagnostic>> {
+/// The editor-visible diagnostics for a document under the SINGLE-FILE
+/// pipeline, anchored in the text the user sees (see the module docs for
+/// the anchoring rule). `schema` is the §9 contract auto-detected for the
+/// document's mod, when one exists.
+pub fn diagnostics(
+    db: &dyn Db,
+    file: SourceFile,
+    schema: Option<&SchemaContext>,
+) -> Arc<Vec<Diagnostic>> {
     match file.kind(db) {
         FileKind::Schema => {
             let text = file.text(db);
@@ -152,7 +168,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Arc<Vec<Diagnostic>> {
             }
             let parsed = parse(db, file);
             let mut all = parsed.diagnostics(db).to_vec();
-            all.extend(check_diags(db, file).iter().cloned());
+            all.extend(check_diags(db, file, schema));
             Arc::new(all)
         }
     }
@@ -195,11 +211,11 @@ mod tests {
             "int main() {\n    int hp = 100\n    return hp\n}\n".to_string(),
             FileKind::Script,
         );
-        assert!(diagnostics(&db, file).is_empty());
+        assert!(diagnostics(&db, file, None).is_empty());
 
         file.set_text(&mut db)
             .to("int main() {\n    int hp = tr\n    return hp\n}\n".to_string());
-        let diags = diagnostics(&db, file);
+        let diags = diagnostics(&db, file, None);
         assert_eq!(diags.len(), 1, "one type error: bool into int");
     }
 
@@ -207,9 +223,9 @@ mod tests {
     fn schema_diagnostics_flow_through_their_pipeline() {
         let mut db = Database::default();
         let file = SourceFile::new(&db, "schema engine 1.4.0\n".to_string(), FileKind::Schema);
-        assert!(diagnostics(&db, file).is_empty());
+        assert!(diagnostics(&db, file, None).is_empty());
         file.set_text(&mut db).to("schema 1.4.0\n".to_string());
-        assert!(!diagnostics(&db, file).is_empty());
+        assert!(!diagnostics(&db, file, None).is_empty());
     }
 
     #[test]
@@ -219,7 +235,7 @@ mod tests {
         // template body fails expansion too (template compile error).
         let broken = "mega twice(\n    $int value\n) {\n    ???\n}\n\ntwice! {\n    21\n}\n";
         let file = SourceFile::new(&db, broken.to_string(), FileKind::Script);
-        let diags = diagnostics(&db, file);
+        let diags = diagnostics(&db, file, None);
         assert!(!diags.is_empty(), "expansion errors surface to the editor");
     }
 

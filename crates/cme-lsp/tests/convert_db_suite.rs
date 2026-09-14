@@ -110,7 +110,7 @@ fn diagnostics_carry_source_severity_and_range() {
     let src = "int hp = tr\n";
     let db = cme_lsp::db::Database::default();
     let file = cme_lsp::db::SourceFile::new(&db, src.to_string(), cme_lsp::db::FileKind::Script);
-    let diagnostics = cme_lsp::features::diagnostics::publishable(&db, file);
+    let diagnostics = cme_lsp::features::diagnostics::publishable(&db, file, None);
     assert_eq!(diagnostics.len(), 1);
     let diagnostic = &diagnostics[0];
     assert_eq!(
@@ -161,7 +161,7 @@ fn script_diagnostics_surface_parse_and_check_errors() {
         "int = ???\nint hp = tr\n".to_string(),
         cme_lsp::db::FileKind::Script,
     );
-    let diagnostics = cme_lsp::db::diagnostics(&db, file);
+    let diagnostics = cme_lsp::db::diagnostics(&db, file, None);
     assert!(
         diagnostics.len() >= 2,
         "a parse error AND a check error surface: {:?}",
@@ -177,13 +177,13 @@ fn edits_recompute_diagnostics_incrementally() {
         "int main() {\n    int hp = 100\n    return hp\n}\n".to_string(),
         cme_lsp::db::FileKind::Script,
     );
-    assert!(cme_lsp::db::diagnostics(&db, file).is_empty());
+    assert!(cme_lsp::db::diagnostics(&db, file, None).is_empty());
     file.set_text(&mut db)
         .to("int main() {\n    int hp = tr\n    return hp\n}\n".to_string());
-    assert_eq!(cme_lsp::db::diagnostics(&db, file).len(), 1);
+    assert_eq!(cme_lsp::db::diagnostics(&db, file, None).len(), 1);
     file.set_text(&mut db)
         .to("int main() {\n    int hp = 100\n    return hp\n}\n".to_string());
-    assert!(cme_lsp::db::diagnostics(&db, file).is_empty());
+    assert!(cme_lsp::db::diagnostics(&db, file, None).is_empty());
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn standalone_self_imports_are_rejected_like_the_cli() {
         "import self.rules\n\nint main() {\n    return 0\n}\n".to_string(),
         cme_lsp::db::FileKind::Script,
     );
-    let diagnostics = cme_lsp::db::diagnostics(&db, file);
+    let diagnostics = cme_lsp::db::diagnostics(&db, file, None);
     assert!(
         !diagnostics.is_empty(),
         "a single-file build rejects self-rooted imports (§10.3)"
@@ -206,7 +206,7 @@ fn broken_megaprograms_surface_expansion_diagnostics() {
     let db = cme_lsp::db::Database::default();
     let broken = "mega twice(\n    $int value\n) {\n    ???\n}\n\ntwice! {\n    21\n}\n";
     let file = cme_lsp::db::SourceFile::new(&db, broken.to_string(), cme_lsp::db::FileKind::Script);
-    assert!(!cme_lsp::db::diagnostics(&db, file).is_empty());
+    assert!(!cme_lsp::db::diagnostics(&db, file, None).is_empty());
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn healthy_megaprograms_run_the_full_pipeline() {
     let healthy = "int log(int x) {\n    return x\n}\n\nmega twice(\n    $int value\n) {\n    log($value)\n}\n\nint main() {\n    twice! {\n        21\n    }\n    return 0\n}\n";
     let file =
         cme_lsp::db::SourceFile::new(&db, healthy.to_string(), cme_lsp::db::FileKind::Script);
-    let diagnostics = cme_lsp::db::diagnostics(&db, file);
+    let diagnostics = cme_lsp::db::diagnostics(&db, file, None);
     assert!(
         diagnostics.is_empty(),
         "{:?}",
@@ -231,9 +231,9 @@ fn schema_files_check_through_the_schema_parser() {
         "schema engine 1.4.0\n".to_string(),
         cme_lsp::db::FileKind::Schema,
     );
-    assert!(cme_lsp::db::diagnostics(&db, file).is_empty());
+    assert!(cme_lsp::db::diagnostics(&db, file, None).is_empty());
     file.set_text(&mut db).to("schema 1.4.0\n".to_string());
-    assert!(!cme_lsp::db::diagnostics(&db, file).is_empty());
+    assert!(!cme_lsp::db::diagnostics(&db, file, None).is_empty());
 }
 
 #[test]

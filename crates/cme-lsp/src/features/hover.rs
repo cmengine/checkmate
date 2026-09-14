@@ -55,6 +55,38 @@ pub fn signature(resolved: &Resolved<'_>) -> String {
                 .collect();
             format!("import {}", path.join("."))
         }
+        Resolved::SchemaStruct(struct_type) => format!("struct {}", struct_type.name),
+        Resolved::SchemaEnum(enum_type) => format!("enum {}", enum_type.name),
+        Resolved::SchemaContract {
+            namespace,
+            contract,
+        } => {
+            format!(
+                "{} {}.{}",
+                contract.kind.keyword(),
+                namespace,
+                contract.name
+            )
+        }
+        Resolved::SchemaMember {
+            namespace,
+            contract,
+            member,
+        } => {
+            let params: Vec<String> = member
+                .params
+                .iter()
+                .map(|param| format!("{} {}", crate::analysis::render_type(&param.ty), param.name))
+                .collect();
+            format!(
+                "{} {}.{}.{}({})",
+                crate::analysis::render_type(&member.return_ty),
+                namespace,
+                contract.name,
+                member.name,
+                params.join(", ")
+            )
+        }
         Resolved::BuiltinType { name, .. } => name.clone(),
         Resolved::BuiltinConstructor { name, .. } => name.clone(),
         Resolved::ArrayLength => "array.length".to_string(),

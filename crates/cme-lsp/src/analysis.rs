@@ -13,8 +13,10 @@
 //! checker — it only surfaces what the checker accepts.
 
 use cme_compiler::lexer::{Token, lex_with_errors};
+use cme_compiler::schema::{ContractKind, SchemaContext, SchemaFile, SchemaMember};
 use cme_core::Span;
 use cme_core::ast::{Block, Expr, Stmt, StmtKind, Type};
+use std::sync::Arc;
 
 use crate::resolve::infer_expr_type;
 
@@ -164,11 +166,37 @@ pub struct Analysis<'a> {
     /// `(local index, initializer)` for every `infer` declaration, recorded
     /// during the walk so crystallization can run after registration.
     infer_initializers: Vec<(usize, &'a Expr)>,
+    /// The §9 contract auto-detected for the document's mod, when one
+    /// exists. Kept alive here so the schema symbols below can borrow from
+    /// it (completion, hover, and the dotted capability paths all read
+    /// through it).
+    pub schema: Option<Arc<SchemaContext>>,
+    /// The granted namespaces' §9.3 boundary types, flattened into the
+    /// same symbol shapes the parser produces. Kept separate from
+    /// `structs`/`enums` so document symbols and go-to-definition stay
+    /// anchored in THIS document; completion and resolution consult them
+    /// deliberately.
+    pub schema_structs: Vec<StructSymbol>,
+    pub schema_enums: Vec<EnumSymbol>,
+    /// The owning mod's dotted module paths (§10.3), for `import self.*`
+    /// completion. Empty outside mods.
+    pub mod_modules: Vec<Vec<String>>,
 }
 
 impl<'a> Analysis<'a> {
     /// Builds the symbol table for one document revision.
     pub fn build(source: &'a str, statements: &'a [Stmt]) -> Analysis<'a> {
+        Self::build_with_schema(source, statements, None, Vec::new())
+    }
+
+    /// Builds the symbol table with the mod's auto-detected schema surface
+    /// and module table (§9, §10.3).
+    pub fn build_with_schema(
+        source: &'a str,
+        statements: &'a [Stmt],
+        schema: Option<std::sync::Arc<SchemaContext>>,
+        mod_modules: Vec<Vec<String>>,
+    ) -> Analysis<'a> {
         let (lexed, _) = lex_with_errors(source);
         let tokens: Vec<TokenInfo> = lexed
             .into_iter()
@@ -180,8 +208,13 @@ impl<'a> Analysis<'a> {
         let mut analysis = Analysis {
             statements,
             tokens,
+            schema_structs: Vec::new(),
+            schema_enums: Vec::new(),
+            schema,
+            mod_modules,
             ..Analysis::default()
         };
+        analysis.register_schema_surface();
 
         // Top-level: only declarations are legal (§2), and the checker
         // rejects anything else, so the symbol walk mirrors that shape.
@@ -204,6 +237,162 @@ impl<'a> Analysis<'a> {
         analysis
     }
 
+    /// Flattens the granted namespaces' §9.3 boundary types into
+    /// `schema_structs`/`schema_enums`. Spans are zero: these declarations
+    /// live in the schema file, not this document — completion and hover
+    /// read their fields, while go-to-definition correctly reports that
+    /// they are not declared here.
+    fn register_schema_surface(&mut self) {
+        let Some(schema) = self.schema.clone() else {
+            return;
+        };
+        let zero = Span::new(0, 0);
+        for file in schema.set.namespaces() {
+            if schema.target(&file.namespace).is_none() {
+                continue;
+            }
+            for item in &file.items {
+                match item {
+                    cme_core::schema::SchemaItem::Struct(decl) => {
+                        // Type names are unique across namespaces (§9 set
+                        // build); a duplicate here means the set survived
+                        // with a collision — the first namespace wins.
+                        if self.schema_structs.iter().any(|s| s.name == decl.name) {
+                            continue;
+                        }
+                        self.schema_structs.push(StructSymbol {
+                            name: decl.name.clone(),
+                            name_span: zero,
+                            span: zero,
+                            type_params: Vec::new(),
+                            fields: decl
+                                .fields
+                                .iter()
+                                .map(|field| (field.name.clone(), field.ty.clone(), zero))
+                                .collect(),
+                        });
+                    }
+                    cme_core::schema::SchemaItem::Enum(decl) => {
+                        if self.schema_enums.iter().any(|e| e.name == decl.name) {
+                            continue;
+                        }
+                        self.schema_enums.push(EnumSymbol {
+                            name: decl.name.clone(),
+                            name_span: zero,
+                            span: zero,
+                            type_params: Vec::new(),
+                            variants: decl
+                                .variants
+                                .iter()
+                                .map(|variant| VariantSymbol {
+                                    name: variant.name.clone(),
+                                    name_span: zero,
+                                    fields: variant
+                                        .fields
+                                        .iter()
+                                        .map(|field| (field.name.clone(), field.ty.clone()))
+                                        .collect(),
+                                })
+                                .collect(),
+                        });
+                    }
+                    cme_core::schema::SchemaItem::Contract(_) => {}
+                }
+            }
+        }
+    }
+
+    /// The schema-declared struct with this name (§9.3), when the contract
+    /// grants it.
+    pub fn schema_struct(&self, name: &str) -> Option<&StructSymbol> {
+        self.schema_structs.iter().find(|s| s.name == name)
+    }
+
+    /// The schema-declared enum with this name (§9.3), when the contract
+    /// grants it.
+    pub fn schema_enum(&self, name: &str) -> Option<&EnumSymbol> {
+        self.schema_enums.iter().find(|e| e.name == name)
+    }
+
+    /// Reads a dotted host path out of a token range: identifiers and dots
+    /// only (the shape `receiver_token_range` accepts), rooted at a GRANTED
+    /// schema namespace (§7.2). Returns the namespace file plus the
+    /// segments after the root, so `game.window` yields (`game`, ["window"]).
+    pub fn host_path(&self, range: (usize, usize)) -> Option<(&SchemaFile, Vec<String>)> {
+        let (start, end) = range;
+        if start >= end {
+            return None;
+        }
+        let mut dotted = String::new();
+        for token in &self.tokens[start..end] {
+            match &token.kind {
+                // The dots are explicit in the stream; identifiers append
+                // verbatim, so `game . window` and `game.window` agree.
+                Tok::Ident(name) => dotted.push_str(name),
+                Tok::Dot => dotted.push('.'),
+                _ => return None,
+            }
+        }
+        let schema = self.schema.as_ref()?;
+        let mut segments = dotted.split('.');
+        let root = segments.next()?;
+        let file = schema.set.namespace(root)?;
+        schema.target(root)?; // ungranted namespaces are not paths into the contract
+        Some((file, segments.map(str::to_string).collect()))
+    }
+
+    /// The contract of a granted namespace by name (§9.1).
+    pub fn schema_contract(
+        &'a self,
+        namespace: &str,
+        contract: &str,
+    ) -> Option<&'a cme_core::schema::SchemaContract> {
+        let schema = self.schema.as_ref()?;
+        schema
+            .set
+            .namespace(namespace)?
+            .contracts()
+            .find(|decl| decl.name == contract)
+    }
+
+    /// The member of `namespace.contract` with this name, when it is
+    /// visible at the program's target version (§9.5).
+    pub fn schema_member(
+        &'a self,
+        namespace: &str,
+        contract: &str,
+        member: &str,
+    ) -> Option<&'a SchemaMember> {
+        let target = self.schema.as_ref()?.target(namespace)?;
+        self.schema_contract(namespace, contract)?
+            .members
+            .iter()
+            .find(|decl| decl.name == member && decl.visible_at(target))
+    }
+
+    /// The members of `namespace.contract` visible at the program's target
+    /// version, in declaration order (§9.5).
+    pub fn visible_schema_members(
+        &'a self,
+        namespace: &str,
+        contract: &str,
+    ) -> Option<Vec<&'a SchemaMember>> {
+        let target = self.schema.as_ref()?.target(namespace)?;
+        Some(
+            self.schema_contract(namespace, contract)?
+                .members
+                .iter()
+                .filter(|decl| decl.visible_at(target))
+                .collect(),
+        )
+    }
+
+    /// Whether the contract is a capability (the script calls it) or an
+    /// interface (the script implements it) — completion labels differ.
+    pub fn contract_kind(&self, namespace: &str, contract: &str) -> Option<ContractKind> {
+        Some(self.schema_contract(namespace, contract)?.kind)
+    }
+
     /// The index range of tokens covering `span`.
     fn token_range(&self, span: Span) -> (usize, usize) {
         let start = self
@@ -213,6 +402,13 @@ impl<'a> Analysis<'a> {
             .tokens
             .partition_point(|token| token.span.start < span.end);
         (start, end)
+    }
+
+    /// The public form of [`Analysis::token_range`], for features that
+    /// need to scan a declaration's tokens directly (impl-member
+    /// completion finds the block's opening brace this way).
+    pub fn token_span_range(&self, span: Span) -> (usize, usize) {
+        self.token_range(span)
     }
 
     fn token(&self, index: usize) -> Option<&TokenInfo> {

@@ -21,6 +21,7 @@ pub mod db;
 pub mod features;
 pub mod resolve;
 pub mod server;
+pub mod workspace;
 
 /// Runs the language server over stdio. Blocks until the client disconnects.
 pub fn run_stdio() -> Result<(), String> {

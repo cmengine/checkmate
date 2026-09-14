@@ -14,6 +14,7 @@
 
 use cme_core::Span;
 use cme_core::ast::{BinaryOp, Expr, ExprKind, PrimitiveType, Stmt, StmtKind, Type};
+use cme_core::schema::{SchemaContract, SchemaMember};
 
 use crate::analysis::{
     Analysis, EnumSymbol, LocalKind, LocalSymbol, StructSymbol, Tok, render_type,
@@ -50,6 +51,24 @@ pub enum Resolved<'a> {
     ImportSegment {
         import: &'a crate::analysis::ImportSymbol,
         segment: usize,
+    },
+    /// A §9.3 boundary type declared in a schema file: the shape lives in
+    /// the contract, not this document, so go-to-definition has no local
+    /// span for it.
+    SchemaStruct(&'a StructSymbol),
+    SchemaEnum(&'a EnumSymbol),
+    /// A capability or interface contract reached as a host path
+    /// (`game.window` — §9.1).
+    SchemaContract {
+        namespace: &'a str,
+        contract: &'a SchemaContract,
+    },
+    /// A capability/interface member reached through a host path
+    /// (`game.window.OpenWindow` — §9.1).
+    SchemaMember {
+        namespace: &'a str,
+        contract: &'a SchemaContract,
+        member: &'a SchemaMember,
     },
     /// A built-in type the language owns (§2.4, §2.8, §11).
     BuiltinType {
@@ -189,6 +208,14 @@ impl<'a> Analysis<'a> {
         if let Some(enum_type) = self.enums.iter().find(|e| &e.name == name) {
             return Some(Resolved::Enum(enum_type));
         }
+        // §9.3 boundary types the mod's schema declares (§2.5: they are
+        // PascalCase, so they never collide with locals).
+        if let Some(struct_type) = self.schema_struct(name) {
+            return Some(Resolved::SchemaStruct(struct_type));
+        }
+        if let Some(enum_type) = self.schema_enum(name) {
+            return Some(Resolved::SchemaEnum(enum_type));
+        }
         // A bare variant name in a `match` arm pattern (§2.15).
         if let Some((enum_type, variant)) = self.find_variant(name) {
             return Some(Resolved::Variant { enum_type, variant });
@@ -284,7 +311,8 @@ impl<'a> Analysis<'a> {
     }
 
     /// Resolves `name` right after a dot: a struct field, an enum variant,
-    /// or the array `.length` property (§11).
+    /// the array `.length` property (§11), or a §9 capability member
+    /// reached through a host path (`game.window.OpenWindow`).
     fn resolve_member(&'a self, name: &str, dot_token_index: usize) -> Option<Resolved<'a>> {
         // The dot is at dot_token_index - 1; resolve the receiver in front.
         let receiver = self.receiver_token_range(dot_token_index - 1)?;
@@ -294,12 +322,12 @@ impl<'a> Analysis<'a> {
                 .get(dot_token_index)
                 .map(|token| token.span.start)
                 .unwrap_or(usize::MAX),
-        )?;
-        match &ty {
-            Type::Named {
+        );
+        match ty.as_ref() {
+            Some(Type::Named {
                 name: type_name,
                 args,
-            } => {
+            }) => {
                 // A struct receiver that is not a field, or an enum
                 // receiver that is not a variant, falls through to the
                 // impl-member check below.
@@ -347,8 +375,34 @@ impl<'a> Analysis<'a> {
                 }
                 None
             }
-            Type::Array(_) if name == "length" => Some(Resolved::ArrayLength),
-            _ => None,
+            Some(Type::Array(_)) if name == "length" => Some(Resolved::ArrayLength),
+            _ => {
+                // A dotted host path rooted at a granted namespace
+                // (`game.window.OpenWindow`): the member resolves against
+                // the schema contract (§9.1), visible at the mod's target
+                // version (§9.5).
+                if let Some(receiver) = self.receiver_token_range(dot_token_index - 1)
+                    && let Some((file, segments)) = self.host_path(receiver)
+                    && let [contract_name] = segments.as_slice()
+                    && let Some(contract) =
+                        file.contracts().find(|decl| decl.name == *contract_name)
+                    && let Some(target) = self
+                        .schema
+                        .as_ref()
+                        .and_then(|schema| schema.target(&file.namespace))
+                    && let Some(member) = contract
+                        .members
+                        .iter()
+                        .find(|decl| decl.name == name && decl.visible_at(target))
+                {
+                    return Some(Resolved::SchemaMember {
+                        namespace: file.namespace.as_str(),
+                        contract,
+                        member,
+                    });
+                }
+                None
+            }
         }
     }
 
@@ -491,18 +545,18 @@ impl<'a> Analysis<'a> {
         }
     }
 
-    /// Types a bare identifier: a local, a struct, or an enum name.
+    /// Types a bare identifier: a local, a struct, or an enum name. §9.3
+    /// schema boundary types type the same way — the checker registers
+    /// them into the flat type space.
     fn type_of_bare_ident(&self, name: &str, offset: usize) -> Option<Type> {
         if let Some(local) = self.resolve_local(name, offset) {
             return Some(local.ty.clone());
         }
-        if self.structs.iter().any(|s| s.name == name) {
-            return Some(Type::Named {
-                name: name.to_string(),
-                args: Vec::new(),
-            });
-        }
-        if self.enums.iter().any(|e| e.name == name) {
+        if self.structs.iter().any(|s| s.name == name)
+            || self.enums.iter().any(|e| e.name == name)
+            || self.schema_struct(name).is_some()
+            || self.schema_enum(name).is_some()
+        {
             return Some(Type::Named {
                 name: name.to_string(),
                 args: Vec::new(),
@@ -573,13 +627,14 @@ impl<'a> Analysis<'a> {
         best_before.or(first)
     }
 
-    /// The enum variant with this name, across all enums (variant names are
-    /// unique in the flat type space the checker enforces).
+    /// The enum variant with this name, across all enums — the script's
+    /// own and the schema's §9.3 boundary enums (variant names are unique
+    /// in the flat type space the checker enforces).
     fn find_variant(
         &'a self,
         name: &str,
     ) -> Option<(&'a EnumSymbol, &'a crate::analysis::VariantSymbol)> {
-        for enum_type in &self.enums {
+        for enum_type in self.enums.iter().chain(self.schema_enums.iter()) {
             if let Some(variant) = enum_type.variants.iter().find(|v| v.name == name) {
                 return Some((enum_type, variant));
             }
@@ -978,6 +1033,93 @@ pub fn hover_markdown(resolved: &Resolved<'_>) -> String {
                 segment
             )
         }
+        Resolved::SchemaStruct(struct_type) => {
+            let fields: Vec<String> = struct_type
+                .fields
+                .iter()
+                .map(|(name, ty, _)| format!("    {}: {}", name, render_type(ty)))
+                .collect();
+            format!(
+                "```checkmate\nstruct {} {{\n{}\n}}\n```\n*§9.3 boundary type — declared in the schema*",
+                struct_type.name,
+                fields.join("\n")
+            )
+        }
+        Resolved::SchemaEnum(enum_type) => {
+            let variants: Vec<String> = enum_type
+                .variants
+                .iter()
+                .map(|variant| {
+                    let fields: Vec<String> = variant
+                        .fields
+                        .iter()
+                        .map(|(name, ty)| format!("{}: {}", name, render_type(ty)))
+                        .collect();
+                    if fields.is_empty() {
+                        format!("    {}()", variant.name)
+                    } else {
+                        format!("    {}({})", variant.name, fields.join(", "))
+                    }
+                })
+                .collect();
+            format!(
+                "```checkmate\nenum {} {{\n{}\n}}\n```\n*§9.3 boundary type — declared in the schema*",
+                enum_type.name,
+                variants.join("\n")
+            )
+        }
+        Resolved::SchemaContract {
+            namespace,
+            contract,
+        } => {
+            let kind = contract.kind.keyword();
+            let members: Vec<String> = contract.members.iter().map(schema_member_line).collect();
+            format!(
+                "```checkmate\n{} {}.{}\n```\n```checkmate\n{}\n```\n*{} member(s) — §9.1*",
+                kind,
+                namespace,
+                contract.name,
+                if members.is_empty() {
+                    "    // no members".to_string()
+                } else {
+                    members.join("\n")
+                },
+                contract.members.len()
+            )
+        }
+        Resolved::SchemaMember {
+            namespace,
+            contract,
+            member,
+        } => {
+            let params: Vec<String> = member
+                .params
+                .iter()
+                .map(|param| format!("{} {}", render_type(&param.ty), param.name))
+                .collect();
+            let mut notes = Vec::new();
+            if member.since != cme_core::schema::Version::ZERO {
+                notes.push(format!("since {}", member.since));
+            }
+            if member.requirement == cme_core::schema::MemberRequirement::Optional {
+                notes.push("optional".to_string());
+            }
+            let note = if notes.is_empty() {
+                String::new()
+            } else {
+                format!("\n*{}*", notes.join(", "))
+            };
+            format!(
+                "```checkmate\n{} {}.{}.{}({})\n```\n*{} member* (§9.1){}",
+                render_type(&member.return_ty),
+                namespace,
+                contract.name,
+                member.name,
+                params.join(", "),
+                contract.kind.keyword(),
+                note
+            )
+        }
         Resolved::BuiltinType { name, description } => {
             format!("```checkmate\n{}\n```\n{description}", name)
         }
@@ -996,4 +1138,19 @@ fn generics(type_params: &[String]) -> String {
     } else {
         format!("<{}>", type_params.join(", "))
     }
+}
+
+/// One schema member rendered as a signature line: `Sprite OpenWindow(str title)`.
+fn schema_member_line(member: &SchemaMember) -> String {
+    let params: Vec<String> = member
+        .params
+        .iter()
+        .map(|param| format!("{} {}", render_type(&param.ty), param.name))
+        .collect();
+    format!(
+        "    {} {}({})",
+        render_type(&member.return_ty),
+        member.name,
+        params.join(", ")
+    )
 }

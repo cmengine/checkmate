@@ -12,6 +12,7 @@
 //! coordinates that cannot anchor against the user's buffer.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
 use salsa::Setter;
@@ -30,12 +31,15 @@ use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 use crate::analysis::Analysis;
 use crate::convert;
 use crate::db::{self, Database, FileKind, SourceFile};
+use crate::workspace::{ModPlan, Workspace};
 
-/// Session state: the salsa database plus the uri → input map.
+/// Session state: the salsa database, the uri → input map, and the
+/// mod/schema discovery cache.
 #[derive(Default)]
 struct ServerState {
     db: Database,
     files: HashMap<Uri, SourceFile>,
+    workspace: Workspace,
 }
 
 impl std::fmt::Debug for ServerState {
@@ -73,11 +77,22 @@ impl CheckmateLsp {
     }
 
     /// Updates (or creates) the salsa input for a document from its full
-    /// text and publishes the resulting diagnostics.
+    /// text and publishes the resulting diagnostics. The pipeline follows
+    /// the document's place in the workspace:
+    ///
+    /// - schema files → the §9 front end (diagnostics only);
+    /// - scripts inside a mod → the mod assembly checked as a whole, with
+    ///   per-module re-anchoring and the mod's auto-detected schemas;
+    /// - loose scripts → the single-file pipeline (schema context when a
+    ///   mod root still provides one).
     async fn upsert_and_publish(&self, uri: Uri, text: String, version: Option<i32>) {
         let diagnostics = {
             let state = &mut *self.state.lock().expect("lsp state poisoned");
-            let ServerState { db, files } = state;
+            let ServerState {
+                db,
+                files,
+                workspace,
+            } = state;
             let kind = db::sniff_kind(&text);
             if let Some(file) = files.get(&uri) {
                 file.set_text(db).to(text);
@@ -86,7 +101,58 @@ impl CheckmateLsp {
                 let file = SourceFile::new(db, text, kind);
                 files.insert(uri.clone(), file);
             }
-            crate::features::diagnostics::publishable(db, files[&uri])
+            let file = files[&uri];
+            match kind {
+                FileKind::Schema => crate::features::diagnostics::publishable(db, file, None),
+                FileKind::Script => {
+                    // A synthetic uri (no file path) cannot live in a mod;
+                    // the single-file pipeline serves it.
+                    match uri.to_file_path() {
+                        None => crate::features::diagnostics::publishable(db, file, None),
+                        Some(path) => {
+                            let path = path.into_owned();
+                            let open = open_buffer_closure(files, db);
+                            let mod_root = workspace.mod_root(&path);
+                            let schema = workspace.schema_context(&path, &open);
+                            let module_path = mod_root
+                                .as_deref()
+                                .and_then(|root| workspace.module_path(root, &path));
+                            match (mod_root, module_path) {
+                                (Some(mod_root), Some(module_path)) => {
+                                    match ModPlan::build(&mod_root, schema.as_deref(), &open) {
+                                        Some(plan) => {
+                                            // The mod pipeline checked the
+                                            // whole tree; publish this
+                                            // module's share, re-anchored to
+                                            // its own text.
+                                            let text_now = file.text(db);
+                                            let index = convert::line_index(db, file);
+                                            plan.diagnostics_for_module(&module_path)
+                                                .iter()
+                                                .map(|diagnostic| {
+                                                    convert::diagnostic(
+                                                        &index, text_now, diagnostic,
+                                                    )
+                                                })
+                                                .collect()
+                                        }
+                                        None => crate::features::diagnostics::publishable(
+                                            db,
+                                            file,
+                                            schema.as_deref(),
+                                        ),
+                                    }
+                                }
+                                _ => crate::features::diagnostics::publishable(
+                                    db,
+                                    file,
+                                    schema.as_deref(),
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
         };
         let _ = version;
         self.client
@@ -98,26 +164,47 @@ impl CheckmateLsp {
     /// The analysis borrows the salsa database behind the state lock, so it
     /// never escapes this call — only the owned result does.
     ///
-    /// Returns `None` for unopened documents, schema files (diagnostics
-    /// only), and megaprogram files (their parse spans live in expanded-text
+    /// Returns `None` for unopened documents, schema files (their own §9
+    /// feature set applies, see [`Self::with_schema_document`]), and
+    /// megaprogram files (their parse spans live in expanded-text
     /// coordinates — see the module docs).
     fn with_analysis<R>(
         &self,
         uri: &Uri,
         f: impl FnOnce(&Analysis<'_>, &convert::LineIndex, &str) -> R,
     ) -> Option<R> {
-        let state = self.state.lock().ok()?;
-        let file = *state.files.get(uri)?;
-        if file.kind(&state.db) != FileKind::Script {
+        let state = &mut *self.state.lock().ok()?;
+        let ServerState {
+            db,
+            files,
+            workspace,
+        } = state;
+        let file = *files.get(uri)?;
+        if file.kind(db) != FileKind::Script {
             return None;
         }
-        let text = file.text(&state.db);
+        let text = file.text(db);
         if cme_compiler::mega::expand::mentions_megaprogram(text) {
             return None;
         }
-        let parsed = db::parse(&state.db, file);
-        let index = convert::line_index(&state.db, file);
-        let analysis = Analysis::build(text, parsed.statements(&state.db));
+        // The mod's auto-detected schema contract and module table feed the
+        // analysis: completion, hover, and resolution see the §9 surface.
+        let (schema, mod_modules) = match uri.to_file_path() {
+            Some(path) => {
+                let open = open_buffer_closure(files, db);
+                let schema = workspace.schema_context(path.as_ref(), &open);
+                let modules = workspace
+                    .mod_root(path.as_ref())
+                    .map(|root| workspace.module_table(&root))
+                    .unwrap_or_default();
+                (schema, modules)
+            }
+            None => (None, Vec::new()),
+        };
+        let parsed = db::parse(db, file);
+        let index = convert::line_index(db, file);
+        let analysis =
+            Analysis::build_with_schema(text, parsed.statements(db), schema, mod_modules);
         Some(f(&analysis, &index, text))
     }
 }
@@ -307,6 +394,25 @@ impl CheckmateLsp {
             Some(expansion.text(db).to_string())
         });
         Ok(expanded.flatten())
+    }
+}
+
+/// Builds the buffer-lookup closure the workspace discovery layer reads
+/// through: the editor text for open documents, so unsaved schema and
+/// module state drives the analysis exactly like saved state would.
+fn open_buffer_closure<'a>(
+    files: &'a HashMap<Uri, SourceFile>,
+    db: &'a dyn salsa::Database,
+) -> impl Fn(&Path) -> Option<String> + 'a {
+    move |path: &Path| {
+        files.iter().find_map(|(uri, file)| {
+            let file_path = uri.to_file_path()?;
+            if file_path.as_ref() == path {
+                Some(file.text(db).to_string())
+            } else {
+                None
+            }
+        })
     }
 }
 

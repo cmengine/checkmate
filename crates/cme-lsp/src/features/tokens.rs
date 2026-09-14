@@ -65,6 +65,12 @@ pub fn semantic_tokens(
             Resolved::Variant { variant, .. } => (6, token.span == variant.name_span),
             Resolved::Enum(enum_type) => (7, token.span == enum_type.name_span),
             Resolved::Struct(struct_type) => (8, token.span == struct_type.name_span),
+            // §9 schema surface: host paths paint as namespaces, boundary
+            // types as their kind.
+            Resolved::SchemaStruct(_) => (8, false),
+            Resolved::SchemaEnum(_) => (7, false),
+            Resolved::SchemaContract { contract, .. } => (0, token.span == contract.span),
+            Resolved::SchemaMember { member, .. } => (2, token.span == member.span),
             // Built-ins are keywords or carry no semantics worth painting.
             Resolved::BuiltinType { .. }
             | Resolved::BuiltinConstructor { .. }

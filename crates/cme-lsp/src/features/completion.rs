@@ -58,6 +58,13 @@ pub fn completions(
     if let Some(items) = import_completions(analysis, text, offset) {
         return items;
     }
+
+    // Completing an `impl <namespace>.<interface>` member (§9.1, §10.4):
+    // the interface's missing members, signature-exact.
+    if let Some(items) = impl_member_completions(analysis, offset) {
+        return items;
+    }
+
     scope_completions(analysis, offset)
 }
 
@@ -230,10 +237,22 @@ fn member_completions(
             _ => builtin_constructors(["Ok", "Err"]),
         });
     }
+
+    // A dotted host path rooted at a granted schema namespace
+    // (`game.` / `game.window.` — §2.3, §9.1): the contract surface, not a
+    // script type.
+    if let Some(items) = schema_path_completions(analysis, receiver) {
+        return Some(items);
+    }
     let ty = analysis.type_of_receiver(receiver, offset)?;
     Some(match &ty {
         cme_core::ast::Type::Named { name, args } => {
-            if let Some(struct_type) = analysis.structs.iter().find(|s| &s.name == name) {
+            if let Some(struct_type) = analysis
+                .structs
+                .iter()
+                .find(|s| &s.name == name)
+                .or_else(|| analysis.schema_structs.iter().find(|s| &s.name == name))
+            {
                 return Some(
                     struct_type
                         .fields
@@ -250,7 +269,12 @@ fn member_completions(
                         .collect(),
                 );
             }
-            if let Some(enum_type) = analysis.enums.iter().find(|e| &e.name == name) {
+            if let Some(enum_type) = analysis
+                .enums
+                .iter()
+                .find(|e| &e.name == name)
+                .or_else(|| analysis.schema_enums.iter().find(|e| &e.name == name))
+            {
                 return Some(
                     enum_type
                         .variants
@@ -294,6 +318,90 @@ fn member_completions(
         )],
         _ => Vec::new(),
     })
+}
+
+/// Member completions on a granted host path (§2.3, §9.1):
+///
+/// - `game.` offers the namespace's contracts (capabilities to import and
+///   call, interfaces to implement);
+/// - `game.window.` offers the capability's visible members (§9.5) with
+///   their exact signatures.
+fn schema_path_completions(
+    analysis: &Analysis<'_>,
+    receiver: (usize, usize),
+) -> Option<Vec<ls_types::CompletionItem>> {
+    let (file, segments) = analysis.host_path(receiver)?;
+    match segments.as_slice() {
+        [] => {
+            let mut items = Vec::new();
+            for contract in file.contracts() {
+                let (kind, note) = match contract.kind {
+                    cme_core::schema::ContractKind::Capability => (
+                        ls_types::CompletionItemKind::MODULE,
+                        "capability — import and call its members (§9.1)",
+                    ),
+                    cme_core::schema::ContractKind::Interface => (
+                        ls_types::CompletionItemKind::INTERFACE,
+                        "interface — implement with `impl` (§9.1, §10.4)",
+                    ),
+                };
+                items.push(item(
+                    contract.name.clone(),
+                    kind,
+                    format!("{} {}", contract.kind.keyword(), note),
+                    None,
+                ));
+            }
+            Some(items)
+        }
+        [contract_name] => {
+            let contract = file.contracts().find(|decl| decl.name == *contract_name)?;
+            // Calling interface members from a script is the host's
+            // direction (§9.1); only capabilities complete here.
+            if contract.kind != cme_core::schema::ContractKind::Capability {
+                return Some(Vec::new());
+            }
+            let target = analysis
+                .schema
+                .as_ref()
+                .and_then(|schema| schema.target(&file.namespace));
+            Some(
+                contract
+                    .members
+                    .iter()
+                    .filter(|member| target.is_none_or(|target| member.visible_at(target)))
+                    .map(|member| schema_member_item(&file.namespace, contract, member))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// A capability member as a completion: the signature in the detail, the
+/// plain name as the insert (named-argument completion fills the call).
+fn schema_member_item(
+    namespace: &str,
+    contract: &cme_core::schema::SchemaContract,
+    member: &cme_core::schema::SchemaMember,
+) -> ls_types::CompletionItem {
+    let params: Vec<String> = member
+        .params
+        .iter()
+        .map(|param| format!("{} {}", render_type(&param.ty), param.name))
+        .collect();
+    item(
+        member.name.clone(),
+        ls_types::CompletionItemKind::METHOD,
+        format!(
+            "{} {}.{} ({})",
+            render_type(&member.return_ty),
+            namespace,
+            contract.name,
+            params.join(", ")
+        ),
+        None,
+    )
 }
 
 /// `Some`/`None` and `Ok`/`Err` offered after `option.` / `result.`
@@ -407,9 +515,35 @@ fn argument_completions(
     }
 
     // Qualified callee: `Target.member(` — an impl member's parameters,
-    // or a variant constructor's positional payload (detail only).
+    // a capability member's parameters (§9.1), or a variant constructor's
+    // positional payload (detail only).
     if callee_index > 0 && analysis.tokens[callee_index - 1].kind == Tok::Dot {
         let receiver = analysis.receiver_range_for_completion(callee_index - 1)?;
+
+        // A capability call (`game.window.OpenWindow(`): named arguments
+        // from the schema member's parameter list (§2.12, §9.1).
+        if let Some((file, segments)) = analysis.host_path(receiver)
+            && let [contract_name] = segments.as_slice()
+            && let Some(contract) = file.contracts().find(|decl| decl.name == *contract_name)
+            && let Some(target) = analysis
+                .schema
+                .as_ref()
+                .and_then(|schema| schema.target(&file.namespace))
+            && let Some(member) = contract
+                .members
+                .iter()
+                .find(|decl| decl.name == callee_name && decl.visible_at(target))
+        {
+            return Some(named_items(
+                member
+                    .params
+                    .iter()
+                    .map(|param| (param.name.clone(), render_type(&param.ty))),
+                &used,
+                ls_types::CompletionItemKind::VARIABLE,
+            ));
+        }
+
         let ty = analysis.type_of_receiver(receiver, offset)?;
         let cme_core::ast::Type::Named { name: target, .. } = &ty else {
             return None;
@@ -572,8 +706,13 @@ fn match_group(analysis: &Analysis<'_>, cursor: usize, open: Tok, close: Tok) ->
 
 /// Import path completion (§2.3), detected from the raw line so a
 /// statement that is still being typed completes alongside the already
-/// valid ones: `self` at the root, and at any depth the segments this
-/// file's other imports use under the same prefix.
+/// valid ones:
+///
+/// - `self` at the root, then the owning mod's module tree (§10.3);
+/// - the granted schema namespaces at the root, their capabilities one dot
+///   deeper (§2.3, §9.1);
+/// - at any depth, the segments this file's other imports use under the
+///   same prefix.
 fn import_completions(
     analysis: &Analysis<'_>,
     text: &str,
@@ -606,9 +745,42 @@ fn import_completions(
 
     let mut candidates: Vec<String> = Vec::new();
     if depth == 0 {
-        // `self` is the reserved mod root (§2.3).
+        // `self` is the reserved mod root (§2.3); schema namespaces are
+        // the host roots (§2.3, §7.2).
         candidates.push("self".to_string());
+        if let Some(schema) = &analysis.schema {
+            for file in schema.set.namespaces() {
+                if schema.target(&file.namespace).is_some() {
+                    candidates.push(file.namespace.clone());
+                }
+            }
+        }
     }
+
+    // The mod's own module tree under `self` (§10.3).
+    for module in &analysis.mod_modules {
+        let matches_prefix = module.len() > depth
+            && module[..depth]
+                .iter()
+                .zip(&prefix)
+                .all(|(segment, expected)| segment == expected);
+        if matches_prefix && let Some(name) = module.get(depth) {
+            candidates.push(name.clone());
+        }
+    }
+
+    // Capabilities complete one segment under a granted namespace (§9.1).
+    if depth == 1
+        && let Some(schema) = &analysis.schema
+        && let Some(file) = schema.set.namespace(prefix[0])
+    {
+        for contract in file.contracts() {
+            if contract.kind == cme_core::schema::ContractKind::Capability {
+                candidates.push(contract.name.clone());
+            }
+        }
+    }
+
     for other in &analysis.imports {
         let matches_prefix = other.segments.len() > depth
             && other.segments[..depth]
@@ -634,6 +806,87 @@ fn import_completions(
             })
             .collect(),
     )
+}
+
+/// Completing a member of `impl <namespace>.<interface> { … }` (§9.1,
+/// §10.4): the interface's visible members the block does not implement
+/// yet, offered with their exact signature as the insert — the checker
+/// requires every required member, spelled exactly.
+///
+/// Only fires at true member position: inside the impl's braces with no
+/// enclosing function body (typing INSIDE a member's body keeps the
+/// ordinary scope completions).
+fn impl_member_completions(
+    analysis: &Analysis<'_>,
+    offset: usize,
+) -> Option<Vec<ls_types::CompletionItem>> {
+    if analysis.enclosing_function_index(offset).is_some() {
+        return None;
+    }
+    let block_index = analysis.impls.iter().position(|impl_block| {
+        impl_block.span.start <= offset
+            && offset <= impl_block.span.end
+            && impl_block.target.len() == 2
+            && impl_open_brace(analysis, impl_block.span).is_some_and(|brace| offset > brace)
+    })?;
+    let block = &analysis.impls[block_index];
+    let (namespace, contract_name) = (&block.target[0].0, &block.target[1].0);
+    let members = analysis.visible_schema_members(namespace, contract_name)?;
+    let implemented: Vec<&str> = analysis
+        .functions
+        .iter()
+        .filter(|function| function.impl_index == Some(block_index))
+        .map(|function| function.name.as_str())
+        .collect();
+
+    let mut items = Vec::new();
+    for member in members {
+        if implemented.contains(&member.name.as_str()) {
+            continue;
+        }
+        let params: Vec<String> = member
+            .params
+            .iter()
+            .map(|param| format!("{} {}", render_type(&param.ty), param.name))
+            .collect();
+        let optional_note = if member.requirement == cme_core::schema::MemberRequirement::Optional {
+            " (optional — a mod may skip it, §9.5)"
+        } else {
+            ""
+        };
+        let mut entry = item(
+            member.name.clone(),
+            ls_types::CompletionItemKind::METHOD,
+            format!(
+                "{} {}.{} {}({}){}",
+                render_type(&member.return_ty),
+                namespace,
+                contract_name,
+                member.name,
+                params.join(", "),
+                optional_note
+            ),
+            Some(format!(
+                "{} {}({}) {{\n    \n}}",
+                render_type(&member.return_ty),
+                member.name,
+                params.join(", ")
+            )),
+        );
+        entry.sort_text = Some(format!("0{}", member.name));
+        items.push(entry);
+    }
+    Some(items)
+}
+
+/// The byte offset of the impl block's opening `{`, when its token range
+/// has one (a recovered impl may not).
+fn impl_open_brace(analysis: &Analysis<'_>, span: cme_core::Span) -> Option<usize> {
+    let (start, end) = analysis.token_span_range(span);
+    analysis.tokens[start..end]
+        .iter()
+        .find(|token| token.kind == Tok::LBrace)
+        .map(|token| token.span.start)
 }
 
 /// Statement/expression position: keywords, locals in scope, top-level
@@ -750,6 +1003,47 @@ fn scope_completions(analysis: &Analysis<'_>, offset: usize) -> Vec<ls_types::Co
             enum_type.name.clone(),
             ls_types::CompletionItemKind::ENUM,
             format!("enum {} {{ {} }}", enum_type.name, variants.join(", ")),
+            None,
+        );
+        entry.sort_text = Some(format!("1{}", enum_type.name));
+        items.push(entry);
+    }
+
+    // The mod schema's §9.3 boundary types — constructing a Sprite or
+    // matching an Event variant is exactly what a mod author types here.
+    for struct_type in &analysis.schema_structs {
+        let fields: Vec<String> = struct_type
+            .fields
+            .iter()
+            .map(|(name, ty, _)| format!("{}: {}", name, render_type(ty)))
+            .collect();
+        let mut entry = item(
+            struct_type.name.clone(),
+            ls_types::CompletionItemKind::STRUCT,
+            format!(
+                "struct {}<{} fields> — schema boundary type (§9.3)",
+                struct_type.name,
+                fields.len()
+            ),
+            None,
+        );
+        entry.sort_text = Some(format!("1{}", struct_type.name));
+        items.push(entry);
+    }
+    for enum_type in &analysis.schema_enums {
+        let variants: Vec<String> = enum_type
+            .variants
+            .iter()
+            .map(|variant| variant.name.clone())
+            .collect();
+        let mut entry = item(
+            enum_type.name.clone(),
+            ls_types::CompletionItemKind::ENUM,
+            format!(
+                "enum {} {{ {} }} — schema boundary type (§9.3)",
+                enum_type.name,
+                variants.join(", ")
+            ),
             None,
         );
         entry.sort_text = Some(format!("1{}", enum_type.name));

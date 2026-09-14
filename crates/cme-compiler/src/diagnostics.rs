@@ -64,6 +64,17 @@ impl Diagnostic {
     pub fn span(&self) -> Span {
         self.span
     }
+
+    /// The same diagnostic re-anchored to `span`. Virtual-text pipelines
+    /// (the §10 mod assembly) use this to move a diagnostic into the
+    /// owning module's coordinates without rebuilding its message.
+    pub fn anchored_at(&self, span: Span) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            message: self.message.clone(),
+            span,
+        }
+    }
 }
 
 impl fmt::Display for Diagnostic {

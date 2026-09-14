@@ -5,14 +5,22 @@
 use salsa::Database as Db;
 use tower_lsp_server::ls_types;
 
+use cme_compiler::schema::SchemaContext;
+
 use crate::convert;
 use crate::db::{self, SourceFile};
 
-/// Computes the publishable diagnostics for a document.
-pub fn publishable(db: &dyn Db, file: SourceFile) -> Vec<ls_types::Diagnostic> {
+/// Computes the publishable diagnostics for a document under the
+/// single-file pipeline. `schema` is the mod's auto-detected §9 contract,
+/// when one exists.
+pub fn publishable(
+    db: &dyn Db,
+    file: SourceFile,
+    schema: Option<&SchemaContext>,
+) -> Vec<ls_types::Diagnostic> {
     let text = file.text(db);
     let index = convert::line_index(db, file);
-    db::diagnostics(db, file)
+    db::diagnostics(db, file, schema)
         .iter()
         .map(|diagnostic| convert::diagnostic(&index, text, diagnostic))
         .collect()
@@ -27,7 +35,7 @@ mod tests {
     fn diagnostics_carry_source_and_error_severity() {
         let db = Database::default();
         let file = SourceFile::new(&db, "int hp = tr\n".to_string(), FileKind::Script);
-        let diagnostics = publishable(&db, file);
+        let diagnostics = publishable(&db, file, None);
         assert_eq!(diagnostics.len(), 1);
         let diagnostic = &diagnostics[0];
         assert_eq!(

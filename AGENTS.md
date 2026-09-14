@@ -23,6 +23,16 @@ The workspace root package is `cme`. It re-exports workspace crates behind featu
 - When a task requires clarification about Checkmate language design, syntax, semantics, precedence, intended compiler behavior, or any other specification detail, **ask the user and stop** until the user answers.
 - Do not infer language behavior from the whitepaper's file metadata, size, or any partial content exposure.
 
+## Documentation Policy
+
+The user-facing documentation lives in `docs/` (an mdBook; `docs/book.toml`, sources under `docs/src/`), built and deployed to GitHub Pages by `.github/workflows/docs.yml` from this same repository.
+
+- **Any change to the language, toolchain, or host APIs MUST check whether `docs/` is affected and update it in the SAME change**, so the docs never drift out of sync. This includes, non-exclusively: lexer/parser/validator/type-checker behavior, interpreter semantics, megaprogramming (§8), mods (§10), the schema system (§9), the CLI surface, the Rust host API (`cme-api`), the schema macro (`cme-schema-macro`), and the C ABI (`cme-ffi`). A PR that changes observable behavior without either updating or explicitly clearing `docs/` is incomplete.
+- Docs describe **implemented behavior only**. Spec-but-unbuilt features (bytecode VM, AOT, `suspend`, formatter, DAP, `no_std` runtime) may appear only in explicitly marked future/status callouts (`docs/src/status.md` is the registry).
+- Docs examples must be valid Checkmate/Rust/C per the current implementation; when unsure, verify against the fixtures (`syntax.cm`, `mega.cm`, `apps/rust_host`, `apps/c_host`) before writing them into `docs/`.
+- `WHITEPAPER.md` stays the normative specification; `docs/` is its user-facing distillation. If the two disagree, fix both in the same change or surface the discrepancy to the owner instead of picking a side silently.
+- When a docs-affecting change lands, mention the docs update in the commit body (e.g. `docs:` scope or a body line naming the touched pages).
+
 ## Working Rules
 
 - Always use `git` and never use `jj` commands directly. ALWAYS FOLLOW Conventional Commits SPECS FOR NAMING COMMITS!

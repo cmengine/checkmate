@@ -13,6 +13,27 @@ CME is a statically typed, embeddable scripting language implemented in Rust. Th
 
 The language specification is maintained in [`WHITEPAPER.md`](./WHITEPAPER.md).
 
+## Documentation
+
+The user-facing documentation — getting-started guides, the full language
+reference, mods, megaprogramming, the schema system, "coming from
+Go/C#/Rust/Python/TypeScript" guides, and detailed Rust and C embedding
+guides — lives in [`docs/`](./docs/src/SUMMARY.toml) as an mdBook. It
+builds and deploys to **GitHub Pages** from this same repository via
+[`.github/workflows/docs.yml`](./.github/workflows/docs.yml) on every
+push that touches `docs/`.
+
+Build it locally:
+
+```sh
+cargo install mdbook     # once
+mdbook build docs        # output in docs/book; `mdbook serve docs` to browse
+```
+
+The docs track the implementation: per `AGENTS.md`, any change to the
+language, toolchain, or host APIs must check `docs/` for drift in the
+same change.
+
 ## Editor Support: one grammar surface, three consumers
 
 Checkmate ships its own editor tooling in-tree, next to the compiler it must

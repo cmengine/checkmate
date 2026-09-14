@@ -1,0 +1,23 @@
+/* checkmate.css — small presentation touches for the Checkmate docs. */
+
+/* Inline code keeps the host theme; fenced ```checkmate blocks get a
+   slightly calmer border so long program listings read cleanly. */
+pre code.language-checkmate {
+    display: block;
+    padding: 0.75em 1em;
+    line-height: 1.45;
+}
+
+/* Status badges used on the Status page and in feature notes. */
+.badge {
+    display: inline-block;
+    font-size: 0.8em;
+    font-weight: 600;
+    padding: 0.1em 0.55em;
+    border-radius: 0.6em;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+.badge-implemented { background: #2e7d32; color: #fff; }
+.badge-partial     { background: #b26a00; color: #fff; }
+.badge-future      { background: #616161; color: #fff; }

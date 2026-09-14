@@ -38,3 +38,6 @@ c_host_app
 /editors/zed/grammars/
 
 *.wasm
+
+# The mdBook build output (see docs/book.toml; rebuilt by CI on deploy)
+/docs/book

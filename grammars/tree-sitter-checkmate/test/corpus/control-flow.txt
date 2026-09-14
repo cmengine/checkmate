@@ -1,0 +1,137 @@
+================================================================================
+Control flow: if / else if / else chains (same-line and newline-separated)
+================================================================================
+
+int classify(int score) {
+    bool low = score < 10
+    bool ready = (score > 50 && score < 90) || score == 100
+
+    if (low) {
+        return 0
+    } else if (score >= 90) {
+        return 2
+    } else if (ready) {
+        return 1
+    } else {
+        return -1
+    }
+}
+
+void noElse(int n) {
+    if (n == 0) {
+        return
+    }
+    infer after = true
+}
+
+---
+
+(source_file
+  (function_declaration
+    return_type: (primitive_type)
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        type: (primitive_type)
+        name: (identifier)))
+    body: (block
+      (variable_declaration
+        type: (primitive_type)
+        name: (identifier)
+        value: (binary_expression
+          left: (identifier)
+          right: (int_literal)))
+      (variable_declaration
+        type: (primitive_type)
+        name: (identifier)
+        value: (binary_expression
+          left: (parenthesized_expression
+            (binary_expression
+              left: (binary_expression
+                left: (identifier)
+                right: (int_literal))
+              right: (binary_expression
+                left: (identifier)
+                right: (int_literal))))
+          right: (binary_expression
+            left: (identifier)
+            right: (int_literal))))
+      (if_statement
+        condition: (identifier)
+        consequence: (block
+          (return_statement
+            value: (int_literal)))
+        alternative: (else_clause
+          (if_statement
+            condition: (binary_expression
+              left: (identifier)
+              right: (int_literal))
+            consequence: (block
+              (return_statement
+                value: (int_literal)))
+            alternative: (else_clause
+              (if_statement
+                condition: (identifier)
+                consequence: (block
+                  (return_statement
+                    value: (int_literal)))
+                alternative: (else_clause
+                  (block
+                    (return_statement
+                      value: (unary_expression
+                        operand: (int_literal))))))))))))
+  (function_declaration
+    return_type: (primitive_type)
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        type: (primitive_type)
+        name: (identifier)))
+    body: (block
+      (if_statement
+        condition: (binary_expression
+          left: (identifier)
+          right: (int_literal))
+        consequence: (block
+          (return_statement)))
+      (infer_declaration
+        name: (identifier)
+        value: (bool_literal)))))
+
+================================================================================
+Newline-separated `else` re-attaches to the if (the real parser
+backtracks over the break; GLR keeps both readings and the else wins)
+================================================================================
+
+int pick(int x) {
+    if (x > 0) {
+        return 1
+    }
+    else {
+        return -1
+    }
+}
+
+---
+
+(source_file
+  (function_declaration
+    return_type: (primitive_type)
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        type: (primitive_type)
+        name: (identifier)))
+    body: (block
+      (if_statement
+        condition: (binary_expression
+          left: (identifier)
+          right: (int_literal))
+        consequence: (block
+          (return_statement
+            value: (int_literal)))
+        alternative: (else_clause
+          (block
+            (return_statement
+              value: (unary_expression
+                operand: (int_literal)))))))))

@@ -99,6 +99,12 @@ module.exports = grammar({
     // A break inside parentheses either opens an operator continuation or
     // is the trailing break before `)`; GLR keeps both readings alive.
     [$._paren_expr],
+    // A break after an if's consequence either opens the `else` clause
+    // (the real parser re-attaches a newline-separated `else` by
+    // backtracking) or is the ordinary statement separator before the
+    // next item; GLR keeps both readings alive, and the else-less one is
+    // the only survivor whenever the next head is not `else`.
+    [$.if_statement],
   ],
 
   supertypes: ($) => [$._expr, $._statement, $._type, $._pattern_item],
@@ -387,23 +393,39 @@ module.exports = grammar({
       prec.right(seq('return', optional(field('value', $._expr)))),
 
     // `else` attaches on the same line as the closing brace (`} else {`),
-    // matching every fixture and the canonical formatting style. The real
-    // parser also re-attaches a newline-separated `else` by backtracking;
-    // a pure-CFG grammar cannot speculatively consume the break, so that
-    // spelling is left to recovery here.
+    // matching every fixture and the canonical formatting style; the
+    // speculative line break in `_else_opt` also re-attaches a
+    // newline-separated `else`, mirroring the real parser's backtracking.
+    //
+    // The `else` token itself is consumed INSIDE else_clause. Leaving it
+    // out does not "let recovery handle it": in statement position nothing
+    // expects the keyword, so the lexer falls back to `identifier` and
+    // every `else` — in an `else if` chain and before a final block alike
+    // — parses as a bare identifier expression statement, invisible to
+    // `"else" @keyword`.
     if_statement: ($) =>
-      prec.right(
-        seq(
-          'if',
-          repeat($._newline),
-          field('condition', $._parenthesized),
-          repeat($._newline),
-          field('consequence', $.block),
-          optional(field('alternative', $.else_clause)),
-        ),
+      seq(
+        'if',
+        repeat($._newline),
+        field('condition', $._parenthesized),
+        repeat($._newline),
+        field('consequence', $.block),
+        optional($._else_opt),
       ),
 
-    else_clause: ($) => choice($.if_statement, $.block),
+    else_clause: ($) => seq('else', choice($.if_statement, $.block)),
+
+    // The if_statement alternative with its speculative line break:
+    // `repeat($._newline)` also matches zero breaks, so the same-line
+    // `} else {` spelling rides the same path. The dynamic precedence
+    // breaks the GLR ambiguity in favor of attaching the `else` (an
+    // `else` can never START a statement, so the surviving identifier
+    // reading is always the worse one).
+    _else_opt: ($) =>
+      prec.dynamic(
+        1,
+        seq(repeat($._newline), field('alternative', $.else_clause)),
+      ),
 
     while_statement: ($) =>
       seq(

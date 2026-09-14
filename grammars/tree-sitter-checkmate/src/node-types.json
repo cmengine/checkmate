@@ -48,15 +48,15 @@
         "named": true
       },
       {
-        "type": "mega_invocation",
-        "named": true
-      },
-      {
         "type": "map_literal",
         "named": true
       },
       {
         "type": "match_expression",
+        "named": true
+      },
+      {
+        "type": "mega_invocation",
         "named": true
       },
       {
@@ -1304,78 +1304,6 @@
     }
   },
   {
-    "type": "mega_declaration",
-    "named": true,
-    "fields": {
-      "name": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "dotted_path",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": true,
-      "required": false,
-      "types": [
-        {
-          "type": "_pattern_item",
-          "named": true
-        },
-        {
-          "type": "_statement",
-          "named": true
-        },
-        {
-          "type": "template_each",
-          "named": true
-        },
-        {
-          "type": "template_infer_hole",
-          "named": true
-        },
-        {
-          "type": "template_when",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
-    "type": "mega_invocation",
-    "named": true,
-    "fields": {
-      "macro": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "dotted_path",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": false,
-      "required": true,
-      "types": [
-        {
-          "type": "heredoc_region",
-          "named": true
-        },
-        {
-          "type": "region",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "map_entry",
     "named": true,
     "fields": {
@@ -1627,6 +1555,78 @@
         },
         {
           "type": "wildcard",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "mega_declaration",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "dotted_path",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "_pattern_item",
+          "named": true
+        },
+        {
+          "type": "_statement",
+          "named": true
+        },
+        {
+          "type": "template_each",
+          "named": true
+        },
+        {
+          "type": "template_infer_hole",
+          "named": true
+        },
+        {
+          "type": "template_when",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "mega_invocation",
+    "named": true,
+    "fields": {
+      "macro": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "dotted_path",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "heredoc_region",
+          "named": true
+        },
+        {
+          "type": "region",
           "named": true
         }
       ]

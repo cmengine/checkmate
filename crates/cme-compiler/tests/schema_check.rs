@@ -54,7 +54,7 @@ fn diagnostic_messages(diagnostics: &[Diagnostic]) -> Vec<String> {
 }
 
 const ENGINE: &str = "
-schema engine v1.4.0
+schema engine 1.4.0
 
 struct TextureHandle {
     int id
@@ -618,7 +618,7 @@ impl engine.gamemode {
 /// schema interface dependencies use qualified paths: `interface hud
 /// requires ui.widgets`").
 const CROSS: &str = "
-schema engine v1.0.0
+schema engine 1.0.0
 
 interface hud requires ui.widgets {
     since 1.0.0 void DrawHud()
@@ -628,7 +628,7 @@ capability overlay requires ui.widgets {
     since 1.0.0 void Show(str text)
 }
 
-schema ui v1.2.0
+schema ui 1.2.0
 
 interface widgets {
     since 1.0.0 void Layout(int slot)
@@ -719,13 +719,13 @@ fn a_capability_requires_its_cross_namespace_interface_before_calls() {
 #[test]
 fn requires_may_not_name_a_capability() {
     const BAD: &str = "
-schema a v1.0.0
+schema a 1.0.0
 
 interface broken requires b.helper {
     since 1.0.0 void Go()
 }
 
-schema b v1.0.0
+schema b 1.0.0
 
 capability helper {
     since 1.0.0 void Do()
@@ -769,7 +769,7 @@ fn cross_context() -> SchemaContext {
 /// A prerequisite whose newest member is hidden at older targets: the
 /// requires-completeness rule must judge against VISIBLE members only.
 const GATING: &str = "
-schema gating v2.0.0
+schema gating 2.0.0
 
 interface base {
     since 1.0.0 void Basic()

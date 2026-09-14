@@ -233,7 +233,7 @@
                 "schema-declarations": {
                         "patterns": [
                                 {
-                                        "comment": "schema namespace v1.0.0",
+                                        "comment": "schema namespace 1.0.0",
                                         "match": "\\b(schema)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(v?\\d+\\.\\d+\\.\\d+)",
                                         "captures": {
                                                 "1": { "name": "keyword.other.checkmate" },

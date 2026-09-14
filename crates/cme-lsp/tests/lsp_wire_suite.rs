@@ -603,7 +603,7 @@ async fn schema_files_complete_to_nothing_but_still_publish() {
     open_and_drain(
         &mut service,
         "file:///engine.cm",
-        "schema engine v1.4.0\n",
+        "schema engine 1.4.0\n",
         &mut messages,
     )
     .await;

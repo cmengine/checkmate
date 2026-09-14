@@ -3,7 +3,7 @@
 //! A schema file (WHITEPAPER §9.1) defines ONE top-level namespace root:
 //!
 //! ```text
-//! schema engine v1.4.0
+//! schema engine 1.4.0
 //!
 //! capability graphics {
 //!     since 1.0.0 TextureHandle LoadTexture(str path)

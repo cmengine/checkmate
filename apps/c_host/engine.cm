@@ -4,7 +4,7 @@
 // real — REGISTER macro, pack/unpack helpers, and the typed interface
 // invocation helpers all compile-checked against this contract.
 
-schema chost v1.0.0
+schema chost 1.0.0
 
 struct TextureHandle {
     int id

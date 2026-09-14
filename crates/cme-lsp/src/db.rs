@@ -177,10 +177,10 @@ mod tests {
 
     #[test]
     fn sniff_detects_schema_files() {
-        assert_eq!(sniff_kind("schema engine v1.4.0\n"), FileKind::Schema);
+        assert_eq!(sniff_kind("schema engine 1.4.0\n"), FileKind::Schema);
         // Comments and blank lines precede the keyword.
         assert_eq!(
-            sniff_kind("// engine contract\n\nschema engine v1.0.0\n"),
+            sniff_kind("// engine contract\n\nschema engine 1.0.0\n"),
             FileKind::Schema
         );
         assert_eq!(sniff_kind("int hp = 100\n"), FileKind::Script);
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn schema_diagnostics_flow_through_their_pipeline() {
         let mut db = Database::default();
-        let file = SourceFile::new(&db, "schema engine v1.4.0\n".to_string(), FileKind::Schema);
+        let file = SourceFile::new(&db, "schema engine 1.4.0\n".to_string(), FileKind::Schema);
         assert!(diagnostics(&db, file).is_empty());
         file.set_text(&mut db).to("schema 1.4.0\n".to_string());
         assert!(!diagnostics(&db, file).is_empty());

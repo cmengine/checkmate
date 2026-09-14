@@ -5,7 +5,7 @@
 //! contract:
 //!
 //! ```text
-//! schema engine v1.4.0
+//! schema engine 1.4.0
 //!
 //! capability graphics {
 //!     since 1.0.0 TextureHandle LoadTexture(str path)
@@ -22,14 +22,20 @@
 //! program grammar: no statements, no expressions, no imports — just the
 //! header, `capability`/`interface` contract blocks, and the §9.3 boundary
 //! types (`struct`/`enum` spelled exactly like their Checkmate
-//! counterparts). A dedicated scanner keeps `v1.4.0` a single token and
+//! counterparts). A dedicated scanner keeps `1.4.0` a single token and
 //! keeps the diagnostics pointed at the schema text; program-level lexer
 //! quirks (float literals, string interpolation) never leak in.
+//!
+//! Versions are spelled `X.Y.Z` everywhere — the header, `since` tags, and
+//! a mod manifest's `[schemas]` targets all share one shape. A `v` prefix
+//! (`v1.4.0`) is NOT accepted: the whitepaper's `since` tags, every
+//! manifest, and the `Version` parser are unprefixed, and the header is
+//! the odd one out.
 //!
 //! Enforcement here (the contract must be well-formed BEFORE any script is
 //! checked against it):
 //!
-//! - one namespace root per file, `schema <ident> v<X.Y.Z>` (§9.1);
+//! - one namespace root per file, `schema <ident> <X.Y.Z>` (§9.1);
 //! - PascalCase for every schema declaration and member (§9.3, §2.5);
 //!   camelCase for parameters and fields;
 //! - members are `since X.Y.Z`-tagged (default 0.0.0), optionally
@@ -68,8 +74,10 @@ pub use codegen_c::codegen_c;
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Ident(String),
-    /// `1.0.0` or `v1.4.0` — scanned whole so `since` tags and the header
-    /// version parse without dot-splitting heuristics.
+    /// `1.4.0` — scanned whole so `since` tags and the header version
+    /// parse without dot-splitting heuristics. The `v`-prefixed spelling
+    /// is not a token: the header takes the same `X.Y.Z` shape as every
+    /// other version in the toolchain.
     Version(Version),
     Punct(char),
     Newline,
@@ -147,7 +155,7 @@ fn lex_schema(source: &str) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
             }
             b'0'..=b'9' => {
                 let start = position;
-                match scan_version(bytes, position, 0) {
+                match scan_version(bytes, position) {
                     Some((version, end)) => {
                         tokens.push(SpannedToken {
                             token: Token::Version(version),
@@ -166,45 +174,29 @@ fn lex_schema(source: &str) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
                     }
                 }
             }
-            _ if byte == b'v'
-                && bytes
-                    .get(position + 1)
-                    .is_some_and(|next| next.is_ascii_digit()) =>
-            {
-                // `v1.4.0` — the schema header shape (§9.1): a `v` prefix
-                // glued to a version scans as one token.
-                let start = position;
-                match scan_version(bytes, position, 1) {
-                    Some((version, end)) => {
-                        tokens.push(SpannedToken {
-                            token: Token::Version(version),
-                            span: Span::new(start, end),
-                        });
-                        position = end;
-                    }
-                    None => {
-                        // Not a well-formed version; lex the identifier and
-                        // let the parser's "expected the schema version"
-                        // diagnostic explain the shape.
-                        position += 1;
-                        while position < bytes.len()
-                            && (bytes[position] == b'_' || bytes[position].is_ascii_alphanumeric())
-                        {
-                            position += 1;
-                        }
-                        tokens.push(SpannedToken {
-                            token: Token::Ident(source[start..position].to_string()),
-                            span: Span::new(start, position),
-                        });
-                    }
-                }
-            }
             _ if byte == b'_' || byte.is_ascii_alphabetic() => {
                 let start = position;
                 while position < bytes.len()
                     && (bytes[position] == b'_' || bytes[position].is_ascii_alphanumeric())
                 {
                     position += 1;
+                }
+                // The retired `v1.4.0` header spelling: one pointed
+                // diagnostic over the whole token, and the version value is
+                // still recovered so parsing continues without cascades.
+                if bytes[start] == b'v'
+                    && let Some((version, end)) = scan_version_prefixed(bytes, start, position)
+                {
+                    errors.push(Diagnostic::parse(
+                        "schema versions are written `X.Y.Z` — drop the `v` prefix",
+                        Span::new(start, end),
+                    ));
+                    tokens.push(SpannedToken {
+                        token: Token::Version(version),
+                        span: Span::new(start, end),
+                    });
+                    position = end;
+                    continue;
                 }
                 tokens.push(SpannedToken {
                     token: Token::Ident(source[start..position].to_string()),
@@ -230,11 +222,10 @@ fn lex_schema(source: &str) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
 }
 
 /// Attempts to scan `X.Y.Z` starting at `start` (which must point at a
-/// digit), with `skip` leading digits already consumed by the caller's
-/// identifier scan (the `v`-prefixed case). Returns the version and the end
-/// offset when the full shape is present.
-fn scan_version(bytes: &[u8], start: usize, skip: usize) -> Option<(Version, usize)> {
-    let mut position = start + skip;
+/// digit). Returns the version and the end offset when the full shape is
+/// present.
+fn scan_version(bytes: &[u8], start: usize) -> Option<(Version, usize)> {
+    let mut position = start;
     let component = |position: &mut usize| -> Option<u32> {
         let begin = *position;
         while *position < bytes.len() && bytes[*position].is_ascii_digit() {
@@ -265,6 +256,24 @@ fn scan_version(bytes: &[u8], start: usize, skip: usize) -> Option<(Version, usi
         return None;
     }
     Some((Version::new(major, minor, patch), position))
+}
+
+/// Recognizes the retired `vX.Y.Z` spelling: `start` points at the `v`,
+/// `ident_end` is where the identifier scan stopped (the version may
+/// continue past it through the dots). Returns the version and the full
+/// token end when the whole shape is a `v`-prefixed version, so the
+/// scanner can report the migration with one diagnostic.
+fn scan_version_prefixed(bytes: &[u8], start: usize, ident_end: usize) -> Option<(Version, usize)> {
+    debug_assert_eq!(bytes[start], b'v');
+    // The identifier consumed at least one character (`v` alone would have
+    // been re-scanned as an identifier); the version continues from the
+    // digits that followed it. An identifier that continues past the major
+    // component (`v10x`) is just a name.
+    let (version, end) = scan_version(bytes, start + 1)?;
+    if end < ident_end {
+        return None; // the identifier continued past the version (`v10x`)
+    }
+    Some((version, end))
 }
 
 // ---------------------------------------------------------------------------
@@ -354,13 +363,13 @@ impl SchemaParser {
 
     fn parse_file(&mut self) -> Option<SchemaFile> {
         self.skip_newlines();
-        // Header: `schema <namespace> v<X.Y.Z>`
+        // Header: `schema <namespace> <X.Y.Z>`
         let header_start = self.peek().span.start;
         if !self.at_ident("schema") {
             let span = self.peek().span;
             self.record(
                 format!(
-                    "a schema file must start with `schema <namespace> v<X.Y.Z>`, found {}",
+                    "a schema file must start with `schema <namespace> <X.Y.Z>`, found {}",
                     self.peek().token.describe()
                 ),
                 span,
@@ -386,7 +395,7 @@ impl SchemaParser {
             other => {
                 self.record(
                     format!(
-                        "expected the schema version (`v1.4.0`), found {}",
+                        "expected the schema version (`1.4.0`), found {}",
                         other.describe()
                     ),
                     self.peek().span,
@@ -1310,7 +1319,7 @@ impl SchemaSet {
                         issues.push(SchemaIssue {
                             message: format!(
                                 "{} `{}.{}` member `{}` is tagged `since {}`, but the schema \
-                                 declares v{} — a member cannot be introduced after the \
+                                 declares {} — a member cannot be introduced after the \
                                  schema version that carries it (§9.5)",
                                 contract.kind.keyword(),
                                 file.namespace,

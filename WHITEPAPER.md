@@ -1683,7 +1683,7 @@ A schema file defines a single top-level namespace root. All declarations within
 
 ```checkmate
 // File: schemas/engine.cm
-schema engine v1.4.0
+schema engine 1.4.0
 
 capability graphics {
     since 1.0.0 TextureHandle LoadTexture(str path)

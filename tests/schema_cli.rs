@@ -37,7 +37,7 @@ impl Drop for TempFile {
 }
 
 /// A schema fixture exercising the shapes codegen-c must render.
-const SCHEMA_FIXTURE: &str = "schema det v1.0.0\n\
+const SCHEMA_FIXTURE: &str = "schema det 1.0.0\n\
 struct Handle {\n\
 int id\n\
 }\n\
@@ -69,7 +69,7 @@ fn cme(args: &[&str]) -> (i32, String, String) {
 }
 
 const GOOD_SCHEMA: &str = "
-schema engine v1.4.0
+schema engine 1.4.0
 
 struct TextureHandle {
     int id
@@ -112,7 +112,7 @@ fn schema_validates_a_clean_file_silently() {
 fn schema_reports_defects_with_positions() {
     let schema = TempFile::new(
         "bad_schema",
-        "schema engine v1.0.0\ncapability graphics {\nint noParens\n}\n",
+        "schema engine 1.0.0\ncapability graphics {\nint noParens\n}\n",
     );
     let (code, _stdout, stderr) = cme(&["schema", schema.path()]);
     assert_ne!(code, 0);
@@ -124,7 +124,7 @@ fn schema_reports_defects_with_positions() {
     // An unresolved `requires` fails the set invariants.
     let schema = TempFile::new(
         "requires_schema",
-        "schema app v1.0.0\ncapability net requires missing { int Send() }\n",
+        "schema app 1.0.0\ncapability net requires missing { int Send() }\n",
     );
     let (code, _stdout, stderr) = cme(&["schema", schema.path()]);
     assert_ne!(code, 0);
@@ -191,7 +191,7 @@ fn check_with_schema_gates_capability_calls() {
     // Version gating: target 1.0.0 hides the since-1.2.0 member.
     let old_schema = TempFile::new(
         "old_schema",
-        &GOOD_SCHEMA.replace("schema engine v1.4.0", "schema engine v1.0.0"),
+        &GOOD_SCHEMA.replace("schema engine 1.4.0", "schema engine 1.0.0"),
     );
     let newer = TempFile::new(
         "newer_program",

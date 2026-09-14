@@ -280,7 +280,7 @@ async fn schema_files_get_diagnostics_but_no_position_features() {
     let (mut service, mut messages) = setup().await;
     handshake(&mut service).await;
 
-    open(&mut service, "file:///engine.cm", "schema engine v1.4.0\n").await;
+    open(&mut service, "file:///engine.cm", "schema engine 1.4.0\n").await;
     let published = next_publish(&mut messages).await;
     let params = published.params().expect("params");
     assert_eq!(

@@ -2,7 +2,7 @@
 Schema files: schema/capability/interface, since, requires, suspend (§9)
 ================================================================================
 
-schema chost v1.0.0
+schema chost 1.0.0
 
 struct TextureHandle {
     int id

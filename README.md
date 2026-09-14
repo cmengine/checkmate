@@ -107,7 +107,7 @@ Hosts declare their contract in `.cm` schema files — one namespace root per fi
 
 ```checkmate
 // schemas/engine.cm
-schema engine v1.4.0
+schema engine 1.4.0
 
 struct TextureHandle {
     int id

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use cme_api::{CapabilityProvider, Engine, ExecutionError, ExecutionLimits, Value};
 
 const ENGINE_SCHEMA: &str = "
-schema engine v1.4.0
+schema engine 1.4.0
 
 struct TextureHandle {
     int id
@@ -271,7 +271,7 @@ fn schema_errors_surface_with_file_positions() {
     let mut engine = Engine::new();
     let error = engine
         .load_schema_text(
-            "schema engine v1.4\ncapability broken {\nint NoParens\n}\n",
+            "schema engine 1.4\ncapability broken {\nint NoParens\n}\n",
             "schemas/bad.cm",
         )
         .expect_err("a malformed schema is rejected");
@@ -288,7 +288,7 @@ fn schema_errors_surface_with_file_positions() {
     // SET error.
     let error = engine
         .load_schema_text(
-            "schema app v1.0.0\ncapability net requires missing { int Send() }\n",
+            "schema app 1.0.0\ncapability net requires missing { int Send() }\n",
             "schemas/app.cm",
         )
         .expect_err("requires must resolve");
@@ -635,7 +635,7 @@ impl CapabilityProvider for Reentrant {
 }
 
 const TRACER_SCHEMA: &str = "
-schema tracer v1.0.0
+schema tracer 1.0.0
 
 capability probe {
     since 1.0.0 int Ping()

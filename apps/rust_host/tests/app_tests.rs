@@ -374,7 +374,7 @@ fn the_demo_command_parses_without_a_program() {
 fn a_defective_schema_file_fails_the_run_with_io() {
     let dir = temp_dir("bad_schema");
     let schema = dir.join("broken.cm");
-    std::fs::write(&schema, "schema broken v1.0\n").unwrap();
+    std::fs::write(&schema, "schema broken 1.0\n").unwrap();
     // A schema that does not parse surfaces as an IO-kind failure (the
     // file read succeeded; the contract is unusable).
     let outcome = run_simple(&[
@@ -392,7 +392,7 @@ fn a_schema_gated_program_runs_against_a_registered_contract() {
     let schema = dir.join("tiny.cm");
     std::fs::write(
         &schema,
-        "schema tiny v1.0.0\ncapability ping {\nsince 1.0.0 int Ping()\n}\n",
+        "schema tiny 1.0.0\ncapability ping {\nsince 1.0.0 int Ping()\n}\n",
     )
     .unwrap();
     let program = dir.join("uses_nothing.cm");
@@ -417,7 +417,7 @@ fn the_schema_demo_walks_the_generated_bindings() {
     // The registered descriptor, the proxy calls (the script doubles the
     // Scored payload), and the capability-backed main invocation.
     assert!(
-        text.contains("schema: game v1.0.0 (namespace game)"),
+        text.contains("schema: game 1.0.0 (namespace game)"),
         "{text}"
     );
     assert!(text.contains("proxy: OnEvent(Started) = 0"), "{text}");

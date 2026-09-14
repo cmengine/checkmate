@@ -431,7 +431,7 @@ pub fn run_schema_demo() -> Outcome {
     };
 
     Outcome::Returned(format!(
-        "schema: game v{} (namespace {})\n\
+        "schema: game {} (namespace {})\n\
          proxy: OnEvent(Started) = {started}\n\
          proxy: OnEvent(Scored(21)) = {scored}\n\
          proxy: Tick(41) = {tick}\n\

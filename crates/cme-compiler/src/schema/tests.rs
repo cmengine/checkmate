@@ -30,7 +30,7 @@ fn parse_errors(source: &str) -> Vec<String> {
 
 const FULL_SCHEMA: &str = r#"
 // File: schemas/engine.cm — the §9.1 example shape.
-schema engine v1.4.0
+schema engine 1.4.0
 
 struct TextureHandle {
     int id
@@ -158,16 +158,41 @@ fn header_requires_the_full_shape() {
             .any(|m| m.contains("namespace"))
     );
     assert!(
-        parse_errors("schema engine v1.4")
+        parse_errors("schema engine 1.4")
             .iter()
             .any(|m| m.contains("version"))
     );
 }
 
 #[test]
+fn the_v_prefix_is_no_longer_a_version() {
+    // Versions share one shape across the toolchain: `X.Y.Z` in the header,
+    // in `since` tags, and in a manifest's `[schemas]` targets. The old
+    // `v`-prefixed header spelling is rejected with one pointed diagnostic,
+    // and the version value itself is still recovered so the rest of the
+    // file parses without cascades.
+    let outcome =
+        parse_schema_file("schema engine v1.4.0\n\ninterface core {\n    int Tick()\n}\n");
+    assert_eq!(
+        outcome
+            .diagnostics
+            .iter()
+            .map(|d| d.message().to_string())
+            .collect::<Vec<_>>(),
+        vec!["schema versions are written `X.Y.Z` — drop the `v` prefix".to_string()],
+        "exactly one migration diagnostic"
+    );
+    let file = outcome.file.expect("the header still recovers its version");
+    assert_eq!(file.version, Version::new(1, 4, 0));
+    assert_eq!(file.interface("core").map(|c| c.members.len()), Some(1));
+
+    assert_eq!(parse_clean("schema engine 1.4.0\n").contracts().count(), 0);
+}
+
+#[test]
 fn members_carry_the_declared_metadata() {
     let file = parse_clean(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          interface core {\n\
          \x20 since 2.1.3 optional float Score()\n\
          \x20 int Bare()\n\
@@ -184,7 +209,7 @@ fn members_carry_the_declared_metadata() {
 #[test]
 fn suspend_members_parse_but_are_rejected() {
     let messages = parse_errors(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          capability net {\n\
          \x20 since 1.0.0 suspend httpResponse Get(str url)\n\
          }\n",
@@ -199,7 +224,7 @@ fn suspend_members_parse_but_are_rejected() {
 #[test]
 fn capitalization_is_enforced_on_schema_declarations() {
     let messages = parse_errors(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          capability graphics {\n\
          \x20 since 1.0.0 void drawTexture(str path)\n\
          }\n",
@@ -207,7 +232,7 @@ fn capitalization_is_enforced_on_schema_declarations() {
     assert!(messages.iter().any(|m| m.contains("PascalCase")));
 
     let messages = parse_errors(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          capability Graphics {\n\
          \x20 since 1.0.0 void Draw(str Path)\n\
          }\n",
@@ -222,7 +247,7 @@ fn capitalization_is_enforced_on_schema_declarations() {
 #[test]
 fn duplicates_and_void_placement_are_rejected() {
     let messages = parse_errors(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          struct Id { int value }\n\
          struct Id { int value }\n",
     );
@@ -233,7 +258,7 @@ fn duplicates_and_void_placement_are_rejected() {
     );
 
     let messages = parse_errors(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          interface core {\n\
          \x20 int Tick()\n\
          \x20 int Tick()\n\
@@ -242,7 +267,7 @@ fn duplicates_and_void_placement_are_rejected() {
     assert!(messages.iter().any(|m| m.contains("duplicate member")));
 
     let messages = parse_errors(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          struct Bad { void field }\n",
     );
     assert!(messages.iter().any(|m| m.contains("`void`")));
@@ -251,7 +276,7 @@ fn duplicates_and_void_placement_are_rejected() {
 #[test]
 fn types_cover_the_whole_surface() {
     let file = parse_clean(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          struct Bag {\n\
          \x20 int[] numbers\n\
          \x20 map<str, float> scores\n\
@@ -282,8 +307,8 @@ fn types_cover_the_whole_surface() {
 #[test]
 fn set_build_enforces_cross_file_invariants() {
     // Duplicate namespace (§9.2).
-    let a = parse_clean("schema engine v1.0.0\ninterface core { int Tick() }\n");
-    let b = parse_clean("schema engine v2.0.0\ninterface core { int Tick() }\n");
+    let a = parse_clean("schema engine 1.0.0\ninterface core { int Tick() }\n");
+    let b = parse_clean("schema engine 2.0.0\ninterface core { int Tick() }\n");
     let issues = SchemaSet::build(vec![a.clone(), b]).unwrap_err();
     assert!(
         issues
@@ -293,9 +318,9 @@ fn set_build_enforces_cross_file_invariants() {
 
     // Cross-namespace type collision — the script-side type space is flat.
     let a = parse_clean(
-        "schema engine v1.0.0\ninterface core { int Tick() }\nstruct Shared { int v }\n",
+        "schema engine 1.0.0\ninterface core { int Tick() }\nstruct Shared { int v }\n",
     );
-    let b = parse_clean("schema physics v1.0.0\nstruct Shared { int at }\n");
+    let b = parse_clean("schema physics 1.0.0\nstruct Shared { int at }\n");
     let issues = SchemaSet::build(vec![a.clone(), b]).unwrap_err();
     assert!(
         issues
@@ -304,13 +329,13 @@ fn set_build_enforces_cross_file_invariants() {
     );
 
     // Unresolved requires (§9.4).
-    let c = parse_clean("schema app v1.0.0\ncapability net requires missing { int Send() }\n");
+    let c = parse_clean("schema app 1.0.0\ncapability net requires missing { int Send() }\n");
     let issues = SchemaSet::build(vec![a.clone(), c]).unwrap_err();
     assert!(issues.iter().any(|i| i.message.contains("requires")));
 
     // A valid set with cross-namespace requires (§9.2 qualified shape).
-    let d = parse_clean("schema hud v1.0.0\ninterface widgets { int Draw() }\n");
-    let e = parse_clean("schema app v1.0.0\ninterface panel requires hud.widgets { int Show() }\n");
+    let d = parse_clean("schema hud 1.0.0\ninterface widgets { int Draw() }\n");
+    let e = parse_clean("schema app 1.0.0\ninterface panel requires hud.widgets { int Show() }\n");
     let set = SchemaSet::build(vec![a, d, e]).expect("valid set");
     assert_eq!(set.namespaces().len(), 3);
     assert_eq!(set.namespace("hud").unwrap().version, Version::new(1, 0, 0));
@@ -319,8 +344,8 @@ fn set_build_enforces_cross_file_invariants() {
 #[test]
 fn schema_context_grants_targets() {
     let set = SchemaSet::build(vec![
-        parse_clean("schema engine v1.4.0\ninterface core { int Tick() }\n"),
-        parse_clean("schema physics v1.0.0\ninterface rigid { int Step() }\n"),
+        parse_clean("schema engine 1.4.0\ninterface core { int Tick() }\n"),
+        parse_clean("schema physics 1.0.0\ninterface rigid { int Step() }\n"),
     ])
     .expect("valid set");
 
@@ -368,7 +393,7 @@ fn schema_context_grants_targets() {
 #[test]
 fn comments_and_layout_are_accepted() {
     let file = parse_clean(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          /* block\n\
             comment */\n\
          interface core {\n\
@@ -391,7 +416,7 @@ fn an_optional_capability_member_is_rejected() {
     // flag has no meaning there — the parser rejects it with a pointed
     // diagnostic.
     let outcome = parse_schema_file(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          \n\
          capability gfx {\n\
          \x20   since 1.0.0 optional void Draw()\n\
@@ -411,7 +436,7 @@ fn an_optional_capability_member_is_rejected() {
 
     // The same flag on an interface member stays legal.
     let clean = parse_clean(
-        "schema engine v1.0.0\n\
+        "schema engine 1.0.0\n\
          \n\
          interface svc {\n\
          \x20   since 1.0.0 optional void Draw()\n\
@@ -425,7 +450,7 @@ fn a_member_introduced_after_the_schema_version_is_a_set_issue() {
     // §9.5: no target may exceed the schema's own version, so a member
     // tagged beyond it could never be visible — a forgotten version bump.
     let outcome = parse_clean(
-        "schema shop v1.0.0\n\
+        "schema shop 1.0.0\n\
          \n\
          interface backend {\n\
          \x20   since 1.0.0 bool Ping()\n\
@@ -438,7 +463,7 @@ fn a_member_introduced_after_the_schema_version_is_a_set_issue() {
             .iter()
             .any(|i| i.message.contains("`shop.backend` member `Pong`")
                 && i.message.contains("since 9.9.9")
-                && i.message.contains("v1.0.0")),
+                && i.message.contains("1.0.0")),
         "the issue names the member and both versions: {:?}",
         issues.iter().map(|i| &i.message).collect::<Vec<_>>()
     );

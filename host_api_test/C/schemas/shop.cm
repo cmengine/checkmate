@@ -12,7 +12,7 @@
 //  - `interface checkout`: functions the SCRIPT implements and the HOST
 //    calls into (the mod must implement every member: §10.4 completeness).
 
-schema shop v1.0.0
+schema shop 1.0.0
 
 struct Item {
     int id

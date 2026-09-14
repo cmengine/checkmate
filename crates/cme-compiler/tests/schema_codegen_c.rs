@@ -20,7 +20,7 @@ fn generate(source: &str) -> String {
 }
 
 const ENGINE: &str = "
-schema engine v1.4.0
+schema engine 1.4.0
 
 struct TextureHandle {
     int id
@@ -370,7 +370,7 @@ int main(void) {
 fn two_generated_headers_coexist_in_one_translation_unit() {
     let engine = generate(ENGINE);
     const PHYSICS: &str = "
-schema physics v2.0.0
+schema physics 2.0.0
 struct Body {
     float mass
 }

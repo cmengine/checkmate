@@ -869,7 +869,7 @@ static void test_concurrent_contexts(void) {
  * _Generic-verified REGISTER macro; this consumer spells the vtable by
  * hand to keep the demo dependency-free. */
 static const char* SCHEMA_TEXT =
-    "schema chost v1.0.0\n"
+    "schema chost 1.0.0\n"
     "struct TextureHandle {\n"
     "int id\n"
     "}\n"
@@ -928,7 +928,7 @@ static void test_schema_capability(void) {
     cm_error_t err = CM_ERROR_INIT;
 
     /* A malformed schema is rejected with a compile-kind report. */
-    cm_schema_t* broken = cm_schema_parse("schema bad v1.0\n", &err);
+    cm_schema_t* broken = cm_schema_parse("schema bad 1.0\n", &err);
     CHECK(broken == NULL, "schema: malformed text rejected");
     CHECK(err.kind == CM_ERROR_COMPILE, "schema: defect reports COMPILE");
     cm_error_free(&err);

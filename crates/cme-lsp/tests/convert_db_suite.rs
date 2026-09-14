@@ -135,13 +135,13 @@ fn diagnostics_carry_source_severity_and_range() {
 #[test]
 fn sniffing_detects_schema_files() {
     use cme_lsp::db::{FileKind, sniff_kind};
-    assert_eq!(sniff_kind("schema engine v1.4.0\n"), FileKind::Schema);
+    assert_eq!(sniff_kind("schema engine 1.4.0\n"), FileKind::Schema);
     assert_eq!(
-        sniff_kind("// engine contract\n\nschema engine v1.0.0\n"),
+        sniff_kind("// engine contract\n\nschema engine 1.0.0\n"),
         FileKind::Schema
     );
     assert_eq!(
-        sniff_kind("/* header */\nschema engine v1.0.0\n"),
+        sniff_kind("/* header */\nschema engine 1.0.0\n"),
         FileKind::Schema
     );
     assert_eq!(sniff_kind("int hp = 100\n"), FileKind::Script);
@@ -228,7 +228,7 @@ fn schema_files_check_through_the_schema_parser() {
     let mut db = cme_lsp::db::Database::default();
     let file = cme_lsp::db::SourceFile::new(
         &db,
-        "schema engine v1.4.0\n".to_string(),
+        "schema engine 1.4.0\n".to_string(),
         cme_lsp::db::FileKind::Schema,
     );
     assert!(cme_lsp::db::diagnostics(&db, file).is_empty());

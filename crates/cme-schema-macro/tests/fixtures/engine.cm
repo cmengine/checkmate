@@ -1,7 +1,7 @@
 // The §9.1-shaped fixture the bindings test generates bindings from.
 // Kept as a real file because the macro's contract IS reading real files.
 
-schema engine v1.4.0
+schema engine 1.4.0
 
 struct TextureHandle {
     int id

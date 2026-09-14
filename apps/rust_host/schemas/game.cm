@@ -4,7 +4,7 @@
 // `WindowService` implements the generated trait — every signature below
 // is verified against the schema when this crate builds.
 
-schema game v1.0.0
+schema game 1.0.0
 
 struct Sprite {
     int id

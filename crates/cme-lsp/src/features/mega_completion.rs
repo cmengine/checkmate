@@ -2,16 +2,16 @@
 //! templates, grammar profiles, and the `mega`/`grammar` declarations
 //! themselves.
 //!
-//! Mega files get no position features from the script analysis — their
-//! parse spans live in expanded-text coordinates (the anchoring rule in
-//! [`crate::db`]). Completion is the exception that CAN work on the
-//! original text: [`cme_compiler::mega::scan_mega`] locates every
-//! declaration and invocation in the user's own coordinates, and the
-//! pattern/template grammars are lexical contexts, not resolved names. A
+//! Position features analyze the ORIGINAL text for mega files (see
+//! [`crate::db::parse_original`]), so the script analysis covers ordinary
+//! code everywhere in the file. Completion keeps a dedicated mega path for
+//! the contexts the pattern language owns: [`cme_compiler::mega::scan_mega`]
+//! locates every declaration and region in the user's own coordinates, and
+//! the pattern/template grammars are lexical contexts, not resolved names. A
 //! suggestion can never contradict the compiler here, because the expander
 //! re-checks everything the template generates anyway.
 //!
-//! Contexts:
+//! Contexts (see [`MegaContext`]):
 //!
 //! - **top level** — the declarations plus the ordinary keywords;
 //! - **`mega name( … )` pattern** — the §8.3 pattern language (fragments,
@@ -143,15 +143,66 @@ const GRAMMAR_KEYWORDS: [(&str, &str); 6] = [
 
 /// Computes completions at `offset` for a file that mentions megaprograms.
 pub fn completions(text: &str, offset: usize) -> Vec<ls_types::CompletionItem> {
+    match context_at(text, offset) {
+        MegaContext::Pattern => pattern_items(),
+        MegaContext::Template => template_items(),
+        MegaContext::GrammarProfile => GRAMMAR_KEYWORDS
+            .iter()
+            .map(|(name, detail)| keyword(name, detail))
+            .collect(),
+        MegaContext::RuleBody | MegaContext::RuleParens => pattern_items(),
+        // Invocation regions are foreign text: nothing to suggest.
+        MegaContext::InvocationRegion => Vec::new(),
+        // Ordinary code: the megaprogramming declarations lead, ordinary
+        // keywords follow.
+        MegaContext::None => {
+            let mut items = vec![
+                keyword(
+                    "mega",
+                    "megaprogram entry: `mega name(pattern) { template }` (§8.1)",
+                ),
+                keyword("grammar", "named library of matching rules (§8.2)"),
+            ];
+            for (name, detail) in crate::features::completion::SCRIPT_DECL_KEYWORDS {
+                items.push(keyword(name, detail));
+            }
+            items
+        }
+    }
+}
+
+/// Where `offset` sits relative to the file's megaprogram constructs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MegaContext {
+    /// Ordinary Checkmate code: no mega construct covers the offset.
+    None,
+    /// Inside a `mega name( … )` pattern.
+    Pattern,
+    /// Inside a `mega name( … ) { … }` template.
+    Template,
+    /// Between a grammar's profile declarations.
+    GrammarProfile,
+    /// Inside a grammar rule's pattern body.
+    RuleBody,
+    /// Inside a grammar rule's `( … )` header.
+    RuleParens,
+    /// Inside a `name! { … }` / heredoc invocation region.
+    InvocationRegion,
+}
+
+/// Classifies `offset` against the §8 scan. `None` means the offset sits in
+/// ordinary Checkmate code, where the script analysis (not the pattern
+/// vocabulary) drives completion.
+pub fn context_at(text: &str, offset: usize) -> MegaContext {
     let (scan, _) = scan_mega(text);
 
     // Mega declarations: pattern or template, by span.
     for mega in &scan.megas {
         if offset >= mega.pattern_span.start && offset <= mega.pattern_span.end {
-            return pattern_items();
+            return MegaContext::Pattern;
         }
         if offset >= mega.template_span.start && offset <= mega.template_span.end {
-            return template_items();
+            return MegaContext::Template;
         }
     }
 
@@ -160,35 +211,21 @@ pub fn completions(text: &str, offset: usize) -> Vec<ls_types::CompletionItem> {
     for grammar in &scan.grammars {
         if offset >= grammar.body_span.start && offset <= grammar.body_span.end {
             return match rule_nesting(&grammar.body, offset - grammar.body_span.start) {
-                RuleNesting::Profile => GRAMMAR_KEYWORDS
-                    .iter()
-                    .map(|(name, detail)| keyword(name, detail))
-                    .collect(),
-                RuleNesting::Pattern | RuleNesting::RuleParens => pattern_items(),
+                RuleNesting::Profile => MegaContext::GrammarProfile,
+                RuleNesting::Pattern => MegaContext::RuleBody,
+                RuleNesting::RuleParens => MegaContext::RuleParens,
             };
         }
     }
 
-    // Invocation regions are foreign text: nothing to suggest.
+    // Invocation regions are foreign text.
     for invocation in &scan.invocations {
         if offset >= invocation.region_span.start && offset <= invocation.region_span.end {
-            return Vec::new();
+            return MegaContext::InvocationRegion;
         }
     }
 
-    // Top level: the megaprogramming declarations lead, ordinary keywords
-    // follow.
-    let mut items = vec![
-        keyword(
-            "mega",
-            "megaprogram entry: `mega name(pattern) { template }` (§8.1)",
-        ),
-        keyword("grammar", "named library of matching rules (§8.2)"),
-    ];
-    for (name, detail) in crate::features::completion::SCRIPT_DECL_KEYWORDS {
-        items.push(keyword(name, detail));
-    }
-    items
+    MegaContext::None
 }
 
 /// Where the cursor sits inside a grammar body.

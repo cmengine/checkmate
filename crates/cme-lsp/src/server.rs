@@ -6,10 +6,15 @@
 //! after the lock is released.
 //!
 //! Feature gating follows the analysis anchoring rule: pure-Checkmate files
-//! get the full feature set; §9 schema files get diagnostics only; §8
+//! get the full feature set over their parse; §9 schema files get their own
+//! authoring surface (diagnostics, hover, completion, outline); §8
 //! megaprogram files get expansion diagnostics plus the `cme/expand`
-//! preview request, because their parse/check spans live in expanded-text
-//! coordinates that cannot anchor against the user's buffer.
+//! preview request — and their position features run against the ORIGINAL
+//! text ([`db::parse_original`]), because spans there must anchor against
+//! the buffer, not the expanded virtual text. Inside the mega constructs
+//! themselves the analysis simply has nothing to resolve (foreign text),
+//! and completion switches to the pattern-language contexts of
+//! [`crate::features::mega_completion`].
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -164,10 +169,16 @@ impl CheckmateLsp {
     /// The analysis borrows the salsa database behind the state lock, so it
     /// never escapes this call — only the owned result does.
     ///
-    /// Returns `None` for unopened documents, schema files (their own §9
-    /// feature set applies, see [`Self::with_schema_document`]), and
-    /// megaprogram files (their parse spans live in expanded-text
-    /// coordinates — see the module docs).
+    /// Returns `None` for unopened documents and schema files (their own §9
+    /// feature set applies, see [`Self::with_schema_document`]).
+    ///
+    /// Megaprogram files (§8) are analyzed on their ORIGINAL text: the
+    /// expanded-text pipeline stays authoritative for diagnostics (its
+    /// spans live in coordinates the editor never sees), but hover,
+    /// definition, references, symbols, and semantic tokens must anchor
+    /// against the user's buffer. The mega constructs themselves parse as
+    /// recovery placeholders the analysis skips — inside a region the
+    /// features answer "nothing here", which is right for foreign text.
     fn with_analysis<R>(
         &self,
         uri: &Uri,
@@ -184,9 +195,6 @@ impl CheckmateLsp {
             return None;
         }
         let text = file.text(db);
-        if cme_compiler::mega::expand::mentions_megaprogram(text) {
-            return None;
-        }
         // The mod's auto-detected schema contract and module table feed the
         // analysis: completion, hover, and resolution see the §9 surface.
         let (schema, mod_modules) = match uri.to_file_path() {
@@ -201,7 +209,12 @@ impl CheckmateLsp {
             }
             None => (None, Vec::new()),
         };
-        let parsed = db::parse(db, file);
+        let parsed = if cme_compiler::mega::expand::mentions_megaprogram(text) {
+            // §8 file: the ORIGINAL text, spans in buffer coordinates.
+            db::parse_original(db, file)
+        } else {
+            db::parse(db, file)
+        };
         let index = convert::line_index(db, file);
         let analysis =
             Analysis::build_with_schema(text, parsed.statements(db), schema, mod_modules);
@@ -350,10 +363,26 @@ impl LanguageServer for CheckmateLsp {
         params: CompletionParams,
     ) -> jsonrpc::Result<Option<CompletionResponse>> {
         let position = params.text_document_position;
-        let items = self
-            .with_analysis(&position.text_document.uri, |analysis, index, text| {
+        // §8 mega contexts (declaration patterns/templates, grammar
+        // profiles and rule bodies) take priority: the pattern language is
+        // not Checkmate, so the script analysis has nothing to say there.
+        // `None` from this path means the offset sits in ordinary code and
+        // the analysis path answers instead.
+        let mega_context_items = self
+            .with_mega_document(&position.text_document.uri, |index, text| {
                 let offset = index.offset(text, position.position);
-                crate::features::completion::completions(analysis, text, offset)
+                match crate::features::mega_completion::context_at(text, offset) {
+                    crate::features::mega_completion::MegaContext::None => None,
+                    _ => Some(crate::features::mega_completion::completions(text, offset)),
+                }
+            })
+            .flatten();
+        let items = mega_context_items
+            .or_else(|| {
+                self.with_analysis(&position.text_document.uri, |analysis, index, text| {
+                    let offset = index.offset(text, position.position);
+                    crate::features::completion::completions(analysis, text, offset)
+                })
             })
             .or_else(|| {
                 self.with_schema_document(&position.text_document.uri, |index, text| {
@@ -363,16 +392,6 @@ impl LanguageServer for CheckmateLsp {
                         text,
                         offset,
                     )
-                })
-            })
-            .or_else(|| {
-                // §8 megaprogram files: completion works in the user's own
-                // coordinates — the scan locates every declaration and
-                // region in the original text — unlike the span-anchored
-                // features the expanded coordinates forbid.
-                self.with_mega_document(&position.text_document.uri, |index, text| {
-                    let offset = index.offset(text, position.position);
-                    crate::features::mega_completion::completions(text, offset)
                 })
             })
             .unwrap_or_default();

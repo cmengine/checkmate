@@ -11,7 +11,10 @@
 //! from that virtual text cannot be trusted to anchor against the original
 //! buffer — so such files surface ONLY the expansion diagnostics, which the
 //! expander anchors in the original file (plan §2). Pure-Checkmate files
-//! surface the full parse + check pipeline.
+//! surface the full parse + check pipeline. Position features are the other
+//! way around: they analyze [`parse_original`], the ORIGINAL text, so
+//! hover/definition/references/symbols/tokens anchor in the buffer for mega
+//! files too (see `server::CheckmateLsp::with_analysis`).
 
 use cme_compiler::diagnostics::Diagnostic;
 use cme_compiler::schema::SchemaContext;
@@ -123,6 +126,22 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parsed<'_> {
         &outcome.statements,
     ));
     Parsed::new(db, outcome.statements, diagnostics)
+}
+
+/// The tolerant parse of the ORIGINAL text — the user's own coordinates —
+/// used by the position features for megaprogram files (§8). The expanded
+/// pipeline above remains authoritative for diagnostics (its spans live in
+/// expanded-text coordinates the editor never sees), but hover, definition,
+/// references, symbols, and semantic tokens must anchor against the buffer,
+/// so they analyze this tree instead. The mega constructs themselves parse
+/// as recovery placeholders (the sub-language inside a region or pattern is
+/// not Checkmate); the ordinary code around them parses exactly like a
+/// plain script, and the analysis skips the placeholder shapes.
+#[salsa::tracked(returns(copy))]
+pub fn parse_original(db: &dyn Db, file: SourceFile) -> Parsed<'_> {
+    let text = file.text(db);
+    let outcome = cme_compiler::parse_source(text);
+    Parsed::new(db, outcome.statements, outcome.diagnostics)
 }
 
 /// Step 3: type-check the recovered program (§2.6–§2.16, §11, §A.4–§A.7,
@@ -259,6 +278,52 @@ mod tests {
                 .iter()
                 .any(|stmt| matches!(&stmt.kind, cme_core::ast::StmtKind::VarDecl { name, .. } if name == "hp")),
             "the healthy declaration is still in the tree"
+        );
+    }
+
+    #[test]
+    fn parse_original_keeps_user_coordinates_for_mega_files() {
+        let db = Database::default();
+        // A mega declaration, an invocation, and plain code around them.
+        // The original text is NOT valid Checkmate at the mega sites, but
+        // the surrounding functions must survive with their own spans.
+        let source = "\
+mega twice($int value) {
+    int doubled = value * 2
+    return doubled
+}
+
+int base() {
+    return 21
+}
+
+int main() {
+    return twice! {
+        base()
+    }
+}
+";
+        let file = SourceFile::new(&db, source.to_string(), FileKind::Script);
+        let parsed = parse_original(&db, file);
+        let statements = parsed.statements(&db);
+        let base = statements
+            .iter()
+            .find(|stmt| matches!(&stmt.kind, cme_core::ast::StmtKind::FuncDecl { name, .. } if name == "base"))
+            .expect("the plain function between the mega sites is recovered");
+        // `int base() {` starts at offset 71: the declaration's span must
+        // anchor at the ORIGINAL text, not any expanded coordinate.
+        assert_eq!(
+            source[base.span.start..].starts_with("int base()"),
+            true,
+            "span must point into the user's text"
+        );
+        let main = statements
+            .iter()
+            .find(|stmt| matches!(&stmt.kind, cme_core::ast::StmtKind::FuncDecl { name, .. } if name == "main"))
+            .expect("the function after the invocation is recovered");
+        assert!(
+            source[main.span.start..].starts_with("int main()"),
+            "main's span must anchor in the original text"
         );
     }
 }

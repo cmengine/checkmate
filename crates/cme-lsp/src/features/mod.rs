@@ -7,6 +7,7 @@ pub mod completion;
 pub mod definition;
 pub mod diagnostics;
 pub mod hover;
+pub mod mega_completion;
 pub mod schema_docs;
 pub mod symbols;
 pub mod tokens;

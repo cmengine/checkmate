@@ -31,6 +31,16 @@ use tower_lsp_server::ls_types;
 use crate::analysis::{Analysis, Tok, render_type};
 use crate::resolve::{self, substitute};
 
+/// The top-level declaration keywords of a script — shared with the §8
+/// megaprogram completion's top level, where declarations still apply.
+pub const SCRIPT_DECL_KEYWORDS: [(&str, &str); 5] = [
+    ("struct", "record type (§2.6)"),
+    ("enum", "algebraic data type (§2.7)"),
+    ("impl", "interface or type implementation (§10.4)"),
+    ("import", "host capability or mod module (§2.3)"),
+    ("infer", "explicit type crystallization (§2.16)"),
+];
+
 /// Computes completions at `offset`.
 pub fn completions(
     analysis: &Analysis<'_>,
@@ -892,13 +902,14 @@ fn impl_open_brace(analysis: &Analysis<'_>, span: cme_core::Span) -> Option<usiz
 /// Statement/expression position: keywords, locals in scope, top-level
 /// declarations, and the built-in constructors.
 fn scope_completions(analysis: &Analysis<'_>, offset: usize) -> Vec<ls_types::CompletionItem> {
-    const KEYWORDS: [(&str, &str); 22] = [
+    const KEYWORDS: [(&str, &str); 24] = [
         ("bool", "built-in type (§2.4)"),
         ("else", "conditional alternative (§2.14)"),
         ("enum", "algebraic data type (§2.7)"),
         ("false", "boolean literal"),
         ("float", "built-in type (§2.4)"),
         ("for", "iteration over an array (§2.14)"),
+        ("grammar", "§8 named library of matching rules"),
         ("if", "conditional (§2.14)"),
         ("impl", "interface or type implementation (§10.4)"),
         ("import", "host capability or mod module (§2.3)"),
@@ -907,6 +918,7 @@ fn scope_completions(analysis: &Analysis<'_>, offset: usize) -> Vec<ls_types::Co
         ("in", "for-loop element binding (§2.14)"),
         ("map", "keyed collection type map<K, V> (§11)"),
         ("match", "exhaustive pattern matching (§2.15)"),
+        ("mega", "§8 megaprogram: `mega name(pattern) { template }`"),
         ("return", "function return (§2.11)"),
         ("str", "built-in type (§2.4)"),
         ("struct", "record type (§2.6)"),

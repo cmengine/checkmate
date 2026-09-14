@@ -644,23 +644,66 @@ async fn schema_files_complete_with_their_own_surfaces_and_still_publish() {
 }
 
 #[tokio::test]
-async fn megaprogram_files_expand_but_do_not_complete() {
+async fn megaprogram_files_complete_by_context_and_still_expand() {
     let (mut service, mut messages) = setup().await;
     handshake(&mut service).await;
     let mega = "int log(int x) {\n    return x\n}\n\nmega twice(\n    $int value\n) {\n    log($value)\n}\n\nint main() {\n    twice! {\n        21\n    }\n    return 0\n}\n";
     open_and_drain(&mut service, "file:///mega.cm", mega, &mut messages).await;
 
+    // Top level: `mega` and `grammar` are offered among the declarations.
     let response = request(
         &mut service,
         "textDocument/completion",
-        position_params("file:///mega.cm", 9, 4),
+        position_params("file:///mega.cm", 3, 0),
+    )
+    .await;
+    let items = response.result().expect("payload");
+    let offered = items.to_string();
+    assert!(
+        offered.contains("\"mega\"") && offered.contains("\"grammar\""),
+        "the megaprogramming declarations complete at the top level: {offered}"
+    );
+
+    // Inside the declaration's pattern parens: the pattern language.
+    let response = request(
+        &mut service,
+        "textDocument/completion",
+        position_params("file:///mega.cm", 5, 9),
+    )
+    .await;
+    let items = response.result().expect("payload");
+    let offered = items.to_string();
+    assert!(
+        offered.contains("$int") && offered.contains("each"),
+        "the pattern language completes inside `mega twice( ... )`: {offered}"
+    );
+
+    // Inside the template braces: the template constructs.
+    let response = request(
+        &mut service,
+        "textDocument/completion",
+        position_params("file:///mega.cm", 7, 8),
+    )
+    .await;
+    let items = response.result().expect("payload");
+    let offered = items.to_string();
+    assert!(
+        offered.contains("require(") && offered.contains("present("),
+        "template constructs complete inside the template body: {offered}"
+    );
+
+    // Inside the invocation region `twice! { 21 }`: foreign text, silence.
+    let response = request(
+        &mut service,
+        "textDocument/completion",
+        position_params("file:///mega.cm", 12, 8),
     )
     .await;
     let items = response.result().expect("payload");
     assert_eq!(
         items.as_array().map(Vec::len),
         Some(0),
-        "megaprogram spans live in expanded coordinates: {items}"
+        "an invocation region is foreign text: {items}"
     );
 
     // cme/expand still previews the expansion.

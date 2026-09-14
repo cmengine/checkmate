@@ -226,6 +226,26 @@ impl CheckmateLsp {
         let index = convert::line_index(&state.db, file);
         Some(f(&index, text))
     }
+
+    /// Runs the §8 completion path against a file that mentions
+    /// megaprograms (see [`crate::features::mega_completion`]). Returns
+    /// `None` for every other document kind.
+    fn with_mega_document<R>(
+        &self,
+        uri: &Uri,
+        f: impl FnOnce(&convert::LineIndex, &str) -> R,
+    ) -> Option<R> {
+        let state = self.state.lock().ok()?;
+        let file = *state.files.get(uri)?;
+        if file.kind(&state.db) != FileKind::Script
+            || !cme_compiler::mega::expand::mentions_megaprogram(file.text(&state.db))
+        {
+            return None;
+        }
+        let text = file.text(&state.db);
+        let index = convert::line_index(&state.db, file);
+        Some(f(&index, text))
+    }
 }
 
 impl LanguageServer for CheckmateLsp {
@@ -343,6 +363,16 @@ impl LanguageServer for CheckmateLsp {
                         text,
                         offset,
                     )
+                })
+            })
+            .or_else(|| {
+                // §8 megaprogram files: completion works in the user's own
+                // coordinates — the scan locates every declaration and
+                // region in the original text — unlike the span-anchored
+                // features the expanded coordinates forbid.
+                self.with_mega_document(&position.text_document.uri, |index, text| {
+                    let offset = index.offset(text, position.position);
+                    crate::features::mega_completion::completions(text, offset)
                 })
             })
             .unwrap_or_default();

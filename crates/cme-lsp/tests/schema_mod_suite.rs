@@ -908,3 +908,491 @@ async fn editing_the_open_schema_buffer_updates_the_grant_immediately() {
     );
     let _ = root;
 }
+
+// ---------------------------------------------------------------------------
+// Deeper real-world shapes: nested modules, sibling mods, ranges, and the
+// buffer lifecycle
+// ---------------------------------------------------------------------------
+
+/// A richer schema for the visibility/shape tests: `extra` namespace for
+/// grant narrowing, and members spread across versions.
+const VERSIONED_SCHEMA: &str = "\
+schema media 1.4.0
+
+struct Clip {
+    int id
+    str name
+}
+
+capability player {
+    since 1.0.0 void Play(Clip clip)
+    since 1.4.0 void PlayHd(Clip clip)
+}
+";
+
+#[tokio::test]
+async fn mod_detection_walks_up_from_nested_module_directories() {
+    // The file lives in src/ui/hud.cm — two levels under the mod root.
+    // Discovery must still find mod.toml and the schemas.
+    let root = temp_root("nested");
+    write(&root, "mod.toml", MOD_MANIFEST);
+    write(&root, "schemas/game.cm", GAME_SCHEMA);
+    let hud = write(
+        &root,
+        "src/ui/hud.cm",
+        "import game.window\n\nimpl game.gamemode {\n    int Tick(int frame) {\n        Sprite s = game.window.OpenWindow(\"hud\")\n        game.window.Draw(s)\n        return s.id\n    }\n    int OnEvent(Event event) {\n        return 0\n    }\n}\n",
+    );
+    let mut harness = setup().await;
+    harness
+        .open(
+            &hud,
+            "import game.window\n\nimpl game.gamemode {\n    int Tick(int frame) {\n        Sprite s = game.window.OpenWindow(\"hud\")\n        game.window.Draw(s)\n        return s.id\n    }\n    int OnEvent(Event event) {\n        return 0\n    }\n}\n",
+        )
+        .await;
+    let diagnostics = harness.publish_for(&hud).await;
+    assert_eq!(
+        diagnostics.as_array().map(Vec::len),
+        Some(0),
+        "a nested module still sees the mod's schema contract: {diagnostics}"
+    );
+}
+
+#[tokio::test]
+async fn the_parent_directory_schemas_layout_is_discovered() {
+    // The host_app layout: schemas/ sits NEXT to the mod directory, not
+    // inside it — the shape of this repository's own host_api_test/Rust.
+    let root = temp_root("hostapp");
+    let shop_schema = GAME_SCHEMA.replace("schema game", "schema shop");
+    let manifest = MOD_MANIFEST
+        .replace("name = \"game_mod\"", "name = \"shop_mod\"")
+        .replace("game = \"1.0.0\"", "shop = \"1.0.0\"");
+    write(&root, "schemas/shop.cm", &shop_schema);
+    let main = write(
+        &root,
+        "shop_mod/src/main.cm",
+        "import shop.window\n\nimpl shop.gamemode {\n    int OnEvent(Event event) {\n        return 0\n    }\n    int Tick(int frame) {\n        return frame\n    }\n}\n",
+    );
+    write(&root, "shop_mod/mod.toml", &manifest);
+    let mut harness = setup().await;
+    harness
+        .open(
+            &main,
+            "import shop.window\n\nimpl shop.gamemode {\n    int OnEvent(Event event) {\n        return 0\n    }\n    int Tick(int frame) {\n        return frame\n    }\n}\n",
+        )
+        .await;
+    let diagnostics = harness.publish_for(&main).await;
+    assert_eq!(
+        diagnostics.as_array().map(Vec::len),
+        Some(0),
+        "the parent's schemas/ tree is discovered (§10 layout variant): {diagnostics}"
+    );
+}
+
+#[tokio::test]
+async fn manifest_target_versions_select_visible_members() {
+    // media 1.4.0 schema, mod targets 1.0.0: Play is visible, PlayHd is
+    // hidden — and the HIDDEN call must be reported (§9.5).
+    let root = temp_root("versions");
+    write(&root, "mod.toml", &MOD_MANIFEST.replace("game", "media"));
+    write(&root, "schemas/media.cm", VERSIONED_SCHEMA);
+    let main = write(
+        &root,
+        "src/main.cm",
+        "import media.player\n\nint main() {\n    media.player.PlayHd(Clip(id: 1, name: \"x\"))\n    return 0\n}\n",
+    );
+    let mut harness = setup().await;
+    harness
+        .open(
+            &main,
+            "import media.player\n\nint main() {\n    media.player.PlayHd(Clip(id: 1, name: \"x\"))\n    return 0\n}\n",
+        )
+        .await;
+    let diagnostics = harness.publish_for(&main).await;
+    let messages: Vec<String> = diagnostics
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(message_text)
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("PlayHd")),
+        "the member from the future version is hidden (§9.5): {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_manifest_narrows_even_discovered_namespaces() {
+    // extra.cm is discovered on disk but NOT in [schemas] — importing it
+    // is refused, exactly like a CLI mod run.
+    let root = temp_root("narrow");
+    write(&root, "mod.toml", MOD_MANIFEST);
+    write(&root, "schemas/game.cm", GAME_SCHEMA);
+    write(
+        &root,
+        "schemas/extra.cm",
+        &GAME_SCHEMA.replace("schema game", "schema extra"),
+    );
+    let main = write(
+        &root,
+        "src/main.cm",
+        "import extra.window\n\nint main() {\n    return 0\n}\n",
+    );
+    let mut harness = setup().await;
+    harness
+        .open(
+            &main,
+            "import extra.window\n\nint main() {\n    return 0\n}\n",
+        )
+        .await;
+    let diagnostics = harness.publish_for(&main).await;
+    let messages: Vec<String> = diagnostics
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(message_text)
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("extra")),
+        "an ungranted namespace stays invisible (§7.2, §9.5): {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn sibling_mods_do_not_leak_schemas_into_each_other() {
+    let root = temp_root("siblings");
+    write(&root, "a/mod.toml", MOD_MANIFEST);
+    write(&root, "a/schemas/game.cm", GAME_SCHEMA);
+    write(&root, "a/src/main.cm", "int main() {\n    return 0\n}\n");
+    write(
+        &root,
+        "b/mod.toml",
+        "name = \"b\"\nversion = \"1.0.0\"\ncheckmate_version = \"0.3.0\"\n",
+    );
+    let b_main = write(&root, "b/src/main.cm", "int main() {\n    return 0\n}\n");
+    let mut harness = setup().await;
+    harness
+        .open(&b_main, "int main() {\n    return 0\n}\n")
+        .await;
+    let diagnostics = harness.publish_for(&b_main).await;
+    assert_eq!(
+        diagnostics.as_array().map(Vec::len),
+        Some(0),
+        "mod b has no schemas and no imports: nothing to report: {diagnostics}"
+    );
+    // And b's scripts do NOT see a's schema in completion.
+    let result = harness
+        .request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": file_uri(&b_main) },
+                "position": { "line": 2, "character": 13 }
+            }),
+        )
+        .await;
+    assert!(
+        !result.to_string().contains("Sprite"),
+        "mod b must not see mod a's boundary types: {result}"
+    );
+}
+
+#[tokio::test]
+async fn errors_anchor_at_the_right_line_in_the_buffer() {
+    let (root, main) = game_mod();
+    let broken = GOOD_MAIN.replace("game.window.Draw(s)", "game.window.Draw(7)");
+    let mut harness = setup().await;
+    harness.open(&main, &broken).await;
+    let diagnostics = harness.publish_for(&main).await;
+    let entries = diagnostics.as_array().expect("array");
+    let line_of_draw = broken
+        .lines()
+        .position(|line| line.contains("Draw(7)"))
+        .expect("Draw line") as u64;
+    let anchored = entries
+        .iter()
+        .find(|d| d["range"]["start"]["line"] == json!(line_of_draw));
+    assert!(
+        anchored.is_some(),
+        "the capability error anchors on its own line {line_of_draw}: {entries:?}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn editing_a_buffer_to_break_a_capability_call_republishes() {
+    let (root, main) = game_mod();
+    let mut harness = setup().await;
+    harness.open(&main, GOOD_MAIN).await;
+    let clean = harness.publish_for(&main).await;
+    assert_eq!(clean.as_array().map(Vec::len), Some(0), "{clean}");
+
+    // A mid-edit typo: the wrong-typed call surfaces on the very next
+    // publish, anchored in the buffer.
+    let broken = GOOD_MAIN.replace("game.window.Draw(s)", "game.window.Draw(true)");
+    harness.change(&main, &broken).await;
+    let diagnostics = harness.publish_for(&main).await;
+    let messages: Vec<String> = diagnostics
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(message_text)
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("Draw")),
+        "the buffer edit re-checks against the schema: {messages:?}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn schema_enum_variants_complete_after_the_type_name() {
+    let (root, main) = game_mod();
+    let mut harness = setup().await;
+    // `Event.` inside a match arm position — the schema enum's variants.
+    let text = "import game.window\n\nimpl game.gamemode {\n    int OnEvent(Event event) {\n        return match (event) {\n            Started() => 0\n            Scored(int points) => points\n        }\n    }\n    int Tick(int frame) {\n        return frame\n    }\n}\n\nint main() {\n    Event.\n    return 0\n}\n";
+    harness.open(&main, text).await;
+    let _ = harness.publish_for(&main).await;
+    let result = harness
+        .request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": file_uri(&main) },
+                "position": { "line": 15, "character": 10 }
+            }),
+        )
+        .await;
+    let offered = labels(&result);
+    assert!(
+        offered.contains(&"Started".to_string()) && offered.contains(&"Scored".to_string()),
+        "the schema enum's variants complete after `Event.` (§2.7): {offered:?}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn hover_on_a_schema_struct_shows_its_fields_in_a_script() {
+    let (root, main) = game_mod();
+    let mut harness = setup().await;
+    let text = "import game.window\n\nimpl game.gamemode {\n    int OnEvent(Event event) {\n        return 0\n    }\n    int Tick(int frame) {\n        Sprite s = game.window.OpenWindow(\"hero\")\n        game.window.Draw(s)\n        return s.id\n    }\n}\n\nint main() {\n    return 0\n}\n";
+    harness.open(&main, text).await;
+    let _ = harness.publish_for(&main).await;
+    let offset = text.find("Sprite s").expect("declaration") + 1;
+    let (line, column) = line_column(text, offset);
+    let result = harness
+        .request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": file_uri(&main) },
+                "position": { "line": line, "character": column }
+            }),
+        )
+        .await;
+    let rendered = result.to_string();
+    assert!(
+        rendered.contains("struct Sprite") && rendered.contains("id"),
+        "the schema struct hovers with its fields (§9.3): {rendered}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn go_to_definition_on_a_schema_type_answers_null_without_crashing() {
+    let (root, main) = game_mod();
+    let mut harness = setup().await;
+    harness.open(&main, GOOD_MAIN).await;
+    let _ = harness.publish_for(&main).await;
+    let offset = GOOD_MAIN.find("Sprite s = ").expect("declaration");
+    let (line, column) = line_column(GOOD_MAIN, offset);
+    let result = harness
+        .request(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": file_uri(&main) },
+                "position": { "line": line, "character": column }
+            }),
+        )
+        .await;
+    assert!(
+        result.is_null(),
+        "schema types live in another file — null, not a bogus jump: {result}"
+    );
+    // And a LOCAL symbol still resolves (regression guard).
+    let offset = GOOD_MAIN.find("return frame + s.id").expect("use") + "return frame + ".len();
+    let (line, column) = line_column(GOOD_MAIN, offset);
+    let result = harness
+        .request(
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": file_uri(&main) },
+                "position": { "line": line, "character": column }
+            }),
+        )
+        .await;
+    let rendered = result.to_string();
+    assert!(
+        !rendered.is_empty() && rendered != "null",
+        "the local `s` still jumps to its declaration: {result}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn document_symbols_do_not_leak_schema_types_into_the_outline() {
+    let (root, main) = game_mod();
+    let mut harness = setup().await;
+    harness.open(&main, GOOD_MAIN).await;
+    let _ = harness.publish_for(&main).await;
+    let result = harness
+        .request(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": file_uri(&main) } }),
+        )
+        .await;
+    let rendered = result.to_string();
+    assert!(
+        rendered.contains("OnEvent") && rendered.contains("Tick"),
+        "the file's impl members outline: {rendered}"
+    );
+    assert!(
+        !rendered.contains("\"Sprite\"") && !rendered.contains("\"Event\""),
+        "schema boundary types are not document symbols: {rendered}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn option_and_result_constructors_still_complete_in_mod_scripts() {
+    let (root, main) = game_mod();
+    let mut harness = setup().await;
+    let text = "import game.window\n\nint main() {\n    option.\n    return 0\n}\n";
+    harness.open(&main, text).await;
+    let _ = harness.publish_for(&main).await;
+    let result = harness
+        .request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": file_uri(&main) },
+                "position": { "line": 3, "character": 12 }
+            }),
+        )
+        .await;
+    let offered = labels(&result);
+    assert!(
+        offered.contains(&"Some".to_string()) && offered.contains(&"None".to_string()),
+        "the built-in constructors survive the schema-aware receiver path: {offered:?}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn a_mod_without_any_schema_still_validates_self_imports() {
+    // No schema files anywhere: the plain pipeline must still run — and
+    // self-import validation still names the missing module.
+    let root = temp_root("schemaless");
+    write(
+        &root,
+        "mod.toml",
+        "name = \"plain\"\nversion = \"1.0.0\"\ncheckmate_version = \"0.3.0\"\n",
+    );
+    let main = write(
+        &root,
+        "src/main.cm",
+        "import self.ghost\n\nint main() {\n    return 0\n}\n",
+    );
+    let mut harness = setup().await;
+    harness
+        .open(
+            &main,
+            "import self.ghost\n\nint main() {\n    return 0\n}\n",
+        )
+        .await;
+    let diagnostics = harness.publish_for(&main).await;
+    let messages: Vec<String> = diagnostics
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(message_text)
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("self.ghost") && m.contains("does not match any module")),
+        "a schema-less mod still validates its module tree (§10.3): {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn every_module_publishes_its_own_share_of_the_mod_check() {
+    // Two modules, one defect each file; opening each publishes exactly
+    // that file's diagnostics (no cross-file bleed).
+    let root = temp_root("shares");
+    write(&root, "mod.toml", MOD_MANIFEST);
+    write(&root, "schemas/game.cm", GAME_SCHEMA);
+    let a = write(
+        &root,
+        "src/a.cm",
+        "impl game.gamemode {\n    int OnEvent(Event event) {\n        string wrong = \"x\"\n        return 0\n    }\n}\n",
+    );
+    let b = write(
+        &root,
+        "src/b.cm",
+        "impl game.gamemode {\n    int Tick(int frame) {\n        return frame\n    }\n}\n",
+    );
+    let mut harness = setup().await;
+    harness
+        .open(
+            &a,
+            "impl game.gamemode {\n    int OnEvent(Event event) {\n        string wrong = \"x\"\n        return 0\n    }\n}\n",
+        )
+        .await;
+    let a_diags = harness.publish_for(&a).await;
+    assert!(
+        !a_diags.as_array().expect("array").is_empty(),
+        "a's own defect (unknown type `string`) publishes to a: {a_diags}"
+    );
+    harness
+        .open(
+            &b,
+            "impl game.gamemode {\n    int Tick(int frame) {\n        return frame\n    }\n}\n",
+        )
+        .await;
+    let b_diags = harness.publish_for(&b).await;
+    assert_eq!(
+        b_diags.as_array().map(Vec::len),
+        Some(0),
+        "b stays clean even though the mod as a whole has a defect elsewhere: {b_diags}"
+    );
+    let _ = root;
+}
+
+#[tokio::test]
+async fn a_member_added_in_the_open_schema_buffer_type_checks_immediately() {
+    // Diagnostics variant of the buffer lifecycle: the script CALLS the
+    // new member; the schema buffer carries it unsaved; the load-time
+    // provider rule aside, the checker must see the member.
+    let root = temp_root("buffer-diag");
+    write(&root, "mod.toml", MOD_MANIFEST);
+    let schema = write(&root, "schemas/game.cm", GAME_SCHEMA);
+    let main = write(&root, "src/main.cm", GOOD_MAIN);
+    let mut harness = setup().await;
+    harness.open(&schema, GAME_SCHEMA).await;
+    let _ = harness.publish_for(&schema).await;
+    harness.open(&main, GOOD_MAIN).await;
+    let _ = harness.publish_for(&main).await;
+
+    // Break Tick's use of Draw with a wrong type; then fix BOTH buffers.
+    let broken = GOOD_MAIN.replace("game.window.Draw(s)", "game.window.Draw(1)");
+    harness.change(&main, &broken).await;
+    let diagnostics = harness.publish_for(&main).await;
+    assert!(
+        !diagnostics.as_array().expect("array").is_empty(),
+        "the broken call reports: {diagnostics}"
+    );
+    harness.change(&main, GOOD_MAIN).await;
+    let fixed = harness.publish_for(&main).await;
+    assert_eq!(
+        fixed.as_array().map(Vec::len),
+        Some(0),
+        "the fix clears the diagnostics: {fixed}"
+    );
+    let _ = root;
+}

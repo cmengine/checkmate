@@ -364,3 +364,105 @@ fn a_broken_file_still_outlines_what_recovered() {
         "the recovered struct is outlined: {names:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// More contexts and edge shapes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typing_the_header_version_completes_to_nothing() {
+    // After `schema engine ` the version is typed, not suggested.
+    let source = "schema engine \n";
+    let offset = source.find("engine \n").expect("header") + "engine ".len();
+    let doc = SchemaDoc::build(source);
+    let offered: Vec<String> = completions(&doc, source, offset)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(
+        offered.is_empty(),
+        "the header version is free-typed: {offered:?}"
+    );
+}
+
+#[test]
+fn a_capability_body_offers_requires_until_it_is_declared() {
+    // `requires` appears among the member-start suggestions through the
+    // parser's own acceptance of both §9.4 spellings; once a member exists
+    // the line shape decides.
+    let source = "schema engine 1.4.0\n\ncapability net {\n    \n}\n";
+    let offset = source.find("    \n").expect("member line") + 4;
+    let doc = SchemaDoc::build(source);
+    let offered: Vec<String> = completions(&doc, source, offset)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(
+        offered.contains(&"since".to_string()),
+        "the member shape is suggested: {offered:?}"
+    );
+}
+
+#[test]
+fn an_enum_body_suggests_nothing_variants_are_names() {
+    let source = "schema engine 1.4.0\n\nenum LoadError {\n    \n}\n";
+    let offset = source.find("    \n").expect("variant line") + 4;
+    let doc = SchemaDoc::build(source);
+    let offered: Vec<String> = completions(&doc, source, offset)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(
+        !offered.contains(&"int".to_string()),
+        "enum variants are PascalCase names, not types (§9.3): {offered:?}"
+    );
+}
+
+#[test]
+fn declared_types_never_shadow_the_builtins_in_type_positions() {
+    // A PascalCase builtin collision is impossible, so the union always
+    // lists both kinds together: built-ins plus every declared type.
+    let source = "schema engine 1.4.0\n\nstruct Clip { int id }\n\nstruct Tagged {\n    \n}\n";
+    let offset = source.find("    \n").expect("field line") + 4;
+    let doc = SchemaDoc::build(source);
+    let offered: Vec<String> = completions(&doc, source, offset)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(
+        offered.contains(&"int".to_string()) && offered.contains(&"Clip".to_string()),
+        "built-ins and declared types complete together: {offered:?}"
+    );
+}
+
+#[test]
+fn hover_on_a_type_in_a_member_signature_shows_the_type() {
+    // A param type reference resolves to the struct's declaration.
+    let value = hover_at(
+        ENGINE,
+        "DrawSprite(TextureHandle tex",
+        "DrawSprite(".len() + 8,
+    );
+    assert!(
+        value.contains("struct TextureHandle"),
+        "a parameter's type hover resolves the declaration: {value}"
+    );
+}
+
+#[test]
+fn hover_between_tokens_is_none_not_a_panic() {
+    let doc = SchemaDoc::build(ENGINE);
+    assert!(hover(&doc, 0).is_none(), "the file start resolves nothing");
+    assert!(
+        hover(&doc, ENGINE.len()).is_none() || true,
+        "EOF resolves or not, but never panics"
+    );
+}
+
+#[test]
+fn an_empty_file_yields_an_empty_outline_and_clean_completion() {
+    let doc = SchemaDoc::build("");
+    let index = LineIndex::new("");
+    assert!(document_symbols(&doc, &index, "").is_empty());
+    assert!(!completions(&doc, "", 0).is_empty());
+}

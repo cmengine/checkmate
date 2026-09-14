@@ -239,3 +239,87 @@ fn a_file_with_only_an_invocation_still_completes_the_top_level() {
         "invocations alone do not hide the declarations: {offered:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Wider pattern vocabulary and shapes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_pattern_fragment_is_offered() {
+    let offered = labels_at(FIXTURE, "$text rest", 2);
+    for fragment in [
+        "$ident",
+        "$word",
+        "$tag",
+        "$int",
+        "$float",
+        "$str",
+        "$text",
+        "$raw",
+        "$expr",
+        "$type",
+        "$block",
+        "$template",
+    ] {
+        assert!(
+            offered.iter().any(|label| label == fragment),
+            "`{fragment}` completes in pattern position: {offered:?}"
+        );
+    }
+}
+
+#[test]
+fn line_mode_machinery_is_offered_alongside_the_combinators() {
+    let offered = labels_at(FIXTURE, "$word key \"=\" $str value", 3);
+    for keyword in [
+        "indent", "verbatim", "eof", "peek", "not", "until", "scan", "raw", "soft",
+    ] {
+        assert!(
+            offered.iter().any(|label| label == keyword),
+            "`{keyword}` completes inside a rule body: {offered:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rule_header_offers_the_pattern_vocabulary_too() {
+    // `rule setting( … )` — context declarations speak the pattern language.
+    let source = "grammar g {\n    rule item(context { selector parent = none }) {\n        $word first\n    }\n}\n";
+    let offset = source.find("context {").expect("rule header") + 3;
+    let offered = labels_at(source, "context {", 2);
+    assert!(
+        offered.contains(&"context".to_string()) && offered.contains(&"$word".to_string()),
+        "the rule header completes pattern items: {offered:?} (offset {offset})"
+    );
+}
+
+#[test]
+fn the_tt_fragment_and_its_parameterized_form_are_listed() {
+    // $tt is part of the fragment set; the parameterized spelling is the
+    // author's choice afterwards (§8.3.3).
+    let offered = labels_at(FIXTURE, "$text rest", 4);
+    assert!(
+        offered.iter().any(|label| label == "$tt"),
+        "`$tt` completes: {offered:?}"
+    );
+}
+
+#[test]
+fn nested_braces_in_a_template_do_not_confuse_the_context() {
+    let source = "mega wrap($word w) {\n    box(items: [$w, $w])\n}\n";
+    let offered = labels_at(source, "box(items:", 3);
+    assert!(
+        offered.contains(&"require(".to_string()) && offered.contains(&"[when ".to_string()),
+        "brackets inside the template keep the template context: {offered:?}"
+    );
+}
+
+#[test]
+fn a_grammar_extends_chain_still_completes_its_profile() {
+    let source = "grammar ts extends js {\n    skip [ ' ' ]\n    rule type { $word name }\n}\n";
+    let offered = labels_at(source, "skip [ ' ' ]", 2);
+    assert!(
+        offered.contains(&"rule".to_string()) && offered.contains(&"island".to_string()),
+        "the child grammar's profile completes: {offered:?}"
+    );
+}

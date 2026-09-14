@@ -27,7 +27,7 @@ use tower_lsp_server::ls_types;
 use cme_compiler::mega::scan::scan_mega;
 
 /// The §8.3.3 fragments: typed matchers that bind a capture directly.
-const FRAGMENTS: [(&str, &str); 12] = [
+const FRAGMENTS: [(&str, &str); 13] = [
     ("$ident", "a Checkmate-valid identifier (§8.3.3)"),
     (
         "$word",
@@ -46,6 +46,10 @@ const FRAGMENTS: [(&str, &str); 12] = [
     ("$type", "a live Checkmate type island (§8.3.3)"),
     ("$block", "a live Checkmate block island (§8.3.3)"),
     ("$template", "tail split at island delimiters (§8.3.3)"),
+    (
+        "$tt",
+        "one token or balanced tree, parameterizable $tt<\"{\" \"}\"> (§8.3.3)",
+    ),
 ];
 
 /// The §8.3.2 combinators and §8.3.10 pattern keywords.

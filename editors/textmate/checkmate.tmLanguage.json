@@ -188,8 +188,8 @@
                         ]
                 },
                 "function-declaration": {
-                        "comment": "Return type first: `int fib(int n) { ... }` — also matches impl members",
-                        "match": "\\b(?:(int|float|bool|str|void)|([A-Za-z_][A-Za-z0-9_]*(?:<[^>\r\n]*>)?(?:\\[\\])*))\\s+([a-zA-Z_][A-Za-z0-9_]*)\\s*(\\()",
+                        "comment": "Return type first: `int fib(int n) { ... }` — also matches impl members. The lookahead keeps reserved words out of the type slot: without it the rule swallows `return fib(` (`return` read as a type, `fib` as the name) and `else if (` (`else` read as a type, `if` as the name), which stripped the keyword color from a `return` whose value is a call and from every `else` in an `else if` chain.",
+                        "match": "\\b(?!(?:import|struct|enum|impl|return|if|else|while|for|in|infer|match|true|false)\\b)(?:(int|float|bool|str|void)|([A-Za-z_][A-Za-z0-9_]*(?:<[^>\\r\\n]*>)?(?:\\[\\])*))\\s+([a-zA-Z_][A-Za-z0-9_]*)\\s*(\\()",
                         "captures": {
                                 "1": { "name": "storage.type.checkmate" },
                                 "2": {

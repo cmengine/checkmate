@@ -597,7 +597,7 @@ async fn documents_are_isolated_from_each_other() {
 }
 
 #[tokio::test]
-async fn schema_files_complete_to_nothing_but_still_publish() {
+async fn schema_files_complete_with_their_own_surfaces_and_still_publish() {
     let (mut service, mut messages) = setup().await;
     handshake(&mut service).await;
     open_and_drain(
@@ -608,14 +608,19 @@ async fn schema_files_complete_to_nothing_but_still_publish() {
     )
     .await;
 
+    // Completion on an empty line offers the §9 declaration keywords.
     let response = request(
         &mut service,
         "textDocument/completion",
-        position_params("file:///engine.cm", 0, 3),
+        position_params("file:///engine.cm", 1, 0),
     )
     .await;
     let items = response.result().expect("payload");
-    assert_eq!(items.as_array().map(Vec::len), Some(0), "{items}");
+    let offered = items.to_string();
+    assert!(
+        offered.contains("capability") && offered.contains("struct"),
+        "the §9 keywords complete at the top level: {offered}"
+    );
 
     // A broken schema publishes diagnostics.
     notify(

@@ -276,7 +276,7 @@ async fn expand_preview_returns_expanded_text() {
 }
 
 #[tokio::test]
-async fn schema_files_get_diagnostics_but_no_position_features() {
+async fn schema_files_get_diagnostics_and_their_own_authoring_features() {
     let (mut service, mut messages) = setup().await;
     handshake(&mut service).await;
 
@@ -289,21 +289,39 @@ async fn schema_files_get_diagnostics_but_no_position_features() {
         "a clean schema publishes nothing: {params}"
     );
 
-    // Hover over a schema file: no position features there (the checker's
-    // script pipeline does not apply to §9 files).
+    // Hover over the namespace identifier: the §9 document feature set
+    // answers with the header.
     let response = request(
         &mut service,
         "textDocument/hover",
         json!({
             "textDocument": { "uri": "file:///engine.cm" },
-            "position": { "line": 0, "character": 3 }
+            "position": { "line": 0, "character": 10 }
         }),
     )
     .await;
-    assert!(response.is_ok());
-    let empty = response
-        .result()
-        .map(|value| value.is_null())
-        .unwrap_or(true);
-    assert!(empty, "schema files carry no hover: {response:?}");
+    assert!(response.is_ok(), "hover succeeds: {response:?}");
+    let hover = response.result().expect("hover payload");
+    assert!(
+        hover.to_string().contains("engine") && hover.to_string().contains("1.4.0"),
+        "schema files carry their own hover: {hover}"
+    );
+
+    // Completion at the top level offers the declaration keywords.
+    let response = request(
+        &mut service,
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": "file:///engine.cm" },
+            "position": { "line": 1, "character": 0 }
+        }),
+    )
+    .await;
+    assert!(response.is_ok(), "completion succeeds: {response:?}");
+    let items = response.result().expect("completion payload");
+    let offered = items.to_string();
+    assert!(
+        offered.contains("capability") && offered.contains("interface"),
+        "the §9 declaration keywords complete at the top level: {offered}"
+    );
 }

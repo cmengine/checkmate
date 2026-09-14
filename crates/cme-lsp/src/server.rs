@@ -207,6 +207,25 @@ impl CheckmateLsp {
             Analysis::build_with_schema(text, parsed.statements(db), schema, mod_modules);
         Some(f(&analysis, &index, text))
     }
+
+    /// Runs a schema-document feature against a §9 file: the schema front
+    /// end's own completion, hover, and symbols (see
+    /// [`crate::features::schema_docs`]). Returns `None` for every other
+    /// document kind.
+    fn with_schema_document<R>(
+        &self,
+        uri: &Uri,
+        f: impl FnOnce(&convert::LineIndex, &str) -> R,
+    ) -> Option<R> {
+        let state = self.state.lock().ok()?;
+        let file = *state.files.get(uri)?;
+        if file.kind(&state.db) != FileKind::Schema {
+            return None;
+        }
+        let text = file.text(&state.db);
+        let index = convert::line_index(&state.db, file);
+        Some(f(&index, text))
+    }
 }
 
 impl LanguageServer for CheckmateLsp {
@@ -293,6 +312,15 @@ impl LanguageServer for CheckmateLsp {
                 let offset = index.offset(text, position.position);
                 crate::features::hover::hover(analysis, offset)
             })
+            .or_else(|| {
+                self.with_schema_document(&position.text_document.uri, |index, text| {
+                    let offset = index.offset(text, position.position);
+                    crate::features::schema_docs::hover(
+                        &crate::features::schema_docs::SchemaDoc::build(text),
+                        offset,
+                    )
+                })
+            })
             .flatten();
         Ok(hover)
     }
@@ -306,6 +334,16 @@ impl LanguageServer for CheckmateLsp {
             .with_analysis(&position.text_document.uri, |analysis, index, text| {
                 let offset = index.offset(text, position.position);
                 crate::features::completion::completions(analysis, text, offset)
+            })
+            .or_else(|| {
+                self.with_schema_document(&position.text_document.uri, |index, text| {
+                    let offset = index.offset(text, position.position);
+                    crate::features::schema_docs::completions(
+                        &crate::features::schema_docs::SchemaDoc::build(text),
+                        text,
+                        offset,
+                    )
+                })
             })
             .unwrap_or_default();
         Ok(Some(CompletionResponse::Array(items)))
@@ -355,6 +393,15 @@ impl LanguageServer for CheckmateLsp {
         let symbols = self
             .with_analysis(&params.text_document.uri, |analysis, index, text| {
                 crate::features::symbols::document_symbols(analysis, index, text)
+            })
+            .or_else(|| {
+                self.with_schema_document(&params.text_document.uri, |index, text| {
+                    crate::features::schema_docs::document_symbols(
+                        &crate::features::schema_docs::SchemaDoc::build(text),
+                        index,
+                        text,
+                    )
+                })
             })
             .unwrap_or_default();
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))

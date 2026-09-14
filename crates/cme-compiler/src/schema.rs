@@ -96,6 +96,53 @@ impl Token {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Public token surface — tooling reads the same recognition the parser uses
+// ---------------------------------------------------------------------------
+
+/// The class of one schema-file token, for tooling (the language server's
+/// schema-file completion and hover ride the exact scanner the parser
+/// uses, so they never disagree with it about what a token is).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaTokenKind {
+    /// An identifier with its spelling.
+    Ident(String),
+    /// A `X.Y.Z` version (the `v`-prefixed spelling scans here too, with
+    /// its migration diagnostic).
+    Version,
+    /// One of `{ } ( ) < > , . [ ]`.
+    Punct(char),
+    Newline,
+    Eof,
+}
+
+/// One schema-file token with its source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaToken {
+    pub kind: SchemaTokenKind,
+    pub span: Span,
+}
+
+/// Lexes a schema file into the public token shape. Comments are skipped
+/// (they are not tokens); newlines are kept, since schema layout is
+/// newline-delimited.
+pub fn schema_tokens(source: &str) -> Vec<SchemaToken> {
+    let (tokens, _) = lex_schema(source);
+    tokens
+        .into_iter()
+        .map(|token| SchemaToken {
+            kind: match token.token {
+                Token::Ident(name) => SchemaTokenKind::Ident(name),
+                Token::Version(_) => SchemaTokenKind::Version,
+                Token::Punct(punct) => SchemaTokenKind::Punct(punct),
+                Token::Newline => SchemaTokenKind::Newline,
+                Token::Eof => SchemaTokenKind::Eof,
+            },
+            span: token.span,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 struct SpannedToken {
     token: Token,

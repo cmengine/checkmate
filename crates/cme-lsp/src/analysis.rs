@@ -822,6 +822,10 @@ impl<'a> Analysis<'a> {
     fn collect_locals(&mut self, block: &'a Block, function: usize) {
         let scope = block.span;
         for statement in &block.stmts {
+            // Match-EXPRESSION payload bindings (`return match (s) { … }`):
+            // the expression form of §2.15 is invisible to the statement
+            // walk below, so every statement's expressions are swept.
+            self.collect_stmt_expr_bindings(statement, function);
             match &statement.kind {
                 StmtKind::VarDecl { name, ty, expr } => {
                     let span = self.var_decl_name(statement.span).unwrap_or(statement.span);
@@ -902,6 +906,124 @@ impl<'a> Analysis<'a> {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Sweeps a statement's expressions for match-expression payload
+    /// bindings (§2.15): `return match (s) { Running(int ticks) => ticks }`
+    /// declares `ticks` even though no `match` statement is involved.
+    fn collect_stmt_expr_bindings(&mut self, statement: &'a Stmt, function: usize) {
+        match &statement.kind {
+            StmtKind::VarDecl { expr, .. } => self.collect_expr_match_bindings(expr, function),
+            StmtKind::Assign { expr, .. } | StmtKind::CompoundAssign { expr, .. } => {
+                self.collect_expr_match_bindings(expr, function)
+            }
+            StmtKind::Expression { expr } => self.collect_expr_match_bindings(expr, function),
+            StmtKind::If { cond, .. } => self.collect_expr_match_bindings(cond, function),
+            StmtKind::While { cond, .. } => self.collect_expr_match_bindings(cond, function),
+            StmtKind::For { iterable, body, .. } => {
+                self.collect_expr_match_bindings(iterable, function);
+                self.collect_locals(body, function);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                self.collect_expr_match_bindings(scrutinee, function);
+                for arm in arms {
+                    self.collect_block_expr_bindings(&arm.body, function);
+                }
+            }
+            StmtKind::Return { value: Some(expr) } => {
+                self.collect_expr_match_bindings(expr, function)
+            }
+            _ => {}
+        }
+    }
+
+    /// Recurses a statement-level block for the statement sweep above.
+    fn collect_block_expr_bindings(&mut self, block: &'a Block, function: usize) {
+        for statement in &block.stmts {
+            self.collect_stmt_expr_bindings(statement, function);
+        }
+    }
+
+    /// Registers the payload bindings of a match EXPRESSION's arms and
+    /// recurses into every nested expression, so bindings of arbitrarily
+    /// deep matches resolve. The binding's scope is the arm body
+    /// expression, mirroring the statement form's arm-block scope.
+    fn collect_expr_match_bindings(&mut self, expr: &'a Expr, function: usize) {
+        match &expr.kind {
+            cme_core::ast::ExprKind::Match { scrutinee, arms } => {
+                self.collect_expr_match_bindings(scrutinee, function);
+                let mut region_start = expr.span.start;
+                for arm in arms {
+                    let region = Span::new(region_start, arm.body.span.start);
+                    region_start = arm.body.span.end;
+                    if let cme_core::ast::Pattern::Variant { bindings, .. } = &arm.pattern {
+                        for binding in bindings {
+                            if let Some(span) = self.ident_named_in(binding.name.as_str(), region) {
+                                self.locals.push(LocalSymbol {
+                                    name: binding.name.clone(),
+                                    ty: binding.ty.clone(),
+                                    span,
+                                    kind: LocalKind::MatchBinding,
+                                    function,
+                                    scope: arm.body.span,
+                                });
+                            }
+                        }
+                    }
+                    self.collect_expr_match_bindings(&arm.body, function);
+                }
+            }
+            cme_core::ast::ExprKind::Paren { expr } => {
+                self.collect_expr_match_bindings(expr, function)
+            }
+            cme_core::ast::ExprKind::Binary { lhs, rhs, .. } => {
+                self.collect_expr_match_bindings(lhs, function);
+                self.collect_expr_match_bindings(rhs, function);
+            }
+            cme_core::ast::ExprKind::Unary { expr, .. } => {
+                self.collect_expr_match_bindings(expr, function)
+            }
+            cme_core::ast::ExprKind::Call { args, .. }
+            | cme_core::ast::ExprKind::VariantCall { args, .. }
+            | cme_core::ast::ExprKind::PathCall { args, .. } => {
+                for arg in args {
+                    match arg {
+                        cme_core::ast::CallArg::Positional(expr) => {
+                            self.collect_expr_match_bindings(expr, function)
+                        }
+                        cme_core::ast::CallArg::Named { expr, .. } => {
+                            self.collect_expr_match_bindings(expr, function)
+                        }
+                    }
+                }
+            }
+            cme_core::ast::ExprKind::Field { obj, .. } => {
+                self.collect_expr_match_bindings(obj, function)
+            }
+            cme_core::ast::ExprKind::Index { obj, index } => {
+                self.collect_expr_match_bindings(obj, function);
+                self.collect_expr_match_bindings(index, function);
+            }
+            cme_core::ast::ExprKind::ArrayLit { elements } => {
+                for element in elements {
+                    self.collect_expr_match_bindings(element, function);
+                }
+            }
+            cme_core::ast::ExprKind::MapLit { entries } => {
+                for (key, value) in entries {
+                    self.collect_expr_match_bindings(key, function);
+                    self.collect_expr_match_bindings(value, function);
+                }
+            }
+            cme_core::ast::ExprKind::Interpolated { parts } => {
+                for part in parts {
+                    if let cme_core::ast::InterpPart::Expr(expr) = part {
+                        self.collect_expr_match_bindings(expr, function);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

@@ -346,6 +346,23 @@ impl<'a> Analysis<'a> {
                             .then_some(substituted),
                     });
                 }
+                // The receiver's type is a §9.3 boundary struct: the field
+                // lives in the schema (its span is zero here), but its
+                // declared type is exactly what hover needs. Completion
+                // already offers these fields (see
+                // `features::completion::member_completions`).
+                if let Some(struct_type) = self.schema_structs.iter().find(|s| &s.name == type_name)
+                    && let Some(index) = struct_type
+                        .fields
+                        .iter()
+                        .position(|(field_name, _, _)| field_name == name)
+                {
+                    return Some(Resolved::Field {
+                        struct_type,
+                        index,
+                        substituted: None,
+                    });
+                }
                 if let Some(enum_type) = self.enums.iter().find(|e| &e.name == type_name)
                     && let Some(variant) = enum_type.variants.iter().find(|v| v.name == name)
                 {

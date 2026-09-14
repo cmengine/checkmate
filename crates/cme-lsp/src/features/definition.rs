@@ -23,7 +23,13 @@ pub fn declaration_span(resolved: &Resolved<'_>) -> Option<Span> {
         Resolved::Variant { variant, .. } => Some(variant.name_span),
         Resolved::Field {
             struct_type, index, ..
-        } => Some(struct_type.fields[*index].2),
+        } => {
+            // A §9.3 boundary struct's fields carry zero spans here (they
+            // live in the schema document); only locally declared fields
+            // have a span to jump to.
+            let span = struct_type.fields[*index].2;
+            (span.start < span.end).then_some(span)
+        }
         Resolved::ImportSegment { import, segment } => {
             import.segments.get(*segment).map(|(_, span)| *span)
         }
@@ -123,7 +129,11 @@ fn same_symbol(left: &Resolved<'_>, right: &Resolved<'_>) -> bool {
                 index: j,
                 ..
             },
-        ) => a.name_span == b.name_span && i == j,
+        ) => {
+            // Schema-backed structs all carry zero name spans, so the
+            // struct's NAME disambiguates fields that local spans cannot.
+            (a.name_span == b.name_span && a.name == b.name) && i == j
+        }
         (
             Resolved::ImportSegment {
                 import: a,

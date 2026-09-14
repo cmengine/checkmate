@@ -133,15 +133,69 @@ pub fn parse(db: &dyn Db, file: SourceFile) -> Parsed<'_> {
 /// pipeline above remains authoritative for diagnostics (its spans live in
 /// expanded-text coordinates the editor never sees), but hover, definition,
 /// references, symbols, and semantic tokens must anchor against the buffer,
-/// so they analyze this tree instead. The mega constructs themselves parse
-/// as recovery placeholders (the sub-language inside a region or pattern is
-/// not Checkmate); the ordinary code around them parses exactly like a
-/// plain script, and the analysis skips the placeholder shapes.
+/// so they analyze this tree instead.
+///
+/// The mega constructs themselves are not Checkmate, and handing them to
+/// the parser only produces recovery noise that can swallow surrounding
+/// code (an invocation's braces read as block structure). [`blank_mega_regions`]
+/// erases their interiors first — byte-for-byte, newlines preserved — so the
+/// parse sees the file's Checkmate skeleton with every region already
+/// excised: offsets are unchanged, and the code around the constructs parses
+/// exactly like a plain script.
 #[salsa::tracked(returns(copy))]
 pub fn parse_original(db: &dyn Db, file: SourceFile) -> Parsed<'_> {
     let text = file.text(db);
-    let outcome = cme_compiler::parse_source(text);
+    let blanked = blank_mega_regions(text);
+    let outcome = cme_compiler::parse_source(&blanked);
     Parsed::new(db, outcome.statements, outcome.diagnostics)
+}
+
+/// Blanks every §8 construct's extent in `text`: grammar declarations, mega
+/// declarations, and invocation regions (heredocs included), discovered
+/// through `scan_mega` in the original coordinates. Non-newline bytes
+/// inside each span become spaces, so byte offsets, line structure, and
+/// statement boundaries all survive; a plain file (or one whose scan finds
+/// nothing) comes back unchanged. Overlapping spans — a nested invocation
+/// inside a template, say — merge before blanking.
+pub fn blank_mega_regions(text: &str) -> String {
+    if !cme_compiler::mega::expand::mentions_megaprogram(text) {
+        return text.to_string();
+    }
+    let (scan, _) = cme_compiler::mega::scan::scan_mega(text);
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for grammar in &scan.grammars {
+        spans.push((grammar.span.start, grammar.span.end));
+    }
+    for mega in &scan.megas {
+        spans.push((mega.span.start, mega.span.end));
+    }
+    for invocation in &scan.invocations {
+        spans.push((invocation.span.start, invocation.span.end));
+    }
+    if spans.is_empty() {
+        return text.to_string();
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    for (start, end) in merged {
+        let end = end.min(bytes.len());
+        if start >= end {
+            continue;
+        }
+        for byte in &mut bytes[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).expect("blanking preserves UTF-8 boundaries")
 }
 
 /// Step 3: type-check the recovered program (§2.6–§2.16, §11, §A.4–§A.7,
@@ -312,9 +366,8 @@ int main() {
             .expect("the plain function between the mega sites is recovered");
         // `int base() {` starts at offset 71: the declaration's span must
         // anchor at the ORIGINAL text, not any expanded coordinate.
-        assert_eq!(
+        assert!(
             source[base.span.start..].starts_with("int base()"),
-            true,
             "span must point into the user's text"
         );
         let main = statements

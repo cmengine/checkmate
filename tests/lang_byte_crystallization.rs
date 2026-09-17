@@ -1027,3 +1027,51 @@ fn byte_overflow_terminates_through_nested_calls() {
         "integer overflow in `+`",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Host boundary: invoke() args into byte parameters
+// ---------------------------------------------------------------------------
+
+#[test]
+fn host_invocation_crystallizes_an_in_range_int_argument() {
+    // A host calling invoke() with a plain Int for a byte parameter gets
+    // the same crystallization the language-level literal would: the
+    // callee sees a Byte-shaped parameter.
+    let source = program("byte echo(byte v) {\nreturn v\n}", "return 0");
+    let outcome = parse_source(&source);
+    assert!(check(&outcome.statements).is_empty());
+    let interpreter = Interpreter::new(&outcome.statements);
+    assert_eq!(
+        interpreter.invoke("echo", &[Value::Int(7)]),
+        Ok(Value::Byte(7))
+    );
+}
+
+#[test]
+fn host_invocation_terminates_on_an_out_of_domain_byte_argument() {
+    // The host equivalent of an out-of-range literal: a clean termination
+    // naming the byte domain, never a silently int-shaped byte slot.
+    let source = program("byte echo(byte v) {\nreturn v\n}", "return 0");
+    let outcome = parse_source(&source);
+    assert!(check(&outcome.statements).is_empty());
+    let interpreter = Interpreter::new(&outcome.statements);
+    let error = interpreter
+        .invoke("echo", &[Value::Int(300)])
+        .expect_err("out-of-domain host argument must terminate");
+    assert!(
+        error
+            .message
+            .contains("byte value out of range: `300` does not fit in 0..=255"),
+        "error {:?} should name the byte domain violation",
+        error.message
+    );
+    // The negative side of the domain is equally out of range.
+    let error = interpreter
+        .invoke("echo", &[Value::Int(-1)])
+        .expect_err("a negative host argument is out of the byte domain");
+    assert!(
+        error.message.contains("byte value out of range: `-1`"),
+        "error {:?} should name the byte domain violation",
+        error.message
+    );
+}

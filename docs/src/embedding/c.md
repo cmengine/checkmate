@@ -432,7 +432,35 @@ The header gives you, per namespace:
   fields; `_pack` takes the host value BY ADDRESS so nested schema
   types compose recursively; `str` fields unpack to owned `char*`
   copies freed with `cm_string_free`; enums are tagged unions with
-  per-variant payload structs dispatched through `cm_value_enum_variant`).
+  per-variant payload structs dispatched through `cm_value_enum_variant`),
+- typed **option/result helpers** (§2.8): every distinct
+  `option<T>` / `result<T, E>` shape the schema uses gets one
+  pack/unpack pair over the `cm_value` enum representation. A member
+  declared `result<Price, str> GetPrice(str sku)` in namespace `shop`
+  yields:
+
+  ```c
+  /* Unpack a script-returned result into typed slots. */
+  cm_status_t cme_shop_result_Price_str_unpack(
+      const cm_value_t* value, int* out_is_ok,
+      cme_shop_Price* out_ok, char** out_err);   /* owned */
+
+  /* Build the script value `Ok(Price(cents: 42))` from host data. */
+  cm_value_t* cme_shop_result_Price_str_pack(
+      int is_ok, const cme_shop_Price* ok, const char* err);
+
+  cm_status_t cme_shop_option_Price_unpack(
+      const cm_value_t* value, int* out_present, cme_shop_Price* out_value);
+  cm_value_t* cme_shop_option_Price_pack(
+      int present, const cme_shop_Price* value);
+  ```
+
+  Unpack validates the value kind, the enum type name, the variant, and
+  the payload count before writing any slot, and returns `CM_OK`,
+  `CM_ERR_KIND`, or `CM_ERR_MISSING`. `str` slots become owned copies
+  (free with `cm_string_free`); pack takes a NUL-terminated buffer and
+  copies. Schema types ride their generated pack/unpack helpers, so a
+  `result` carrying a schema struct unpacks recursively.
 
 One header per namespace; several coexist in one translation unit. The
 header is multi-include-safe and byte-deterministic. See

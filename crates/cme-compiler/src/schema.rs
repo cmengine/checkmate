@@ -1174,6 +1174,25 @@ impl SchemaParser {
                     } else {
                         Vec::new()
                     };
+                    // The §2.8 built-in sum types are generic with a fixed
+                    // arity everywhere they can appear — a schema file is
+                    // the contract's source of truth, so a mis-arity `option`
+                    // / `result` here is rejected at parse time instead of
+                    // surfacing later as an "unknown type" inside a script.
+                    if let Some(expected) = builtin_generic_arity(&name)
+                        && args.len() != expected
+                    {
+                        self.record(
+                            format!(
+                                "the builtin `{name}` takes exactly {expected} type \
+                                 argument{s}, found {}",
+                                args.len(),
+                                s = if expected == 1 { "" } else { "s" }
+                            ),
+                            self.peek().span,
+                        );
+                        return None;
+                    }
                     Type::Named { name, args }
                 }
             },
@@ -1241,6 +1260,17 @@ fn is_identifier(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|rest| rest.is_ascii_alphanumeric() || rest == '_')
+}
+
+/// The fixed type-argument arity of the §2.8 built-in sum types, or `None`
+/// when `name` is not one of them. `option<T>` takes one argument and
+/// `result<T, E>` takes two; any other spelling is a schema defect.
+fn builtin_generic_arity(name: &str) -> Option<usize> {
+    match name {
+        "option" => Some(1),
+        "result" => Some(2),
+        _ => None,
+    }
 }
 
 /// Synthesizes the §9.3 boundary-type declarations of every GRANTED

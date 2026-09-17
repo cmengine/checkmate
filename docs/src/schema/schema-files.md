@@ -76,6 +76,25 @@ that crosses the FFI boundary in both directions.
 - Boundary type names are unique **across namespaces** — the script type
   space is flat, so `engine.Sprite` and `ui.Sprite` cannot coexist.
 
+## Option and result everywhere a type appears
+
+The §2.8 built-in sum types are first-class in schemas: member returns,
+member parameters, struct fields, enum payloads, array elements, and map
+key/value types may all be `option<T>` or `result<T, E>`.
+
+```checkmate
+capability pricing {
+    since 0.1.0 result<Price, str> GetPrice(str sku)
+    since 0.1.0 option<Price> PeekPrice(str sku)
+}
+```
+
+The arities are exact and validated at schema-parse time (`option` takes
+one type argument, `result` two). The generated Rust bindings map them to
+`Option<T>` / `Result<T, E>`; the generated C header ships one typed
+pack/unpack helper pair per distinct shape (see
+[Embedding in C](../embedding/c.md#generated-schema-headers)).
+
 ## Naming
 
 - The namespace is lowercase (camelCase style, e.g. `engine`, `modBridge`
@@ -117,7 +136,9 @@ The schema front end rejects defective contracts, among them:
 - `optional` on a capability member,
 - an interface `requires` edge pointing at nothing,
 - the retired `v1.4.0` spelling (one migration diagnostic points at it),
-- duplicate member names within a contract.
+- duplicate member names within a contract,
+- an `option` / `result` type with the wrong number of type arguments
+  (`option` takes exactly one, `result` exactly two).
 
 A defect in the schema is a *host-side* problem — it fails validation at
 registration/`cme schema` time, before any script is checked against it.

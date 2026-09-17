@@ -468,3 +468,89 @@ fn a_member_introduced_after_the_schema_version_is_a_set_issue() {
         issues.iter().map(|i| &i.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn option_and_result_member_types_parse() {
+    // The §2.8 built-in sum types are legal anywhere a schema type can
+    // appear — member returns, parameters, and field shapes.
+    let file = parse_clean(
+        r#"
+schema shop 0.3.0
+
+struct Price {
+    int cents
+}
+
+capability pricing {
+    since 0.1.0 result<Price, str> GetPrice(str sku)
+    since 0.1.0 option<Price> PeekPrice(str sku)
+    since 0.2.0 result<int, str>[] BulkPrices(str[] skus)
+}
+
+struct Holder {
+    option<Price> maybe
+    result<Price, str> attempt
+}
+"#,
+    );
+    let get_price = &file.capability("pricing").unwrap().members[0];
+    assert_eq!(
+        get_price.return_ty,
+        Type::Named {
+            name: "result".to_string(),
+            args: vec![
+                Type::Named {
+                    name: "Price".to_string(),
+                    args: vec![]
+                },
+                Type::Prim(PrimitiveType::Str),
+            ]
+        }
+    );
+    let holder = file
+        .structs()
+        .find(|s| s.name == "Holder")
+        .expect("the Holder struct");
+    assert_eq!(
+        holder.fields[0].ty,
+        Type::Named {
+            name: "option".to_string(),
+            args: vec![Type::Named {
+                name: "Price".to_string(),
+                args: vec![]
+            }]
+        }
+    );
+}
+
+#[test]
+fn builtin_generic_arity_is_enforced_at_parse_time() {
+    // A schema file is the contract's source of truth: a mis-arity
+    // option/result is rejected here, not later inside a script.
+    let errors = parse_errors(
+        r#"
+schema bad 0.1.0
+
+struct Price {
+    int cents
+}
+
+capability pricing {
+    since 0.1.0 option<Price, int> Weird(str sku)
+    since 0.1.0 result<Price> Missing(str sku)
+}
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("the builtin `option` takes exactly 1 type argument, found 2")),
+        "missing the option arity diagnostic: {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("the builtin `result` takes exactly 2 type arguments, found 1")),
+        "missing the result arity diagnostic: {errors:?}"
+    );
+}

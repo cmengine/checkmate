@@ -129,6 +129,18 @@ pub fn codegen_c(schema: &SchemaFile, include_path: &str) -> String {
         }
     }
 
+    // The typed §2.8 sum-type layer: every option/result shape the schema
+    // uses gets pack/unpack helpers over the cm_value enum representation.
+    // Emitted AFTER every schema type (the helpers reference the typedefs
+    // by pointer), and referenced by nothing generated earlier, so plain
+    // definition order compiles.
+    let shapes = collect_sum_shapes(schema);
+    if !shapes.is_empty() {
+        let mut helpers = String::new();
+        render_sum_helpers(raw_ns, &shapes, &mut helpers);
+        out.push_str(&helpers);
+    }
+
     let _ = writeln!(out, "\n#endif /* CME_SCHEMA_GEN_{NS}_H */", NS = ns);
     out
 }
@@ -735,4 +747,467 @@ fn render_interface(ns: &str, contract: &cme_core::schema::SchemaContract, out: 
         defines = defines,
         helpers = helpers,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Typed §2.8 sum-type helpers (option / result over the cm_value ABI)
+// ---------------------------------------------------------------------------
+
+/// One distinct option/result shape the schema uses: `option<T>` or
+/// `result<T, E>` whose payloads are all covered by the typed layer
+/// (primitives or schema-declared types). Nested sum types
+/// (`option<option<..>>`) never shape here — their payload is itself a
+/// multi-slot sum, which the one-slot-per-payload C layer cannot hold;
+/// they ride the generic accessors (the inner shape still gets helpers).
+enum SumShape {
+    Option(Type),
+    Result(Type, Type),
+}
+
+impl SumShape {
+    /// The C helper base name: `cme_{ns}_option_{T}` /
+    /// `cme_{ns}_result_{T}_{E}`. Segment spellings are lowercase or
+    /// PascalCase, so a helper name can never collide with a schema type
+    /// (schema declarations are PascalCase-enforced, §9.3).
+    fn c_name(&self, ns: &str) -> String {
+        match self {
+            SumShape::Option(t) => {
+                format!(
+                    "cme_{ns}_option_{}",
+                    sum_name_segment(t).unwrap_or_default()
+                )
+            }
+            SumShape::Result(t, e) => format!(
+                "cme_{ns}_result_{}_{}",
+                sum_name_segment(t).unwrap_or_default(),
+                sum_name_segment(e).unwrap_or_default()
+            ),
+        }
+    }
+
+    /// The schema spelling, for the helper's doc comment.
+    fn schema_spelling(&self) -> String {
+        match self {
+            SumShape::Option(t) => format!("option<{}>", type_spelling(t)),
+            SumShape::Result(t, e) => {
+                format!("result<{}, {}>", type_spelling(t), type_spelling(e))
+            }
+        }
+    }
+}
+
+/// The schema-facing spelling of a type, for doc comments.
+fn type_spelling(ty: &Type) -> String {
+    match ty {
+        Type::Void => "void".to_string(),
+        Type::Prim(PrimitiveType::Int) => "int".to_string(),
+        Type::Prim(PrimitiveType::Float) => "float".to_string(),
+        Type::Prim(PrimitiveType::Bool) => "bool".to_string(),
+        Type::Prim(PrimitiveType::Str) => "str".to_string(),
+        Type::Array(elem) => format!("{}[]", type_spelling(elem)),
+        Type::Map { key, value } => {
+            format!("map<{}, {}>", type_spelling(key), type_spelling(value))
+        }
+        Type::Infer => "infer".to_string(),
+        Type::Named { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let inner: Vec<String> = args.iter().map(type_spelling).collect();
+                format!("{name}<{}>", inner.join(", "))
+            }
+        }
+    }
+}
+
+/// The name segment for a sum-type payload in helper names: scalars by
+/// keyword, schema types by their PascalCase name, nested sums by
+/// recursion. `None` for shapes the typed layer cannot hold (arrays,
+/// maps, `infer`, unknown generic names).
+fn sum_name_segment(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Prim(PrimitiveType::Int) => Some("int".to_string()),
+        Type::Prim(PrimitiveType::Float) => Some("float".to_string()),
+        Type::Prim(PrimitiveType::Bool) => Some("bool".to_string()),
+        Type::Prim(PrimitiveType::Str) => Some("str".to_string()),
+        Type::Named { name, args } if args.is_empty() && field_is_typed(ty) => Some(name.clone()),
+        Type::Named { name, args } => {
+            // Nested sums: `option<option<int>>` → `option_option_int`
+            // (the inner shape's own helper, if any, shares the segment).
+            let inner = match (name.as_str(), args.as_slice()) {
+                ("option", [single]) => sum_name_segment(single),
+                ("result", [ok, err]) => Some(format!(
+                    "{}_{}",
+                    sum_name_segment(ok)?,
+                    sum_name_segment(err)?
+                )),
+                _ => None,
+            }?;
+            match (name.as_str(), inner) {
+                ("option", inner) => Some(format!("option_{inner}")),
+                ("result", inner) => Some(format!("result_{inner}")),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether BOTH payloads of a candidate shape are covered by the typed
+/// layer: primitives, or schema-declared types nested by value.
+fn shape_is_typed(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(_) => true,
+        Type::Named { name, args } if args.is_empty() && field_is_typed(ty) => true,
+        _ => false,
+    }
+}
+
+/// Collects every distinct option/result shape used anywhere in the
+/// schema (member signatures, struct fields, enum payloads, and through
+/// arrays/maps), in deterministic source order.
+fn collect_sum_shapes(schema: &SchemaFile) -> Vec<SumShape> {
+    let mut shapes: Vec<SumShape> = Vec::new();
+    let mut push_shape = |ty: &Type, shapes: &mut Vec<SumShape>| match ty {
+        Type::Named { name, args } if name == "option" && args.len() == 1 => {
+            let inner = &args[0];
+            if shape_is_typed(inner)
+                && !shapes
+                    .iter()
+                    .any(|s| matches!(s, SumShape::Option(t) if t == inner))
+            {
+                shapes.push(SumShape::Option(inner.clone()));
+            }
+        }
+        Type::Named { name, args } if name == "result" && args.len() == 2 => {
+            let (ok, err) = (&args[0], &args[1]);
+            if shape_is_typed(ok)
+                && shape_is_typed(err)
+                && !shapes
+                    .iter()
+                    .any(|s| matches!(s, SumShape::Result(t, e) if t == ok && e == err))
+            {
+                shapes.push(SumShape::Result(ok.clone(), err.clone()));
+            }
+        }
+        _ => {}
+    };
+
+    // One walker over every type position in the file, recursing through
+    // containers and sum-type arguments so nested shapes are collected too.
+    fn walk(
+        ty: &Type,
+        push: &mut impl FnMut(&Type, &mut Vec<SumShape>),
+        shapes: &mut Vec<SumShape>,
+    ) {
+        push(ty, shapes);
+        match ty {
+            Type::Array(elem) => walk(elem, push, shapes),
+            Type::Map { key, value } => {
+                walk(key, push, shapes);
+                walk(value, push, shapes);
+            }
+            Type::Named { args, .. } => {
+                for arg in args {
+                    walk(arg, push, shapes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for item in &schema.items {
+        match item {
+            cme_core::schema::SchemaItem::Struct(decl) => {
+                for field in &decl.fields {
+                    walk(&field.ty, &mut push_shape, &mut shapes);
+                }
+            }
+            cme_core::schema::SchemaItem::Enum(decl) => {
+                for variant in &decl.variants {
+                    for field in &variant.fields {
+                        walk(&field.ty, &mut push_shape, &mut shapes);
+                    }
+                }
+            }
+            cme_core::schema::SchemaItem::Contract(contract) => {
+                for member in &contract.members {
+                    walk(&member.return_ty, &mut push_shape, &mut shapes);
+                    for param in &member.params {
+                        walk(&param.ty, &mut push_shape, &mut shapes);
+                    }
+                }
+            }
+        }
+    }
+    shapes
+}
+
+/// The payload read statement for unpacking one typed payload value into
+/// `out_slot`: scalars through the cm_value accessors (str = OWNED copy),
+/// schema types through their generated `_unpack` (by address).
+fn sum_payload_read(ns: &str, ty: &Type, value_expr: &str, out_slot: &str) -> String {
+    match ty {
+        Type::Prim(PrimitiveType::Int) => format!("cm_value_as_int({value_expr}, {out_slot})"),
+        Type::Prim(PrimitiveType::Float) => format!("cm_value_as_float({value_expr}, {out_slot})"),
+        Type::Prim(PrimitiveType::Bool) => format!("cm_value_as_bool({value_expr}, {out_slot})"),
+        Type::Prim(PrimitiveType::Str) => {
+            format!("cm_value_as_str({value_expr}, {out_slot}, NULL)")
+        }
+        Type::Named { name, .. } => {
+            format!("cme_{ns}_{name}_unpack({value_expr}, {out_slot})")
+        }
+        _ => String::new(),
+    }
+}
+
+/// The payload build expression for packing one typed payload value:
+/// scalar constructors (str copies a NUL-terminated buffer), schema types
+/// through their generated `_pack` (by address).
+fn sum_payload_pack(ns: &str, ty: &Type, slot_expr: &str) -> String {
+    match ty {
+        Type::Prim(PrimitiveType::Int) => format!("cm_value_int({slot_expr})"),
+        Type::Prim(PrimitiveType::Float) => format!("cm_value_float({slot_expr})"),
+        Type::Prim(PrimitiveType::Bool) => format!("cm_value_bool({slot_expr})"),
+        Type::Prim(PrimitiveType::Str) => format!("cm_value_str({slot_expr})"),
+        Type::Named { name, .. } => format!("cme_{ns}_{name}_pack({slot_expr})"),
+        _ => String::new(),
+    }
+}
+
+/// The C parameter spelling of one payload slot. Pack takes scalars by
+/// value (`int64_t`), bools as `int`, strs as `const char*` (copied), and
+/// schema types by address (`const cme_{ns}_T*`). Unpack writes through
+/// pointers: `int64_t*`, `int*`, OWNED `char**` (free with
+/// `cm_string_free`), and `cme_{ns}_T*`.
+fn sum_slot_params(ns: &str, ty: &Type, unpack: bool) -> String {
+    match ty {
+        Type::Prim(PrimitiveType::Int) => {
+            if unpack {
+                "int64_t*".to_string()
+            } else {
+                "int64_t".to_string()
+            }
+        }
+        Type::Prim(PrimitiveType::Float) => {
+            if unpack {
+                "double*".to_string()
+            } else {
+                "double".to_string()
+            }
+        }
+        Type::Prim(PrimitiveType::Bool) => {
+            if unpack {
+                "int*".to_string()
+            } else {
+                "int".to_string()
+            }
+        }
+        Type::Prim(PrimitiveType::Str) => {
+            if unpack {
+                "char**".to_string()
+            } else {
+                "const char*".to_string()
+            }
+        }
+        Type::Named { name, .. } => {
+            let c_type = format!("cme_{ns}_{name}");
+            if unpack {
+                format!("{c_type}*")
+            } else {
+                format!("const {c_type}*")
+            }
+        }
+        _ => "void*".to_string(),
+    }
+}
+
+/// Renders the typed pack/unpack helper pair for every collected
+/// option/result shape, in source order. Unpack validates the value kind,
+/// the enum type name (`option` / `result`), the variant, and the payload
+/// count before writing any slot; `str` payload slots become OWNED
+/// copies. Pack takes the slots by the header's usual conventions and
+/// builds the cm_value enum.
+fn render_sum_helpers(ns: &str, shapes: &[SumShape], out: &mut String) {
+    let _ = writeln!(
+        out,
+        "\n/* ---- typed option/result helpers (§2.8 over the §13.2 cm_value ABI)\n\
+         \x20 * Every option/result shape this schema uses in a typed position\n\
+         \x20 * (member signatures, struct fields, enum payloads, arrays, maps)\n\
+         \x20 * gets one pack/unpack pair over the cm_value enum representation\n\
+         \x20 * (type name `option`/`result`; variants `Some`/`None`/`Ok`/`Err`).\n\
+         \x20 * Unpack returns CM_OK, CM_ERR_KIND (wrong value), or CM_ERR_MISSING\n\
+         \x20 * (missing payload); `str` slots become OWNED copies — free them\n\
+         \x20 * with cm_string_free. Nested sum shapes unpack through the generic\n\
+         \x20 * accessors, then recurse into the inner shape's helper. ---- */"
+    );
+
+    for shape in shapes {
+        let c_name = shape.c_name(ns);
+        match shape {
+            SumShape::Option(t) => {
+                let _ = writeln!(
+                    out,
+                    "\n/* schema type `{spelling}` */\n\
+                     static inline cm_status_t {c_name}_unpack(\n\
+                     \x20   const cm_value_t* value, int* out_present, {t_unpack} out_value) {{\n\
+                     {unpack_body}\
+                     }}\n\n\
+                     static inline cm_value_t* {c_name}_pack(int present, {t_pack} value) {{\n\
+                     {pack_body}\
+                     }}",
+                    spelling = shape.schema_spelling(),
+                    c_name = c_name,
+                    t_unpack = sum_slot_params(ns, t, true),
+                    t_pack = sum_slot_params(ns, t, false),
+                    unpack_body = render_option_unpack(ns, t),
+                    pack_body = render_option_pack(ns, t),
+                );
+            }
+            SumShape::Result(t, e) => {
+                let _ = writeln!(
+                    out,
+                    "\n/* schema type `{spelling}` */\n\
+                     static inline cm_status_t {c_name}_unpack(\n\
+                     \x20   const cm_value_t* value, int* out_is_ok, {t_unpack} out_ok,\n\
+                     \x20   {e_unpack} out_err) {{\n\
+                     {unpack_body}\
+                     }}\n\n\
+                     static inline cm_value_t* {c_name}_pack(int is_ok, {t_pack} ok, {e_pack} err) {{\n\
+                     {pack_body}\
+                     }}",
+                    spelling = shape.schema_spelling(),
+                    c_name = c_name,
+                    t_unpack = sum_slot_params(ns, t, true),
+                    t_pack = sum_slot_params(ns, t, false),
+                    e_unpack = sum_slot_params(ns, e, true),
+                    e_pack = sum_slot_params(ns, e, false),
+                    unpack_body = render_result_unpack(ns, t, e),
+                    pack_body = render_result_pack(ns, t, e),
+                );
+            }
+        }
+    }
+}
+
+/// The shared unpack prologue: kind + enum type/variant name checks. Both
+/// names are OWNED copies; the epilogue frees them on every path.
+fn render_sum_unpack_prologue() -> String {
+    "    if (!value || cm_value_kind(value) != CM_VALUE_ENUM) return CM_ERR_KIND;\n\
+     \x20   char* type_name = NULL;\n\
+     \x20   char* variant_name = NULL;\n\
+     \x20   if (cm_value_enum_type(value, &type_name) != CM_OK || !type_name ||\n\
+     \x20       cm_value_enum_variant(value, &variant_name) != CM_OK || !variant_name) {\n\
+     \x20       cm_string_free(type_name);\n\
+     \x20       cm_string_free(variant_name);\n\
+     \x20       return CM_ERR_KIND;\n\
+     \x20   }\n\
+     \x20   cm_status_t status = CM_ERR_KIND;\n"
+        .to_string()
+}
+
+fn render_sum_unpack_epilogue() -> String {
+    "    cm_string_free(type_name);\n\
+     \x20   cm_string_free(variant_name);\n\
+     \x20   return status;\n"
+        .to_string()
+}
+
+/// One variant arm of an unpack: variant + payload-count matched, then the
+/// payload read into `out_slot`; the flag slot receives `flag_value` on
+/// success. Arms are joined with `else` by the caller.
+fn render_sum_unpack_arm(
+    ns: &str,
+    type_name: &str,
+    variant: &str,
+    payload_ty: &Type,
+    out_slot: &str,
+    flag_slot: &str,
+    flag_value: &str,
+) -> String {
+    let read = sum_payload_read(ns, payload_ty, "p", out_slot);
+    format!(
+        "    if (strcmp(type_name, \"{type_name}\") == 0 &&\n\
+         \x20       strcmp(variant_name, \"{variant}\") == 0 &&\n\
+         \x20       cm_value_len(value) == 1) {{\n\
+         \x20       const cm_value_t* p = cm_value_enum_payload(value, 0);\n\
+         \x20       if (!p) {{\n\
+         \x20           status = CM_ERR_MISSING;\n\
+         \x20       }} else {{\n\
+         \x20           status = {read};\n\
+         \x20       }}\n\
+         \x20       if (status == CM_OK) {{ {flag_slot} = {flag_value}; }}\n\
+         \x20   }}",
+        type_name = type_name,
+        variant = variant,
+        read = read,
+        flag_slot = flag_slot,
+        flag_value = flag_value,
+    )
+}
+
+/// One payload-less variant arm: only the count and the flag.
+fn render_sum_unpack_empty_arm(type_name: &str, variant: &str, flag_slot: &str) -> String {
+    format!(
+        "    if (strcmp(type_name, \"{type_name}\") == 0 &&\n\
+         \x20       strcmp(variant_name, \"{variant}\") == 0 &&\n\
+         \x20       cm_value_len(value) == 0) {{\n\
+         \x20       {flag_slot} = 0;\n\
+         \x20       status = CM_OK;\n\
+         \x20   }}",
+        type_name = type_name,
+        variant = variant,
+        flag_slot = flag_slot,
+    )
+}
+
+fn render_option_unpack(ns: &str, t: &Type) -> String {
+    let mut body = render_sum_unpack_prologue();
+    let some = render_sum_unpack_arm(ns, "option", "Some", t, "out_value", "*out_present", "1");
+    let none = render_sum_unpack_empty_arm("option", "None", "*out_present");
+    body.push_str(&format!("{some} else\n{none}\n"));
+    body.push_str(&render_sum_unpack_epilogue());
+    body
+}
+
+fn render_result_unpack(ns: &str, t: &Type, e: &Type) -> String {
+    let mut body = render_sum_unpack_prologue();
+    let ok = render_sum_unpack_arm(ns, "result", "Ok", t, "out_ok", "*out_is_ok", "1");
+    let err = render_sum_unpack_arm(ns, "result", "Err", e, "out_err", "*out_is_ok", "0");
+    body.push_str(&format!("{ok} else\n{err}\n"));
+    body.push_str(&render_sum_unpack_epilogue());
+    body
+}
+
+fn render_option_pack(ns: &str, t: &Type) -> String {
+    let build = sum_payload_pack(ns, t, "value");
+    format!(
+        "    cm_value_t* e = cm_value_enum(\"option\", present ? \"Some\" : \"None\");\n\
+         \x20   if (!e) return NULL;\n\
+         \x20   if (present) {{\n\
+         \x20       cm_value_t* p = {build};\n\
+         \x20       if (!p || cm_enum_push(e, p) != CM_OK) {{\n\
+         \x20           cm_value_destroy(p);\n\
+         \x20           cm_value_destroy(e);\n\
+         \x20           return NULL;\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         \x20   return e;\n"
+    )
+}
+
+fn render_result_pack(ns: &str, t: &Type, e: &Type) -> String {
+    let ok_build = sum_payload_pack(ns, t, "ok");
+    let err_build = sum_payload_pack(ns, e, "err");
+    format!(
+        "    cm_value_t* e = cm_value_enum(\"result\", is_ok ? \"Ok\" : \"Err\");\n\
+         \x20   if (!e) return NULL;\n\
+         \x20   cm_value_t* p = is_ok ? {ok_build} : {err_build};\n\
+         \x20   if (!p || cm_enum_push(e, p) != CM_OK) {{\n\
+         \x20       cm_value_destroy(p);\n\
+         \x20       cm_value_destroy(e);\n\
+         \x20       return NULL;\n\
+         \x20   }}\n\
+         \x20   return e;\n"
+    )
 }

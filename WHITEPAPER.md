@@ -1719,6 +1719,7 @@ Schema files contain boundary-visible declarations:
 
 - All top-level types (`struct`, `enum`), capabilities, and interfaces in a schema are automatically boundary elements and must be named in `PascalCase`.
 - Structs and enums declared in schemas define the shared data-interchange layouts across the FFI boundary.
+- Member signatures and field types may use the §2.8 built-in sum types `option<T>` and `result<T, E>` anywhere a type appears, with their exact arities enforced at schema-parse time. Generated Rust bindings map them to `Option<T>` / `Result<T, E>`; the generated C header ships a typed pack/unpack helper pair per distinct shape over the `cm_value` enum representation.
 
 ### 9.4. Contract Dependencies (`requires`)
 

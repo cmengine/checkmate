@@ -391,3 +391,111 @@ capability dynamics {
         );
     }
 }
+
+const SUM_TYPES: &str = "
+schema shop 0.3.0
+
+struct Price {
+    int cents
+}
+
+capability pricing {
+    since 0.1.0 result<Price, str> GetPrice(str sku)
+    since 0.1.0 option<Price> PeekPrice(str sku)
+}
+
+struct Holder {
+    option<Price> maybe
+}
+";
+
+#[test]
+fn option_and_result_shapes_get_typed_helpers() {
+    let header = generate(SUM_TYPES);
+    // One pack/unpack pair per distinct shape, in source order.
+    assert!(header.contains("static inline cm_status_t cme_shop_result_Price_str_unpack("));
+    assert!(header.contains(
+        "static inline cm_value_t* cme_shop_result_Price_str_pack(int is_ok, const cme_shop_Price* ok, const char* err)"
+    ));
+    assert!(header.contains("static inline cm_status_t cme_shop_option_Price_unpack("));
+    assert!(header.contains(
+        "static inline cm_value_t* cme_shop_option_Price_pack(int present, const cme_shop_Price* value)"
+    ));
+    // Variants and the type-name gate ride the cm_value enum accessors.
+    assert!(header.contains("cm_value_enum(\"result\", is_ok ? \"Ok\" : \"Err\")"));
+    assert!(header.contains("cm_value_enum(\"option\", present ? \"Some\" : \"None\")"));
+    assert!(header.contains("strcmp(variant_name, \"Err\")"));
+    // Shapes are deduplicated: PeekPrice's option<Price> and the Holder
+    // field reuse the member's helper.
+    assert_eq!(header.matches("cme_shop_option_Price_unpack(").count(), 1);
+}
+
+#[test]
+fn scalar_only_sum_shapes_get_scalar_helpers() {
+    let header = generate(
+        "
+schema stats 1.0.0
+
+capability probe {
+    since 1.0.0 result<int, str> Read(str key)
+    since 1.0.0 option<float> Best()
+}
+",
+    );
+    assert!(header.contains("static inline cm_status_t cme_stats_result_int_str_unpack("));
+    assert!(header.contains("cm_value_as_int(p, out_ok)"));
+    assert!(header.contains("static inline cm_status_t cme_stats_option_float_unpack("));
+    assert!(header.contains("cm_value_as_float(p, out_value)"));
+}
+
+#[test]
+fn sum_helper_consumers_compile_against_the_abi() {
+    let header = generate(SUM_TYPES);
+    let unit = r#"
+#include <string.h>
+#include "cme.h"
+#include "shop_gen.h"
+
+int consume(void) {
+    cme_shop_Price p = { .cents = 42 };
+    /* Pack both sides of both shapes. */
+    cm_value_t* some = cme_shop_option_Price_pack(1, &p);
+    cm_value_t* none = cme_shop_option_Price_pack(0, &p);
+    cm_value_t* ok = cme_shop_result_Price_str_pack(1, &p, "unused");
+    cm_value_t* err = cme_shop_result_Price_str_pack(0, &p, "boom");
+    if (!some || !none || !ok || !err) return 1;
+
+    /* Unpack them back into typed slots. */
+    int present = -1;
+    cme_shop_Price out = { .cents = 0 };
+    if (cme_shop_option_Price_unpack(some, &present, &out) != CM_OK) return 2;
+    if (present != 1 || out.cents != 42) return 3;
+    if (cme_shop_option_Price_unpack(none, &present, &out) != CM_OK) return 4;
+    if (present != 0) return 5;
+
+    int is_ok = -1;
+    char* message = NULL;
+    if (cme_shop_result_Price_str_unpack(ok, &is_ok, &out, &message) != CM_OK) return 6;
+    if (is_ok != 1 || message != NULL) return 7;
+    if (cme_shop_result_Price_str_unpack(err, &is_ok, &out, &message) != CM_OK) return 8;
+    if (is_ok != 0 || message == NULL || strcmp(message, "boom") != 0) return 9;
+    cm_string_free(message);
+
+    cm_value_destroy(some);
+    cm_value_destroy(none);
+    cm_value_destroy(ok);
+    cm_value_destroy(err);
+    return 0;
+}
+
+int main(void) {
+    return consume();
+}
+"#;
+    match compile_unit(unit, &[("shop_gen.h", header)]) {
+        Ok(()) => {}
+        Err(compiler_rejected) => {
+            assert!(!compiler_rejected, "the sum-type consumer must compile");
+        }
+    }
+}

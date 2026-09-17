@@ -61,6 +61,7 @@ pub use cme_core::schema::{
 };
 
 use crate::diagnostics::Diagnostic;
+use crate::lexer::is_reserved_mega_ident;
 
 mod codegen_c;
 pub use codegen_c::codegen_c;
@@ -227,6 +228,17 @@ fn lex_schema(source: &str) -> (Vec<SpannedToken>, Vec<Diagnostic>) {
                     && (bytes[position] == b'_' || bytes[position].is_ascii_alphanumeric())
                 {
                     position += 1;
+                }
+                let name = &source[start..position];
+                // The reserved `mega<N>` shape is reserved everywhere
+                // identifiers exist, schema files included. The diagnostic
+                // makes the file unusable; the token is still emitted so
+                // tooling keeps seeing the surrounding structure.
+                if is_reserved_mega_ident(name) {
+                    errors.push(Diagnostic::parse(
+                        format!("identifier `{name}` is reserved for future use"),
+                        Span::new(start, position),
+                    ));
                 }
                 // The retired `v1.4.0` header spelling: one pointed
                 // diagnostic over the whole token, and the version value is

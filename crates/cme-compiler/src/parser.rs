@@ -3353,6 +3353,10 @@ fn shift_lex_error(error: crate::lexer::LexError, offset: usize) -> crate::lexer
         LexError::InvalidEscape { span } => LexError::InvalidEscape { span: shift(span) },
         LexError::IntegerOverflow { span } => LexError::IntegerOverflow { span: shift(span) },
         LexError::FloatOverflow { span } => LexError::FloatOverflow { span: shift(span) },
+        LexError::ReservedIdent { span, name } => LexError::ReservedIdent {
+            span: shift(span),
+            name,
+        },
     }
 }
 

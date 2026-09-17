@@ -196,6 +196,30 @@ fn block_comment<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<()> 
     Some(())
 }
 
+/// The callback for [`Token::Ident`]: passes the matched slice through
+/// unless it matches the reserved `mega<N>` shape, in which case the token
+/// fails and recovery classifies the region as
+/// [`LexError::ReservedIdent`].
+fn ident<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<&'src str> {
+    let slice = lex.slice();
+    if is_reserved_mega_ident(slice) {
+        None
+    } else {
+        Some(slice)
+    }
+}
+
+/// True when `slice` is exactly `mega` followed by one or more digits —
+/// the identifier shape reserved for future use by the megaprogramming
+/// machinery (§8): `mega0`, `mega1`, `mega42`. `mega` alone, `mega0x`,
+/// and `mega_0` are ordinary identifiers.
+pub(crate) fn is_reserved_mega_ident(slice: &str) -> bool {
+    let Some(rest) = slice.strip_prefix("mega") else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+}
+
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(skip r"[ \t\f]+")]
 #[logos(skip r"//[^\r\n]*")]
@@ -296,8 +320,11 @@ pub enum Token<'a> {
     Question,
 
     // Identifiers (e.g., variable names, function names)
-    // This regex matches a letter or underscore, followed by any number of letters, numbers, or underscores.
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
+    // This regex matches a letter or underscore, followed by any number of
+    // letters, numbers, or underscores. The callback fails the reserved
+    // `mega<N>` shape (see [`is_reserved_mega_ident`]); recovery reports
+    // the dedicated diagnostic.
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", ident)]
     Ident(&'a str),
 
     // Keywords
@@ -385,6 +412,10 @@ pub enum LexError {
     IntegerOverflow { span: Span },
     /// A float literal that would parse to infinity.
     FloatOverflow { span: Span },
+    /// An identifier spelled `mega` followed only by digits (`mega0`,
+    /// `mega1`, `mega42`, …): reserved for future use by the megaprogramming
+    /// machinery (§8), never a legal name.
+    ReservedIdent { span: Span, name: String },
 }
 
 impl LexError {
@@ -396,7 +427,8 @@ impl LexError {
             | LexError::UnterminatedBlockComment { span }
             | LexError::InvalidEscape { span }
             | LexError::IntegerOverflow { span }
-            | LexError::FloatOverflow { span } => *span,
+            | LexError::FloatOverflow { span }
+            | LexError::ReservedIdent { span, .. } => *span,
         }
     }
 }
@@ -495,6 +527,9 @@ impl<'a> Token<'a> {
 
 impl fmt::Display for LexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let LexError::ReservedIdent { name, .. } = self {
+            return write!(f, "identifier `{name}` is reserved for future use");
+        }
         let msg = match self {
             LexError::InvalidCharacter { .. } => "invalid character",
             LexError::UnterminatedString { .. } => "unterminated string literal",
@@ -505,6 +540,7 @@ impl fmt::Display for LexError {
             LexError::InvalidEscape { .. } => "invalid escape sequence in string literal",
             LexError::IntegerOverflow { .. } => "integer literal is too large",
             LexError::FloatOverflow { .. } => "float literal is too large",
+            LexError::ReservedIdent { .. } => unreachable!("handled above"),
         };
         f.write_str(msg)
     }
@@ -521,6 +557,14 @@ fn classify_error(source: &str, span: Span) -> LexError {
     // could not terminate: everything from there on is comment.
     if text.starts_with("/*") {
         return LexError::UnterminatedBlockComment { span };
+    }
+    // A failed region shaped like the reserved `mega<N>` identifier is the
+    // dedicated reservation error, not a generic bad character.
+    if is_reserved_mega_ident(text) {
+        return LexError::ReservedIdent {
+            span,
+            name: text.to_string(),
+        };
     }
     if source[span.start..].starts_with("$\"") {
         return classify_interp_string_error(source, span.start);
@@ -1383,5 +1427,78 @@ mod tests {
             tokens.last().map(|spanned| &spanned.token),
             Some(Token::Eof)
         ));
+    }
+}
+
+#[cfg(test)]
+mod reserved_ident_tests {
+    use crate::lexer::{LexError, lex, lex_with_errors};
+    use cme_core::Span;
+
+    #[test]
+    fn reserved_mega_identifiers_fail_with_the_dedicated_diagnostic() {
+        let (tokens, errors) = lex_with_errors("int mega0 = 1\nint b = 2\n");
+        assert_eq!(errors.len(), 1, "one reserved-ident diagnostic");
+        assert_eq!(
+            errors[0],
+            LexError::ReservedIdent {
+                span: Span::new(4, 9),
+                name: "mega0".to_string(),
+            }
+        );
+        assert_eq!(
+            errors[0].to_string(),
+            "identifier `mega0` is reserved for future use"
+        );
+        // Line-granular recovery: the damaged line is dropped, the next
+        // line survives.
+        let surviving: Vec<_> = tokens
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect();
+        assert!(surviving.contains(&crate::lexer::Token::Ident("b")));
+        assert!(!surviving.contains(&crate::lexer::Token::Ident("int")));
+    }
+
+    #[test]
+    fn every_mega_digit_spelling_is_reserved() {
+        for name in ["mega0", "mega1", "mega42", "mega000"] {
+            let (_, errors) = lex_with_errors(&format!("int {name} = 1\n"));
+            assert!(
+                matches!(&errors[0], LexError::ReservedIdent { name: n, .. } if n == name),
+                "`{name}` must be reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn mega_prefixed_non_numeric_identifiers_stay_legal() {
+        let tokens = lex("mega mega0x mega_0 mega42a megaX megaa1")
+            .expect("none of these are reserved");
+        let names: Vec<_> = tokens
+            .into_iter()
+            .filter_map(|spanned| match spanned.token {
+                crate::lexer::Token::Ident(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["mega", "mega0x", "mega_0", "mega42a", "megaX", "megaa1"]);
+    }
+
+    #[test]
+    fn reserved_identifiers_are_rejected_in_every_position() {
+        // Function name, field name, and struct name — the reservation is
+        // lexical, so every ident position rejects the shape.
+        for source in [
+            "void mega1() {}",
+            "struct mega1 { int x }",
+            "int mega2 = 0",
+        ] {
+            let (_, errors) = lex_with_errors(source);
+            assert!(
+                matches!(&errors[0], LexError::ReservedIdent { .. }),
+                "`{source}` must report the reserved shape"
+            );
+        }
     }
 }

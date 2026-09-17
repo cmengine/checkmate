@@ -49,6 +49,14 @@ and, in the megaprogramming and schema vocabularies, words like `rule`,
 `each`, `oneof`, `where`, `skip`, `comment`, `string`, `island`,
 `capability`, `interface`, `since`, `requires`, `optional`, `suspend`.
 
+## Reserved for future use
+
+Identifiers spelled `mega` followed only by digits — `mega0`, `mega1`,
+`mega42`, … — are **reserved for future use** by the megaprogramming
+machinery (§8). They are rejected at lex time with a dedicated diagnostic,
+in every identifier position and in schema files too. `mega` alone,
+`mega0x`, `mega_0`, and `mega42a` are ordinary identifiers.
+
 ## Primitive type names
 
 The five scalar type names are reserved:

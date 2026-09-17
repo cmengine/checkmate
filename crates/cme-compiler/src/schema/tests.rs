@@ -554,3 +554,22 @@ capability pricing {
         "missing the result arity diagnostic: {errors:?}"
     );
 }
+
+#[test]
+fn reserved_mega_identifiers_are_rejected_in_schema_files() {
+    let errors = parse_errors(
+        r#"
+schema engine 1.0.0
+
+capability mega0 {
+    since 1.0.0 void Tick()
+}
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("identifier `mega0` is reserved for future use")),
+        "missing the reserved-ident diagnostic: {errors:?}"
+    );
+}

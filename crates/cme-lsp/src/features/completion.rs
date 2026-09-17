@@ -89,10 +89,59 @@ fn is_in_comment_or_string(analysis: &Analysis<'_>, text: &str, offset: usize) -
     if in_string_literal(analysis, text, offset) {
         return true;
     }
+    if in_unterminated_string(analysis, text, offset) {
+        return true;
+    }
     if in_line_comment(analysis, text, offset) {
         return true;
     }
     in_block_comment(analysis, text, offset)
+}
+
+/// True when the cursor sits inside a string that is still being typed —
+/// an UNTERMINATED quote folds no string token, so `in_string_literal`
+/// cannot see it and completions would leak scope members (or argument
+/// names) into string content. The opener is found from the raw text: a
+/// quote NOT covered by any string token (a complete string's quotes are
+/// token-covered, nested island strings included) opens an unterminated
+/// string. A plain `"` silences completion; a `$"` opener stays
+/// completable only while an interpolation island is open between it and
+/// the cursor — the same island rule the complete-token path applies.
+fn in_unterminated_string(analysis: &Analysis<'_>, text: &str, offset: usize) -> bool {
+    let line_start = text[..offset].rfind('\n').map(|pos| pos + 1).unwrap_or(0);
+    let bytes = text.as_bytes();
+    let mut index = line_start;
+    while index < offset {
+        match bytes[index] {
+            b'\\' => {
+                index += 2; // the escape pair never opens a string
+                continue;
+            }
+            b'"' if !covered_by_string(analysis, index) => {
+                let interpolated = index > 0 && bytes[index - 1] == b'$';
+                if !interpolated {
+                    return true;
+                }
+                let mut depth = 0i32;
+                let mut cursor = index + 1;
+                while cursor < offset {
+                    match bytes[cursor] {
+                        b'\\' => cursor += 1,
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+                // Open island: island code is being typed — completable.
+                // Literal part: still inside the string — silenced.
+                return depth <= 0;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 /// True when any string-literal token covers `offset`.
@@ -506,6 +555,14 @@ fn argument_completions(
     // completions apply there.
     let last = segments.last().copied().unwrap_or("");
     if last.contains(':') || last.contains('=') {
+        return None;
+    }
+    // Typing a string-valued argument (`OpenWindow("h`): the quote is
+    // still unterminated, so the lexer folds no string token and the
+    // in-string gate above cannot see it. A segment opening with a quote
+    // is a value being typed, not an argument-name position — offering
+    // `title:` there would splice into the string.
+    if last.trim_start().starts_with('"') {
         return None;
     }
     let mut used: Vec<&str> = Vec::new();

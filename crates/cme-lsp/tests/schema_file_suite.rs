@@ -26,14 +26,20 @@ enum LoadError {
     Stale(int generation)
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.2.0 optional void DrawSprite(TextureHandle tex, int frame)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
 }
 
-interface gamemode requires core {
-    since 1.0.0 int OnEvent(GameEvent event)
-    since 1.4.0 optional void OnPause()
+since 1.2.0 capability graphics {
+    optional void DrawSprite(TextureHandle tex, int frame)
+}
+
+since 1.0.0 interface gamemode requires core {
+    int OnEvent(GameEvent event)
+}
+
+since 1.4.0 interface gamemode {
+    optional void OnPause()
 }
 ";
 
@@ -69,7 +75,7 @@ fn hover_at(source: &str, needle: &str, skip: usize) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_top_level_offers_the_five_declaration_keywords() {
+fn the_top_level_offers_the_declaration_keywords_and_the_version_tag() {
     // The blank line between declarations is a top-level position.
     let needle = "schema engine 1.4.0\n\n";
     let offset = ENGINE.find(needle).expect("after the header") + needle.len();
@@ -78,7 +84,14 @@ fn the_top_level_offers_the_five_declaration_keywords() {
         .into_iter()
         .map(|item| item.label)
         .collect();
-    for keyword in ["schema", "capability", "interface", "struct", "enum"] {
+    for keyword in [
+        "schema",
+        "capability",
+        "interface",
+        "struct",
+        "enum",
+        "since",
+    ] {
         assert!(
             offered.iter().any(|label| label == keyword),
             "`{keyword}` completes at the top level: {offered:?}"
@@ -100,7 +113,7 @@ fn an_empty_file_still_completes_the_header() {
 }
 
 #[test]
-fn a_capability_body_offers_since_and_return_types() {
+fn a_capability_body_offers_return_types_but_not_since() {
     let source = "schema engine 1.4.0\n\nstruct TextureHandle {\n    int id\n}\n\ncapability graphics {\n    \n}\n";
     // Cursor on the empty member line inside `capability`.
     let offset = source.find("    \n").expect("member line") + 4;
@@ -110,8 +123,8 @@ fn a_capability_body_offers_since_and_return_types() {
         .map(|item| item.label)
         .collect();
     assert!(
-        offered.contains(&"since".to_string()),
-        "members start with `since` (§9.5): {offered:?}"
+        !offered.contains(&"since".to_string()),
+        "`since` versions the block, it is not a member modifier (§9.5): {offered:?}"
     );
     assert!(
         offered.contains(&"int".to_string()) && offered.contains(&"TextureHandle".to_string()),
@@ -140,7 +153,8 @@ fn an_interface_body_adds_the_optional_modifier() {
 
 #[test]
 fn after_since_the_version_completes_to_nothing() {
-    let source = "schema engine 1.4.0\n\ncapability graphics {\n    since \n}\n";
+    // A TOP-LEVEL `since` tag: the block version is typed, not completed.
+    let source = "schema engine 1.4.0\n\nsince \n";
     let offset = source.find("since \n").expect("since line") + "since ".len();
     let doc = SchemaDoc::build(source);
     let offered: Vec<String> = completions(&doc, source, offset)
@@ -154,7 +168,29 @@ fn after_since_the_version_completes_to_nothing() {
 }
 
 #[test]
-fn after_since_version_the_return_type_completes() {
+fn after_since_version_the_contract_keyword_completes() {
+    // `since 1.0.0 ` at the top level: the block's contract keyword.
+    let source = "schema engine 1.4.0\n\nsince 1.0.0 \n";
+    let offset = source.find("since 1.0.0 \n").expect("block tag") + "since 1.0.0 ".len();
+    let doc = SchemaDoc::build(source);
+    let offered: Vec<String> = completions(&doc, source, offset)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(
+        offered.contains(&"capability".to_string()) && offered.contains(&"interface".to_string()),
+        "after `since <version>` the contract keyword completes: {offered:?}"
+    );
+    assert!(
+        !offered.contains(&"since".to_string()) && !offered.contains(&"int".to_string()),
+        "only contract keywords follow a block version: {offered:?}"
+    );
+}
+
+#[test]
+fn a_retired_member_since_still_completes_the_return_type_for_recovery() {
+    // Inside a body the member-level `since` is a defect; completion keeps
+    // helping with the return type once the version is typed.
     let source = "schema engine 1.4.0\n\ncapability graphics {\n    since 1.0.0 \n}\n";
     let offset = source.find("since 1.0.0 \n").expect("member line") + "since 1.0.0 ".len();
     let doc = SchemaDoc::build(source);
@@ -165,10 +201,6 @@ fn after_since_version_the_return_type_completes() {
     assert!(
         offered.contains(&"int".to_string()) && offered.contains(&"void".to_string()),
         "after `since <version>` the member's return type completes: {offered:?}"
-    );
-    assert!(
-        !offered.contains(&"since".to_string()),
-        "the modifier already consumed: {offered:?}"
     );
 }
 
@@ -193,7 +225,7 @@ fn struct_fields_complete_types_without_void() {
 
 #[test]
 fn parameter_types_complete_inside_the_param_list() {
-    let source = "schema engine 1.4.0\n\nstruct TextureHandle {\n    int id\n}\n\ncapability graphics {\n    since 1.0.0 void Draw(TextureHandle tex, \n}\n";
+    let source = "schema engine 1.4.0\n\nstruct TextureHandle {\n    int id\n}\n\nsince 1.0.0 capability graphics {\n    void Draw(TextureHandle tex, \n}\n";
     let offset = source.find("tex, \n").expect("param list") + "tex, ".len();
     let doc = SchemaDoc::build(source);
     let offered: Vec<String> = completions(&doc, source, offset)
@@ -238,8 +270,9 @@ fn comments_and_declared_names_suppress_completion() {
 #[test]
 fn a_broken_file_still_completes_what_recovered() {
     // Mid-edit breakage is exactly when help matters most.
-    let source = "schema engine 1.4.0\n\nstruct Texture {\n    int id\n\ncapability graphics {\n    since 1.0.0 \n}\n";
-    let offset = source.find("since 1.0.0 \n").expect("member line") + "since 1.0.0 ".len();
+    let source =
+        "schema engine 1.4.0\n\nstruct Texture {\n    int id\n\ncapability graphics {\n    \n}\n";
+    let offset = source.find("    \n").expect("member line") + 4;
     let doc = SchemaDoc::build(source);
     let offered: Vec<String> = completions(&doc, source, offset)
         .into_iter()
@@ -273,7 +306,7 @@ fn hover_on_a_struct_shows_its_fields() {
         "{value}"
     );
     // Use site: a member's return type.
-    let value = hover_at(ENGINE, "since 1.0.0 TextureHandle", "since 1.0.0 ".len());
+    let value = hover_at(ENGINE, "TextureHandle LoadTexture", 0);
     assert!(value.contains("struct TextureHandle"), "{value}");
 }
 
@@ -301,11 +334,7 @@ fn hover_on_a_contract_shows_its_members_and_requires() {
 
 #[test]
 fn hover_on_a_member_shows_signature_since_and_optional() {
-    let value = hover_at(
-        ENGINE,
-        "since 1.2.0 optional void DrawSprite",
-        "since 1.2.0 optional void ".len(),
-    );
+    let value = hover_at(ENGINE, "optional void DrawSprite", "optional void ".len());
     assert!(
         value.contains("void graphics.DrawSprite(TextureHandle tex, int frame)"),
         "the full signature renders: {value}"
@@ -398,7 +427,7 @@ fn a_capability_body_offers_requires_until_it_is_declared() {
         .map(|item| item.label)
         .collect();
     assert!(
-        offered.contains(&"since".to_string()),
+        offered.contains(&"void".to_string()),
         "the member shape is suggested: {offered:?}"
     );
 }

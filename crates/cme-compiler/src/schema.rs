@@ -2,19 +2,26 @@
 //! [`SchemaSet`] a host assembles from its `.cm` schema files.
 //!
 //! A schema file (WHITEPAPER §9.1) is one namespace root of the host
-//! contract:
+//! contract. Versioning (§9.5) lives on the BLOCK: `since X.Y.Z` opens a
+//! `capability`/`interface` declaration and applies to every member
+//! inside, and the same contract name may be declared in several blocks
+//! (the members union):
 //!
 //! ```text
 //! schema engine 1.4.0
 //!
-//! capability graphics {
-//!     since 1.0.0 TextureHandle LoadTexture(str path)
-//!     since 1.0.0 void DrawTexture(TextureHandle tex, vec2 position)
+//! since 1.0.0 capability graphics {
+//!     TextureHandle LoadTexture(str path)
+//!     void DrawTexture(TextureHandle tex, vec2 position)
 //! }
 //!
-//! interface gamemode requires core {
-//!     since 1.0.0 GameState InitGame(GameConfig config)
-//!     since 1.0.0 void OnTick(GameState state, float deltaTime)
+//! since 1.2.0 capability graphics {
+//!     void DrawSprite(TextureHandle tex, vec2 position, int frame)
+//! }
+//!
+//! since 1.0.0 interface gamemode requires core {
+//!     GameState InitGame(GameConfig config)
+//!     void OnTick(GameState state, float deltaTime)
 //! }
 //! ```
 //!
@@ -38,11 +45,13 @@
 //! - one namespace root per file, `schema <ident> <X.Y.Z>` (§9.1);
 //! - PascalCase for every schema declaration and member (§9.3, §2.5);
 //!   camelCase for parameters and fields;
-//! - members are `since X.Y.Z`-tagged (default 0.0.0), optionally
-//!   `optional` (§9.5); `suspend` members are parsed and rejected — the
-//!   async system (§4) is out of scope for this milestone;
-//! - no duplicate items, no duplicate members, `void` only in return
-//!   position (§2.4);
+//! - `since X.Y.Z` tags the BLOCK (default 0.0.0) and applies to every
+//!   member it contains; a member-level `since` is rejected with a
+//!   migration diagnostic; blocks may optionally carry `optional`
+//!   (§9.5, interfaces only); `suspend` members are parsed and rejected
+//!   — the async system (§4) is out of scope for this milestone;
+//! - no duplicate items, no duplicate members (across every block of the
+//!   same contract), `void` only in return position (§2.4);
 //! - [`SchemaSet::build`] then checks the CROSS-file invariants: one
 //!   version per namespace, type names unique across namespaces (the
 //!   script-side type space is flat), and every `requires` edge resolving
@@ -476,7 +485,7 @@ impl SchemaParser {
             match self.parse_item(&mut seen) {
                 Some(item) => {
                     last_item_end = Some(item.span().end);
-                    items.push(item);
+                    self.merge_item(item, &mut items);
                 }
                 // The item parser already reported and skipped the line.
                 None => continue,
@@ -495,6 +504,26 @@ impl SchemaParser {
     /// One top-level item: capability, interface, struct, or enum.
     fn parse_item(&mut self, seen: &mut Vec<String>) -> Option<SchemaItem> {
         let start = self.peek().span.start;
+        // §9.5: `since X.Y.Z` may open an item, versioning every member of
+        // the `capability`/`interface` block that follows (§9.1's split
+        // blocks for one contract union into one member set).
+        let mut block_since = Version::ZERO;
+        if self.at_ident("since") {
+            let since_span = self.peek().span;
+            self.bump();
+            match self.bump().token {
+                Token::Version(version) => block_since = version,
+                other => {
+                    self.record(
+                        format!("expected `X.Y.Z` after `since`, found {}", other.describe()),
+                        self.peek().span,
+                    );
+                    self.skip_line();
+                    return None;
+                }
+            }
+            let _ = since_span;
+        }
         let keyword = match &self.peek().token {
             Token::Ident(name) => name.clone(),
             other => {
@@ -511,7 +540,18 @@ impl SchemaParser {
             }
         };
         match keyword.as_str() {
-            "capability" | "interface" => self.parse_contract(&keyword, start, seen),
+            "capability" | "interface" => self.parse_contract(&keyword, start, block_since),
+            "struct" | "enum" if block_since != Version::ZERO => {
+                // Versioning is a contract-member concept; a `since` before
+                // a type declaration cannot apply to anything.
+                self.record(
+                    "`since` versions a capability or interface block, never a \
+                     struct or enum declaration",
+                    Span::new(start, self.peek().span.end),
+                );
+                self.skip_line();
+                None
+            }
             "struct" => self.parse_struct(start, seen),
             "enum" => self.parse_enum(start, seen),
             _ => {
@@ -528,13 +568,101 @@ impl SchemaParser {
         }
     }
 
+    /// Files a parsed item into the file's item list. Contracts may repeat
+    /// by name (§9.1's version-split blocks): a block whose name and kind
+    /// match an earlier contract unions its members into it; anything else
+    /// that repeats a name — a different-kind contract, a contract and a
+    /// type, a type and a contract — is a duplicate declaration.
+    fn merge_item(&mut self, item: SchemaItem, items: &mut Vec<SchemaItem>) {
+        let SchemaItem::Contract(block) = &item else {
+            if let Some(existing) = items.iter().find(|other| {
+                matches!(other, SchemaItem::Contract(_)) && other.name() == item.name()
+            }) {
+                let span = existing.span();
+                self.record(
+                    format!("duplicate schema declaration `{}`", item.name()),
+                    span,
+                );
+                return;
+            }
+            items.push(item);
+            return;
+        };
+
+        if let Some(SchemaItem::Contract(existing)) = items
+            .iter_mut()
+            .find(|other| matches!(other, SchemaItem::Contract(c) if c.name == block.name))
+        {
+            if existing.kind != block.kind {
+                self.record(
+                    format!(
+                        "duplicate schema declaration `{}`: `{}` is already declared as a {}",
+                        block.name,
+                        block.name,
+                        existing.kind.keyword()
+                    ),
+                    block.span,
+                );
+                return;
+            }
+            // Same contract, another version's block: union the members
+            // (each block's members carry the block's `since`), refuse a
+            // second `requires`, and extend the merged span.
+            for member in &block.members {
+                if existing.members.iter().any(|m| m.name == member.name) {
+                    self.record(
+                        format!(
+                            "duplicate member `{}` in `{}` (already declared in an earlier \
+                             block of this contract)",
+                            member.name, block.name
+                        ),
+                        member.span,
+                    );
+                } else {
+                    existing.members.push(member.clone());
+                }
+            }
+            if let Some(requires) = &block.requires {
+                if existing.requires.is_some() {
+                    self.record(
+                        format!(
+                            "duplicate `requires` in {} `{}`: declare it once across every \
+                             block of the contract",
+                            existing.kind.keyword(),
+                            existing.name
+                        ),
+                        requires.span,
+                    );
+                } else {
+                    existing.requires = Some(requires.clone());
+                }
+            }
+            existing.span.end = existing.span.end.max(block.span.end);
+            return;
+        }
+
+        if items.iter().any(|other| {
+            matches!(other, SchemaItem::Struct(_) | SchemaItem::Enum(_))
+                && other.name() == block.name
+        }) {
+            self.record(
+                format!("duplicate schema declaration `{}`", block.name),
+                block.span,
+            );
+            return;
+        }
+        items.push(item);
+    }
+
     /// A `capability`/`interface` block (§9.1) with its optional `requires`
-    /// edge (§9.4) and member list.
+    /// edge (§9.4) and member list. `block_since` is the block's §9.5
+    /// version, applied to every member it declares. Same-name blocks are
+    /// unioned by [`Self::merge_item`].
     fn parse_contract(
         &mut self,
         keyword: &str,
         start: usize,
-        seen: &mut Vec<String>,
+        block_since: Version,
     ) -> Option<SchemaItem> {
         self.bump(); // keyword
         let name_token = self.bump();
@@ -549,19 +677,6 @@ impl SchemaParser {
                 return None;
             }
         };
-        // Capability and interface names carry no case rule: §9.3 calls
-        // contracts boundary elements, yet every path the whitepaper
-        // spells (`engine.graphics`, `engine.gamemode`, `ui.widgets`) is
-        // camelCase — the examples are the observable convention.
-        if seen.contains(&name) {
-            self.record(
-                format!("duplicate schema declaration `{name}`"),
-                name_token.span,
-            );
-        } else {
-            seen.push(name.clone());
-        }
-
         let mut requires = if self.at_ident("requires") {
             // §9.4 shape one: `interface gamemode requires core { … }`.
             self.bump();
@@ -621,7 +736,7 @@ impl SchemaParser {
                 self.skip_newlines();
                 continue;
             }
-            match self.parse_member(&name, kind, &members) {
+            match self.parse_member(&name, kind, block_since, &members) {
                 Some(member) => {
                     last_end = Some(member.span.end);
                     members.push(member);
@@ -672,32 +787,35 @@ impl SchemaParser {
     }
 
     /// One contract member:
-    /// `since X.Y.Z`? `optional`? (`suspend` rejected) TYPE Name(params) —
-    /// newline-delimited (§9.1). `kind` decides whether `optional` is
-    /// legal: §9.5 defines it for INTERFACE members a mod may skip;
-    /// capability members are host-provided, so the flag has no meaning
-    /// there and is rejected.
+    /// [`optional`?] (`suspend` rejected) TYPE Name(params) —
+    /// newline-delimited (§9.1). The member's `since` is the BLOCK's
+    /// version (§9.5); a member-level `since` is a migration diagnostic.
+    /// `kind` decides whether `optional` is legal: §9.5 defines it for
+    /// INTERFACE members a mod may skip; capability members are
+    /// host-provided, so the flag has no meaning there and is rejected.
     fn parse_member(
         &mut self,
         contract: &str,
         kind: ContractKind,
+        block_since: Version,
         existing: &[SchemaMember],
     ) -> Option<SchemaMember> {
         let start = self.peek().span.start;
-        let mut since = Version::ZERO;
+        // §9.5: versioning moved to the block. A member-level `since` is
+        // the old spelling — one migration diagnostic, the version token
+        // consumed for recovery, and the member parses on (carrying the
+        // block's version).
         if self.at_ident("since") {
+            let since_span = self.peek().span;
             self.bump();
-            match self.bump().token {
-                Token::Version(version) => since = version,
-                other => {
-                    self.record(
-                        format!("expected `X.Y.Z` after `since`, found {}", other.describe()),
-                        self.peek().span,
-                    );
-                    self.skip_line();
-                    return None;
-                }
+            if matches!(self.peek().token, Token::Version(_)) {
+                self.bump();
             }
+            self.record(
+                "member-level `since` was removed: version the capability or interface \
+                 block instead — `since X.Y.Z capability name { ... }` (§9.5)",
+                since_span,
+            );
         }
         let mut requirement = MemberRequirement::Required;
         if self.at_ident("optional") {
@@ -799,7 +917,7 @@ impl SchemaParser {
             name,
             params,
             return_ty,
-            since,
+            since: block_since,
             requirement,
             span: Span::new(start, close.span.end),
         })

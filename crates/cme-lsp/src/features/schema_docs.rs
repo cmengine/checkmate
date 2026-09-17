@@ -6,9 +6,10 @@
 //! from the same recognition the parser uses, never disagreeing with it.
 //! The contexts:
 //!
-//! - **Top level** — the five declaration keywords;
-//! - **contract body** — `since`, `optional` (interfaces only, §9.5),
-//!   `requires`, and return types (built-ins + the file's own types);
+//! - **Top level** — the five declaration keywords plus the block version
+//!   tag `since` (§9.5), and the contract keyword after a block version;
+//! - **contract body** — `optional` (interfaces only, §9.5), and return
+//!   types (built-ins + the file's own types);
 //! - **parameter and field positions** — types without `void`;
 //! - **hover** — every declaration renders from the parsed [`SchemaFile`].
 //!
@@ -150,8 +151,8 @@ impl SchemaDoc {
 // Completion
 // ---------------------------------------------------------------------------
 
-/// The declaration keywords of the top level (§9.1, §9.3).
-const TOP_LEVEL_KEYWORDS: [(&str, &str); 5] = [
+/// The declaration keywords of the top level (§9.1, §9.3, §9.5).
+const TOP_LEVEL_KEYWORDS: [(&str, &str); 6] = [
     (
         "schema",
         "namespace root header: `schema <name> <X.Y.Z>` (§9.1)",
@@ -166,6 +167,23 @@ const TOP_LEVEL_KEYWORDS: [(&str, &str); 5] = [
     ),
     ("struct", "boundary data type shared across the FFI (§9.3)"),
     ("enum", "boundary tagged union shared across the FFI (§9.3)"),
+    (
+        "since",
+        "version the members of the capability/interface block that \
+         follows: `since X.Y.Z capability name { ... }` (§9.5)",
+    ),
+];
+
+/// The contract keywords that may follow a block-level `since` version.
+const CONTRACT_KEYWORDS: [(&str, &str); 2] = [
+    (
+        "capability",
+        "host-provided functions the script imports and calls (§9.1)",
+    ),
+    (
+        "interface",
+        "script-implemented functions the host calls into (§9.1)",
+    ),
 ];
 
 /// The scalar types every schema type position accepts (§2.4, §9.3).
@@ -181,10 +199,12 @@ const BUILTIN_TYPES: [(&str, &str); 5] = [
 /// ladder, most specific first:
 ///
 /// 1. inside a `( … )` parameter list → parameter types (§2.11);
-/// 2. a member line after its `since`/`optional` modifiers → return types
+/// 2. a `since` line — at the top level the block version tag (§9.5):
+///    nothing while typing the version, the contract keyword after it;
+///    inside a body it is the retired member spelling, and the return
+///    type still completes after the version (recovery quality);
+/// 3. a member line after its `optional` modifier → return types
 ///    (§9.1, §9.5);
-/// 3. a member line still typing its `since` version → nothing (versions
-///    are typed, not completed);
 /// 4. the first word of the line decides: declaration names are free-form,
 ///    and an otherwise-empty line offers its enclosing context's shape.
 pub fn completions(doc: &SchemaDoc, text: &str, offset: usize) -> Vec<ls_types::CompletionItem> {
@@ -202,30 +222,33 @@ pub fn completions(doc: &SchemaDoc, text: &str, offset: usize) -> Vec<ls_types::
         return type_items(doc, false);
     }
 
-    // 2. A member line whose modifiers are complete: the return type.
-    if let Some(continued) = member_after_modifiers(&line) {
-        let is_interface = doc.enclosing_decl_kind(offset) == Some("interface");
-        return match continued {
-            // `since 1.0.0` done — `optional` may still come (interfaces).
-            ModifierPoint::AfterSince if is_interface => {
-                let mut items = vec![modifier_item("optional")];
-                items.extend(type_items(doc, true));
-                items
+    // 2. A `since` line: block tag at the top level, retired member
+    // spelling inside a body.
+    if first_word == Some("since") {
+        let version_typed = line.len() >= 2 && line[1].kind == SchemaTokenKind::Version;
+        if doc.brace_depth_at(offset) == 0 {
+            // `since X.Y.Z` done — the contract keyword follows (§9.5).
+            if version_typed {
+                return keyword_items(&CONTRACT_KEYWORDS);
             }
-            ModifierPoint::AfterSince => type_items(doc, true),
-            // `optional` done — the return type.
-            ModifierPoint::AfterOptional => type_items(doc, true),
-        };
+            // Typing the version: versions are typed, not completed.
+            return Vec::new();
+        }
+        if version_typed {
+            return type_items(doc, true);
+        }
+        return Vec::new();
     }
 
-    // 3. Typing the `since` version: no suggestions.
-    if first_word == Some("since") {
-        return Vec::new();
+    // 3. A member line whose `optional` modifier is complete: the return
+    // type.
+    if let Some(ModifierPoint::AfterOptional) = member_after_modifiers(&line) {
+        return type_items(doc, true);
     }
 
     // 4. The enclosing shape decides an otherwise-unchosen line.
     match (first_word, doc.brace_depth_at(offset) == 0) {
-        // Top level: the five declaration keywords (§9.1, §9.3).
+        // Top level: the declaration keywords + the block version tag.
         (None, true) => keyword_items(&TOP_LEVEL_KEYWORDS),
         // Typing a declaration's name: the name is free-form.
         (Some("schema" | "capability" | "interface" | "struct" | "enum"), _) => Vec::new(),
@@ -244,19 +267,11 @@ pub fn completions(doc: &SchemaDoc, text: &str, offset: usize) -> Vec<ls_types::
 
 /// How far the member line's modifier sequence has progressed.
 enum ModifierPoint {
-    /// `since <version>` is present; `optional` may follow (interface).
-    AfterSince,
     /// `optional` is present; the return type follows.
     AfterOptional,
 }
 
 fn member_after_modifiers(line: &[&SchemaToken]) -> Option<ModifierPoint> {
-    if line.len() >= 2
-        && matches!(&line[0].kind, SchemaTokenKind::Ident(name) if name == "since")
-        && line[1].kind == SchemaTokenKind::Version
-    {
-        return Some(ModifierPoint::AfterSince);
-    }
     if !line.is_empty()
         && matches!(&line[0].kind, SchemaTokenKind::Ident(name) if name == "optional")
     {
@@ -265,13 +280,13 @@ fn member_after_modifiers(line: &[&SchemaToken]) -> Option<ModifierPoint> {
     None
 }
 
-/// The member-start completions inside a contract body: modifiers plus the
-/// return-type candidates (§9.1, §9.5).
+/// The member-start completions inside a contract body: the `optional`
+/// modifier (interfaces only) plus the return-type candidates (§9.1,
+/// §9.5). `since` is a top-level block tag now, not a member modifier.
 fn member_start_items(doc: &SchemaDoc, is_interface: bool) -> Vec<ls_types::CompletionItem> {
     let mut items = Vec::new();
-    items.push(modifier_item("since"));
     if is_interface {
-        items.push(modifier_item("optional"));
+        items.push(modifier_item());
     }
     items.extend(type_items(doc, true));
     items
@@ -330,23 +345,15 @@ fn keyword_items(keywords: &[(&str, &str)]) -> Vec<ls_types::CompletionItem> {
         .collect()
 }
 
-/// A `since`/`optional` modifier as a completion with its fill.
-fn modifier_item(name: &str) -> ls_types::CompletionItem {
-    let (detail, fill) = if name == "since" {
-        ("version the member was introduced (§9.5)", "since 1.0.0 ")
-    } else {
-        (
-            "a mod may skip this member without breaking (§9.5)",
-            "optional ",
-        )
-    };
+/// The `optional` modifier as a completion with its fill.
+fn modifier_item() -> ls_types::CompletionItem {
     let mut entry = item(
-        name.to_string(),
+        "optional".to_string(),
         ls_types::CompletionItemKind::KEYWORD,
-        detail.to_string(),
-        Some(fill.to_string()),
+        "a mod may skip this member without breaking (§9.5)".to_string(),
+        Some("optional ".to_string()),
     );
-    entry.sort_text = Some(format!("0{name}"));
+    entry.sort_text = Some("0optional".to_string());
     entry
 }
 

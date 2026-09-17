@@ -25,12 +25,12 @@ enum OrderEvent {
     Checkout(int total)
 }
 
-capability store {
-    since 1.0.0 Item FetchItem(str sku)
-    since 1.0.0 void RecordSale(Item item, int qty)
+since 1.0.0 capability store {
+    Item FetchItem(str sku)
+    void RecordSale(Item item, int qty)
 }
 
-interface checkout {
-    since 1.0.0 int OnOrder(OrderEvent event)
-    since 1.0.0 int TotalFor(int qty)
+since 1.0.0 interface checkout {
+    int OnOrder(OrderEvent event)
+    int TotalFor(int qty)
 }

@@ -12,9 +12,9 @@ in two forms:
 **Capability requires interface:**
 
 ```checkmate
-capability network {
+since 1.0.0 capability network {
     requires auth
-    since 1.0.0 httpResponse Send(httpRequest request)
+    httpResponse Send(httpRequest request)
 }
 ```
 
@@ -26,8 +26,8 @@ fails with it.
 **Interface requires interface:**
 
 ```checkmate
-interface gamemode requires core {
-    since 1.0.0 GameState InitGame(GameConfig config)
+since 1.0.0 interface gamemode requires core {
+    GameState InitGame(GameConfig config)
 }
 ```
 
@@ -47,9 +47,9 @@ Both spellings of the clause are accepted — after the name, or first
 inside the body:
 
 ```checkmate
-interface gamemode {
+since 1.0.0 interface gamemode {
     requires core
-    since 1.0.0 GameState InitGame(GameConfig config)
+    GameState InitGame(GameConfig config)
 }
 ```
 
@@ -57,9 +57,12 @@ interface gamemode {
 
 ### `since` tags
 
-Every member may carry `since X.Y.Z` — the version when it was
-introduced. The tag is load-bearing: it lets old programs keep compiling
-against newer schemas by *hiding* what they predate.
+`since X.Y.Z` opens a capability or interface block and versions every
+member it contains — the version when they were introduced. The same
+contract may appear in several blocks (one per version band); their
+members union in declaration order. The tag is load-bearing: it lets old
+programs keep compiling against newer schemas by *hiding* what they
+predate.
 
 ### Target versions
 
@@ -94,9 +97,13 @@ does not implement it. Marking the new member `optional` avoids the
 break:
 
 ```checkmate
-interface auth {
-    since 1.0.0 bool ValidateToken(str token)
-    since 1.4.0 optional void InvalidateSession(str token)
+
+since 1.0.0 interface auth {
+    bool ValidateToken(str token)
+}
+
+since 1.4.0 interface auth {
+    optional void InvalidateSession(str token)
 }
 ```
 
@@ -120,8 +127,9 @@ diagnostic.
 
 ## Version negotiation in practice
 
-1. Schema author ships `engine 1.5.0` with a new capability member
-   `since 1.5.0` and a new `optional` interface member.
+1. Schema author ships `engine 1.5.0` with a new capability block
+   `since 1.5.0 capability engine { ... }` and a new `optional` interface
+   member in a `since 1.5.0` block.
 2. Old mods (target `1.4.0`) recompile unchanged: the new member is
    hidden; the optional member is invisible.
 3. A mod that wants the new API bumps its `[schemas]` entry to
@@ -136,6 +144,6 @@ diagnostic.
 | --- | --- | --- |
 | `requires` (capability → interface) | prerequisite | import + call gated on full interface implementation |
 | `requires` (interface → interface) | prerequisite | implementing one demands implementing the other |
-| `since X.Y.Z` | introduction version | members hidden for older targets |
+| `since X.Y.Z` | block introduction version | members of the block hidden for older targets |
 | `optional` | skippable interface member | completeness passes without it |
 | `[schemas]` target | per-mod visibility | grant narrowed to listed namespaces at listed versions |

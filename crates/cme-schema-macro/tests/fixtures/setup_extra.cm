@@ -4,6 +4,6 @@
 
 schema extra 1.0.0
 
-interface ping {
-    since 1.0.0 int Ping()
+since 1.0.0 interface ping {
+    int Ping()
 }

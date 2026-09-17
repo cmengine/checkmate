@@ -47,19 +47,22 @@ struct Config {
     str title
 }
 
-capability window {
-    since 1.0.0 Sprite OpenWindow(str title)
-    since 1.0.0 void Draw(Sprite sprite)
-    since 1.2.0 int Ping()
+since 1.0.0 capability window {
+    Sprite OpenWindow(str title)
+    void Draw(Sprite sprite)
 }
 
-interface gamemode requires core {
-    since 1.0.0 int OnEvent(Event event)
-    since 1.0.0 int Tick(int frame)
+since 1.2.0 capability window {
+    int Ping()
 }
 
-interface core {
-    since 1.0.0 bool Validate(str token)
+since 1.0.0 interface gamemode requires core {
+    int OnEvent(Event event)
+    int Tick(int frame)
+}
+
+since 1.0.0 interface core {
+    bool Validate(str token)
 }
 ";
 
@@ -783,19 +786,22 @@ enum Event {
     Scored(int points)
 }
 
-capability window {
-    since 1.0.0 Sprite OpenWindow(str title)
-    since 1.0.0 void Draw(Sprite sprite)
-    since 1.2.0 int Ping()
+since 1.0.0 capability window {
+    Sprite OpenWindow(str title)
+    void Draw(Sprite sprite)
 }
 
-interface gamemode requires core {
-    since 1.0.0 int OnEvent(Event event)
-    since 1.0.0 int Tick(int frame)
+since 1.2.0 capability window {
+    int Ping()
 }
 
-interface core {
-    since 1.0.0 bool Validate(str token)
+since 1.0.0 interface gamemode requires core {
+    int OnEvent(Event event)
+    int Tick(int frame)
+}
+
+since 1.0.0 interface core {
+    bool Validate(str token)
 }
 ";
 

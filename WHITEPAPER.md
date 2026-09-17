@@ -1685,27 +1685,36 @@ A schema file defines a single top-level namespace root. All declarations within
 // File: schemas/engine.cm
 schema engine 1.4.0
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, vec2 position)
-    since 1.2.0 suspend Image FetchRemoteImage(str url)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, vec2 position)
 }
 
-capability network {
+since 1.2.0 capability graphics {
+    suspend Image FetchRemoteImage(str url)
+}
+
+since 1.0.0 capability network {
     requires auth   // Capability-to-interface dependency
-    since 1.0.0 httpResponse Send(httpRequest request)
+    httpResponse Send(httpRequest request)
 }
 
-interface auth {
-    since 1.0.0 bool ValidateToken(str token)
-    since 1.4.0 optional void InvalidateSession(str token)
+since 1.0.0 interface auth {
+    bool ValidateToken(str token)
 }
 
-interface gamemode requires core {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
+since 1.4.0 interface auth {
+    optional void InvalidateSession(str token)
+}
+
+since 1.0.0 interface gamemode requires core {
+    GameState InitGame(GameConfig config)
+    void OnTick(GameState state, float deltaTime)
 }
 ```
+
+A contract's blocks union: `capability graphics` above is one contract
+whose members carry the `since` version of the block that declares them.
 
 ### 9.2. File and Namespace Boundaries
 
@@ -1732,7 +1741,7 @@ The `requires` keyword enforces contract prerequisites at compile time:
 
 ### 9.5. Versioning and Non-Breaking Evolution
 
-- `since X.Y.Z` tags specify the version when a member was introduced.
+- `since X.Y.Z` opens a `capability` or `interface` block and specifies the version when its members were introduced. The same contract may be declared in several blocks — one per version band — and their members union in declaration order. A block without `since` places its members at the schema's floor (0.0.0).
 - Mod manifests declare the target schema version (e.g., `host_schema_version = "1.2.0"`).
 - The compiler hides all capabilities and interface members introduced in versions newer than the mod’s declared version.
 - `optional` allows adding new interface functions to schemas in minor updates without breaking older mods that do not implement them.
@@ -1828,9 +1837,9 @@ The compiler unions all `impl engine.gamemode` blocks across the mod tree. If an
 Mods cannot import sibling mods. There is no `import other_mod.*` syntax. If inter-mod communication is necessary, the host must expose an explicit mediator capability:
 
 ```checkmate
-capability engine.modBridge {
-    since 1.0.0 void EmitEvent(str eventName, EventPayload payload)
-    since 1.0.0 void Subscribe(str eventName)
+since 1.0.0 capability engine.modBridge {
+    void EmitEvent(str eventName, EventPayload payload)
+    void Subscribe(str eventName)
 }
 ```
 

@@ -18,25 +18,34 @@ enum Event {
     Scored(int points)
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, Vec2 position)
 }
 
-capability network requires auth {
-    since 1.0.0 httpResponse Send(httpRequest request)
+since 1.0.0 capability network requires auth {
+    httpResponse Send(httpRequest request)
 }
 
-interface auth {
+since 1.0.0 interface auth {
     requires core
-    since 1.0.0 bool ValidateToken(str token)
-    since 1.4.0 optional void InvalidateSession(str token)
+    bool ValidateToken(str token)
 }
 
-interface gamemode requires core {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.2.0 suspend Image FetchRemoteImage(str url)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
+since 1.4.0 interface auth {
+    optional void InvalidateSession(str token)
+}
+
+since 1.0.0 interface gamemode requires core {
+    GameState InitGame(GameConfig config)
+}
+
+since 1.2.0 interface gamemode {
+    suspend Image FetchRemoteImage(str url)
+}
+
+since 1.0.0 interface gamemode {
+    void OnTick(GameState state, float deltaTime)
 }
 
 ---
@@ -69,9 +78,9 @@ interface gamemode requires core {
           (primitive_type)
           (identifier)))))
   (capability_declaration
+    (version)
     (identifier)
     (schema_member
-      (version)
       (type_identifier)
       (identifier)
       (parameter_list
@@ -79,7 +88,6 @@ interface gamemode requires core {
           (primitive_type)
           (identifier))))
     (schema_member
-      (version)
       (primitive_type)
       (identifier)
       (parameter_list
@@ -90,11 +98,11 @@ interface gamemode requires core {
           (type_identifier)
           (identifier)))))
   (capability_declaration
+    (version)
     (identifier)
     (dotted_path
       (identifier))
     (schema_member
-      (version)
       (type_identifier)
       (identifier)
       (parameter_list
@@ -102,20 +110,12 @@ interface gamemode requires core {
           (type_identifier)
           (identifier)))))
   (interface_declaration
+    (version)
     (identifier)
     (requires_clause
       (dotted_path
         (identifier)))
     (schema_member
-      (version)
-      (primitive_type)
-      (identifier)
-      (parameter_list
-        (parameter
-          (primitive_type)
-          (identifier))))
-    (schema_member
-      (version)
       (primitive_type)
       (identifier)
       (parameter_list
@@ -123,27 +123,41 @@ interface gamemode requires core {
           (primitive_type)
           (identifier)))))
   (interface_declaration
+    (version)
+    (identifier)
+    (schema_member
+      (primitive_type)
+      (identifier)
+      (parameter_list
+        (parameter
+          (primitive_type)
+          (identifier)))))
+  (interface_declaration
+    (version)
     (identifier)
     (dotted_path
       (identifier))
     (schema_member
-      (version)
       (type_identifier)
       (identifier)
       (parameter_list
         (parameter
           (type_identifier)
-          (identifier))))
+          (identifier)))))
+  (interface_declaration
+    (version)
+    (identifier)
     (schema_member
-      (version)
       (type_identifier)
       (identifier)
       (parameter_list
         (parameter
           (primitive_type)
-          (identifier))))
+          (identifier)))))
+  (interface_declaration
+    (version)
+    (identifier)
     (schema_member
-      (version)
       (primitive_type)
       (identifier)
       (parameter_list

@@ -882,12 +882,12 @@ static const char* SCHEMA_TEXT =
     "Scored(int points)\n"
     "}\n"
     "capability graphics {\n"
-    "since 1.0.0 TextureHandle LoadTexture(str path)\n"
-    "since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)\n"
+    "TextureHandle LoadTexture(str path)\n"
+    "void DrawTexture(TextureHandle tex, Vec2 position)\n"
     "}\n"
     "interface hosthooks {\n"
-    "since 1.0.0 int OnEvent(Event event)\n"
-    "since 1.0.0 TextureHandle LastTexture()\n"
+    "int OnEvent(Event event)\n"
+    "TextureHandle LastTexture()\n"
     "}\n";
 
 static cm_value_t* prov_LoadTexture(void* user,

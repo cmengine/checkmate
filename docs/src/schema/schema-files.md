@@ -19,14 +19,17 @@ enum OrderEvent {
     Checkout(int total)
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, vec2 position)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, vec2 position)
 }
 
-interface gamemode requires core {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.4.0 optional void InvalidateSession(str token)
+since 1.0.0 interface gamemode requires core {
+    GameState InitGame(GameConfig config)
+}
+
+since 1.4.0 interface gamemode {
+    optional void InvalidateSession(str token)
 }
 ```
 
@@ -49,11 +52,16 @@ interface gamemode requires core {
 Contract members have the shape:
 
 ```text
-since X.Y.Z [optional] [suspend] ReturnType MemberName(paramType paramName, ...)
+[since X.Y.Z] capability|interface Name {
+    [optional] [suspend] ReturnType MemberName(paramType paramName, ...)
+    ...
+}
 ```
 
-- `since` tags the version the member was introduced (§9.5). Members
-  without a `since` tag belong to the schema's floor.
+- `since X.Y.Z` opens the block and versions every member it contains
+  (§9.5). The same contract may be declared in several blocks — one per
+  version band — and their members union in declaration order. A block
+  without a `since` tag places its members at the schema's floor.
 - `optional` marks an **interface** member a mod may skip (§9.5).
   `optional` on a *capability* member is a schema-authoring error — the
   host must always provide capability members.
@@ -83,9 +91,10 @@ member parameters, struct fields, enum payloads, array elements, and map
 key/value types may all be `option<T>` or `result<T, E>`.
 
 ```checkmate
-capability pricing {
-    since 0.1.0 result<Price, str> GetPrice(str sku)
-    since 0.1.0 option<Price> PeekPrice(str sku)
+
+since 0.1.0 capability pricing {
+    result<Price, str> GetPrice(str sku)
+    option<Price> PeekPrice(str sku)
 }
 ```
 
@@ -131,8 +140,8 @@ registration and leave the engine unchanged.
 
 The schema front end rejects defective contracts, among them:
 
-- a member tagged `since` beyond its own schema's version (it could never
-  be visible — a forgotten version bump),
+- a block tagged `since` beyond its own schema's version (its members
+  could never be visible — a forgotten version bump),
 - `optional` on a capability member,
 - an interface `requires` edge pointing at nothing,
 - the retired `v1.4.0` spelling (one migration diagnostic points at it),

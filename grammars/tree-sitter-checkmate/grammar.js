@@ -302,6 +302,7 @@ module.exports = grammar({
 
     capability_declaration: ($) =>
       seq(
+        optional(seq('since', field('since', $.version))),
         'capability',
         field('name', $.identifier),
         optional(seq('requires', field('requires', $.dotted_path))),
@@ -312,6 +313,7 @@ module.exports = grammar({
 
     interface_declaration: ($) =>
       seq(
+        optional(seq('since', field('since', $.version))),
         'interface',
         field('name', $.identifier),
         optional(seq('requires', field('requires', $.dotted_path))),
@@ -324,7 +326,6 @@ module.exports = grammar({
 
     schema_member: ($) =>
       seq(
-        optional(seq('since', field('since', $.version))),
         optional(field('modifier', choice('suspend', 'optional'))),
         field('return_type', $._type),
         field('name', $.identifier),

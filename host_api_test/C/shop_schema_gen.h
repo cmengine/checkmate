@@ -23,7 +23,7 @@
 #include "cme.h"
 #include <string.h> /* strcmp: enum unpack dispatches on the variant name */
 
-/* schema shop 1.0.0 */
+/* schema shop v1.0.0 */
 #define CME_SCHEMA_SHOP_VERSION "1.0.0"
 #define CME_SCHEMA_SHOP_VERSION_MAJOR 1
 #define CME_SCHEMA_SHOP_VERSION_MINOR 0

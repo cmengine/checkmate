@@ -392,7 +392,7 @@ fn a_schema_gated_program_runs_against_a_registered_contract() {
     let schema = dir.join("tiny.cm");
     std::fs::write(
         &schema,
-        "schema tiny 1.0.0\ncapability ping {\nsince 1.0.0 int Ping()\n}\n",
+        "schema tiny 1.0.0\nsince 1.0.0 capability ping {\nint Ping()\n}\n",
     )
     .unwrap();
     let program = dir.join("uses_nothing.cm");

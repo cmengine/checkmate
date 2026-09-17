@@ -45,14 +45,14 @@ struct TextureHandle {
     int id
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, vec2 position)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, vec2 position)
 }
 
-interface gamemode {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
+since 1.0.0 interface gamemode {
+    GameState InitGame(GameConfig config)
+    void OnTick(GameState state, float deltaTime)
 }
 ```
 

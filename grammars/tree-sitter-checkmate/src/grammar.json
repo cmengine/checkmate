@@ -888,6 +888,31 @@
       "type": "SEQ",
       "members": [
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "since"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "since",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "version"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "STRING",
           "value": "capability"
         },
@@ -977,6 +1002,31 @@
     "interface_declaration": {
       "type": "SEQ",
       "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "since"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "since",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "version"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
         {
           "type": "STRING",
           "value": "interface"
@@ -1084,31 +1134,6 @@
     "schema_member": {
       "type": "SEQ",
       "members": [
-        {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "SEQ",
-              "members": [
-                {
-                  "type": "STRING",
-                  "value": "since"
-                },
-                {
-                  "type": "FIELD",
-                  "name": "since",
-                  "content": {
-                    "type": "SYMBOL",
-                    "name": "version"
-                  }
-                }
-              ]
-            },
-            {
-              "type": "BLANK"
-            }
-          ]
-        },
         {
           "type": "CHOICE",
           "members": [
@@ -4907,6 +4932,5 @@
     "_statement",
     "_type",
     "_pattern_item"
-  ],
-  "reserved": {}
+  ]
 }

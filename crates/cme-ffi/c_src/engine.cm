@@ -20,12 +20,12 @@ enum Event {
     Scored(int points)
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, Vec2 position)
 }
 
-interface hosthooks {
-    since 1.0.0 int OnEvent(Event event)
-    since 1.0.0 TextureHandle LastTexture()
+since 1.0.0 interface hosthooks {
+    int OnEvent(Event event)
+    TextureHandle LastTexture()
 }

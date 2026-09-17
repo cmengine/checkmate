@@ -1452,10 +1452,7 @@ mod reserved_ident_tests {
         );
         // Line-granular recovery: the damaged line is dropped, the next
         // line survives.
-        let surviving: Vec<_> = tokens
-            .into_iter()
-            .map(|spanned| spanned.token)
-            .collect();
+        let surviving: Vec<_> = tokens.into_iter().map(|spanned| spanned.token).collect();
         assert!(surviving.contains(&crate::lexer::Token::Ident("b")));
         assert!(!surviving.contains(&crate::lexer::Token::Ident("int")));
     }
@@ -1473,8 +1470,8 @@ mod reserved_ident_tests {
 
     #[test]
     fn mega_prefixed_non_numeric_identifiers_stay_legal() {
-        let tokens = lex("mega mega0x mega_0 mega42a megaX megaa1")
-            .expect("none of these are reserved");
+        let tokens =
+            lex("mega mega0x mega_0 mega42a megaX megaa1").expect("none of these are reserved");
         let names: Vec<_> = tokens
             .into_iter()
             .filter_map(|spanned| match spanned.token {
@@ -1482,18 +1479,17 @@ mod reserved_ident_tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(names, ["mega", "mega0x", "mega_0", "mega42a", "megaX", "megaa1"]);
+        assert_eq!(
+            names,
+            ["mega", "mega0x", "mega_0", "mega42a", "megaX", "megaa1"]
+        );
     }
 
     #[test]
     fn reserved_identifiers_are_rejected_in_every_position() {
         // Function name, field name, and struct name — the reservation is
         // lexical, so every ident position rejects the shape.
-        for source in [
-            "void mega1() {}",
-            "struct mega1 { int x }",
-            "int mega2 = 0",
-        ] {
+        for source in ["void mega1() {}", "struct mega1 { int x }", "int mega2 = 0"] {
             let (_, errors) = lex_with_errors(source);
             assert!(
                 matches!(&errors[0], LexError::ReservedIdent { .. }),

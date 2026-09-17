@@ -6,9 +6,10 @@ exact rules as the compiler enforces them.
 ## Capabilities: script calls, host provides
 
 ```checkmate
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, vec2 position)
+
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, vec2 position)
 }
 ```
 
@@ -46,9 +47,10 @@ promises its capabilities whole.
 ## Interfaces: script implements, host calls
 
 ```checkmate
-interface gamemode {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
+
+since 1.0.0 interface gamemode {
+    GameState InitGame(GameConfig config)
+    void OnTick(GameState state, float deltaTime)
 }
 ```
 
@@ -89,11 +91,14 @@ capabilities:
 ```checkmate
 capability network {
     requires auth
-    since 1.0.0 httpResponse Send(httpRequest request)
 }
 
-interface auth {
-    since 1.0.0 bool ValidateToken(str token)
+since 1.0.0 capability network {
+    httpResponse Send(httpRequest request)
+}
+
+since 1.0.0 interface auth {
+    bool ValidateToken(str token)
 }
 ```
 

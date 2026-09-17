@@ -68,14 +68,14 @@ enum Event {
     Scored(int points)
 }
 
-capability window {
-    since 1.0.0 Sprite OpenWindow(str title)
-    since 1.0.0 void Draw(Sprite sprite)
+since 1.0.0 capability window {
+    Sprite OpenWindow(str title)
+    void Draw(Sprite sprite)
 }
 
-interface gamemode {
-    since 1.0.0 int OnEvent(Event event)
-    since 1.0.0 int Tick(int frame)
+since 1.0.0 interface gamemode {
+    int OnEvent(Event event)
+    int Tick(int frame)
 }
 ";
 
@@ -395,8 +395,8 @@ async fn members_hidden_by_the_target_version_are_enforced() {
         &root,
         "schemas/game.cm",
         &GAME_SCHEMA.replace(
-            "    since 1.0.0 Sprite OpenWindow(str title)",
-            "    since 1.1.0 Sprite OpenWindow(str title)",
+            "since 1.0.0 capability window {",
+            "since 1.1.0 capability window {",
         ),
     );
     let main = write(&root, "src/main.cm", GOOD_MAIN);
@@ -883,8 +883,8 @@ async fn editing_the_open_schema_buffer_updates_the_grant_immediately() {
     let _ = harness.publish_for(&main).await;
 
     let grown = GAME_SCHEMA.replace(
-        "capability window {",
-        "capability window {\n    since 1.0.0 void Blink(int times)",
+        "since 1.0.0 capability window {",
+        "since 1.0.0 capability window {\n    void Blink(int times)",
     );
     harness.change(&schema, &grown).await;
     let _ = harness.publish_for(&schema).await;
@@ -924,9 +924,12 @@ struct Clip {
     str name
 }
 
-capability player {
-    since 1.0.0 void Play(Clip clip)
-    since 1.4.0 void PlayHd(Clip clip)
+since 1.0.0 capability player {
+    void Play(Clip clip)
+}
+
+since 1.4.0 capability player {
+    void PlayHd(Clip clip)
 }
 ";
 

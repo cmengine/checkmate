@@ -65,29 +65,38 @@ struct GameState {
     bool active
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
-    since 1.2.0 void DrawSprite(TextureHandle tex, Vec2 position, int frame)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, Vec2 position)
+}
+
+since 1.2.0 capability graphics {
+    void DrawSprite(TextureHandle tex, Vec2 position, int frame)
 }
 
 capability network {
     requires auth
-    since 1.0.0 HttpResponse Send(HttpRequest request)
 }
 
-interface auth {
-    since 1.0.0 bool ValidateToken(str token)
-    since 1.4.0 optional void InvalidateSession(str token)
+since 1.0.0 capability network {
+    HttpResponse Send(HttpRequest request)
 }
 
-interface gamemode requires core {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
+since 1.0.0 interface auth {
+    bool ValidateToken(str token)
 }
 
-interface core {
-    since 1.0.0 void Tick()
+since 1.4.0 interface auth {
+    optional void InvalidateSession(str token)
+}
+
+since 1.0.0 interface gamemode requires core {
+    GameState InitGame(GameConfig config)
+    void OnTick(GameState state, float deltaTime)
+}
+
+since 1.0.0 interface core {
+    void Tick()
 }
 "#;
 
@@ -191,10 +200,14 @@ fn the_v_prefix_is_no_longer_a_version() {
 
 #[test]
 fn members_carry_the_declared_metadata() {
+    // §9.5: the block's `since` versions every member it contains; blocks
+    // of one contract union in declaration order.
     let file = parse_clean(
         "schema engine 1.0.0\n\
+         since 2.1.3 interface core {\n\
+         \x20 optional float Score()\n\
+         }\n\
          interface core {\n\
-         \x20 since 2.1.3 optional float Score()\n\
          \x20 int Bare()\n\
          }\n",
     );
@@ -211,7 +224,7 @@ fn suspend_members_parse_but_are_rejected() {
     let messages = parse_errors(
         "schema engine 1.0.0\n\
          capability net {\n\
-         \x20 since 1.0.0 suspend httpResponse Get(str url)\n\
+         \x20 suspend httpResponse Get(str url)\n\
          }\n",
     );
     assert!(
@@ -226,7 +239,7 @@ fn capitalization_is_enforced_on_schema_declarations() {
     let messages = parse_errors(
         "schema engine 1.0.0\n\
          capability graphics {\n\
-         \x20 since 1.0.0 void drawTexture(str path)\n\
+         \x20 void drawTexture(str path)\n\
          }\n",
     );
     assert!(messages.iter().any(|m| m.contains("PascalCase")));
@@ -234,7 +247,7 @@ fn capitalization_is_enforced_on_schema_declarations() {
     let messages = parse_errors(
         "schema engine 1.0.0\n\
          capability Graphics {\n\
-         \x20 since 1.0.0 void Draw(str Path)\n\
+         \x20 void Draw(str Path)\n\
          }\n",
     );
     assert!(
@@ -284,8 +297,8 @@ fn types_cover_the_whole_surface() {
          \x20 result<int, str> attempt\n\
          \x20 str[][] grid\n\
          }\n\
-         capability c {\n\
-         \x20 since 1.0.0 map<str, int[]> Index(str key)\n\
+         since 1.0.0 capability c {\n\
+         \x20 map<str, int[]> Index(str key)\n\
          }\n",
     );
     let bag = match &file.items[0] {
@@ -419,7 +432,7 @@ fn an_optional_capability_member_is_rejected() {
         "schema engine 1.0.0\n\
          \n\
          capability gfx {\n\
-         \x20   since 1.0.0 optional void Draw()\n\
+         \x20   optional void Draw()\n\
          }\n",
     );
     assert!(
@@ -439,7 +452,7 @@ fn an_optional_capability_member_is_rejected() {
         "schema engine 1.0.0\n\
          \n\
          interface svc {\n\
-         \x20   since 1.0.0 optional void Draw()\n\
+         \x20   optional void Draw()\n\
          }\n",
     );
     assert_eq!(clean.contracts().count(), 1);
@@ -453,8 +466,10 @@ fn a_member_introduced_after_the_schema_version_is_a_set_issue() {
         "schema shop 1.0.0\n\
          \n\
          interface backend {\n\
-         \x20   since 1.0.0 bool Ping()\n\
-         \x20   since 9.9.9 bool Pong()\n\
+         \x20   bool Ping()\n\
+         }\n\
+         since 9.9.9 interface backend {\n\
+         \x20   bool Pong()\n\
          }\n",
     );
     let issues = SchemaSet::build(vec![outcome]).expect_err("the set must reject it");
@@ -481,10 +496,13 @@ struct Price {
     int cents
 }
 
-capability pricing {
-    since 0.1.0 result<Price, str> GetPrice(str sku)
-    since 0.1.0 option<Price> PeekPrice(str sku)
-    since 0.2.0 result<int, str>[] BulkPrices(str[] skus)
+since 0.1.0 capability pricing {
+    result<Price, str> GetPrice(str sku)
+    option<Price> PeekPrice(str sku)
+}
+
+since 0.2.0 capability pricing {
+    result<int, str>[] BulkPrices(str[] skus)
 }
 
 struct Holder {
@@ -535,9 +553,9 @@ struct Price {
     int cents
 }
 
-capability pricing {
-    since 0.1.0 option<Price, int> Weird(str sku)
-    since 0.1.0 result<Price> Missing(str sku)
+since 0.1.0 capability pricing {
+    option<Price, int> Weird(str sku)
+    result<Price> Missing(str sku)
 }
 "#,
     );
@@ -561,8 +579,8 @@ fn reserved_mega_identifiers_are_rejected_in_schema_files() {
         r#"
 schema engine 1.0.0
 
-capability mega0 {
-    since 1.0.0 void Tick()
+since 1.0.0 capability mega0 {
+    void Tick()
 }
 "#,
     );
@@ -571,5 +589,148 @@ capability mega0 {
             .iter()
             .any(|e| e.contains("identifier `mega0` is reserved for future use")),
         "missing the reserved-ident diagnostic: {errors:?}"
+    );
+}
+
+#[test]
+fn block_since_versions_every_member_of_the_block() {
+    // §9.5's new shape: `since X.Y.Z capability fs { ... }` — every member
+    // inside carries the block's version, and the same contract may be
+    // declared in several blocks whose members union.
+    let file = parse_clean(
+        r#"
+schema fs 0.2.0
+
+since 0.1.0 capability fs {
+    str GetConfigDir()
+    bool PathExists(str path)
+}
+
+since 0.2.0 capability fs {
+    bool CreateFile(str path)
+}
+"#,
+    );
+    let fs = file.capability("fs").expect("the fs capability");
+    assert_eq!(fs.members.len(), 3, "blocks union into one member set");
+    assert_eq!(fs.members[0].name, "GetConfigDir");
+    assert_eq!(fs.members[0].since, Version::new(0, 1, 0));
+    assert_eq!(fs.members[1].name, "PathExists");
+    assert_eq!(fs.members[1].since, Version::new(0, 1, 0));
+    assert_eq!(fs.members[2].name, "CreateFile");
+    assert_eq!(fs.members[2].since, Version::new(0, 2, 0));
+}
+
+#[test]
+fn a_member_level_since_reports_the_migration_diagnostic() {
+    let messages = parse_errors(
+        "schema engine 1.0.0\n\
+         capability net {\n\
+         \x20 since 1.0.0 bool Send(str url)\n\
+         }\n",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("member-level `since` was removed")),
+        "the migration diagnostic points at the retired spelling: {messages:?}"
+    );
+}
+
+#[test]
+fn since_before_a_type_declaration_is_rejected() {
+    let messages = parse_errors(
+        "schema engine 1.0.0\n\
+         since 1.0.0 struct Bag {\n\
+         \x20 int id\n\
+         }\n",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("`since` versions a capability or interface block")),
+        "versioning is a contract-member concept: {messages:?}"
+    );
+}
+
+#[test]
+fn contract_unions_reject_cross_block_duplicates_and_double_requires() {
+    let messages = parse_errors(
+        "schema engine 1.0.0\n\
+         since 1.0.0 interface gamemode requires core {\n\
+         \x20 void Tick()\n\
+         }\n\
+         since 1.1.0 interface gamemode requires core {\n\
+         \x20 void Tick()\n\
+         \x20 void Save()\n\
+         }\n",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("duplicate member `Tick`")),
+        "a member declared twice across blocks is reported: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("duplicate `requires` in interface `gamemode`")),
+        "a second requires across blocks is reported: {messages:?}"
+    );
+}
+
+#[test]
+fn requires_may_land_in_any_block_of_the_contract() {
+    let file = parse_clean(
+        "schema engine 1.0.0\n\
+         since 1.0.0 interface gamemode {\n\
+         \x20 void Tick()\n\
+         }\n\
+         since 1.1.0 interface gamemode requires core {\n\
+         \x20 void Save()\n\
+         }\n",
+    );
+    let gamemode = file.interface("gamemode").unwrap();
+    assert_eq!(
+        gamemode.requires.as_ref().unwrap().segments,
+        vec!["core".to_string()],
+        "the requires declared in the second block attaches to the union"
+    );
+}
+
+#[test]
+fn contract_and_type_name_collisions_stay_rejected() {
+    // Same name, different kind: a capability and an interface cannot
+    // share a name, and neither can share one with a type.
+    let messages = parse_errors(
+        "schema engine 1.0.0\n\
+         since 1.0.0 capability fs {\n\
+         \x20 void Tick()\n\
+         }\n\
+         since 1.0.0 interface fs {\n\
+         \x20 void Tick()\n\
+         }\n",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("duplicate schema declaration `fs`")),
+        "a capability/interface name collision is reported: {messages:?}"
+    );
+
+    let messages = parse_errors(
+        "schema engine 1.0.0\n\
+         since 1.0.0 capability fs {\n\
+         \x20 void Tick()\n\
+         }\n\
+         struct fs {\n\
+         \x20 int id\n\
+         }\n",
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("duplicate schema declaration `fs`")),
+        "a contract/type name collision is reported: {messages:?}"
     );
 }

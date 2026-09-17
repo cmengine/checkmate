@@ -34,31 +34,40 @@ struct Inventory {
     result<int, LoadError> attempt
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
-    since 1.2.0 int DrawSprite(TextureHandle tex, Vec2 position, int frame)
-    since 1.3.0 option<TextureHandle> FindTexture(str path)
-    since 1.3.0 result<Inventory, LoadError> LoadInventory(str owner)
-    since 1.3.0 str[] TextureNames()
-    since 1.3.0 map<str, float> TextureScales()
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, Vec2 position)
 }
 
-capability assets requires loader {
-    since 1.0.0 TextureHandle LoadBundled(str name)
+since 1.2.0 capability graphics {
+    int DrawSprite(TextureHandle tex, Vec2 position, int frame)
 }
 
-interface loader {
-    since 1.0.0 bool IsAvailable(str name)
+since 1.3.0 capability graphics {
+    option<TextureHandle> FindTexture(str path)
+    result<Inventory, LoadError> LoadInventory(str owner)
+    str[] TextureNames()
+    map<str, float> TextureScales()
 }
 
-interface gamemode requires core {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
-    since 1.0.0 result<int, LoadError> DamageRoll(int seed)
-    since 1.4.0 optional void OnSave(str path)
+since 1.0.0 capability assets requires loader {
+    TextureHandle LoadBundled(str name)
 }
 
-interface core {
-    since 1.0.0 void Tick()
+since 1.0.0 interface loader {
+    bool IsAvailable(str name)
+}
+
+since 1.0.0 interface gamemode requires core {
+    GameState InitGame(GameConfig config)
+    void OnTick(GameState state, float deltaTime)
+    result<int, LoadError> DamageRoll(int seed)
+}
+
+since 1.4.0 interface gamemode {
+    optional void OnSave(str path)
+}
+
+since 1.0.0 interface core {
+    void Tick()
 }

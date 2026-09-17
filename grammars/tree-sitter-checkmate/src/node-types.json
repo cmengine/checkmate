@@ -545,6 +545,16 @@
             "named": true
           }
         ]
+      },
+      "since": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "version",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
@@ -1248,6 +1258,16 @@
         "types": [
           {
             "type": "dotted_path",
+            "named": true
+          }
+        ]
+      },
+      "since": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "version",
             "named": true
           }
         ]
@@ -2660,16 +2680,6 @@
             "named": true
           }
         ]
-      },
-      "since": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "version",
-            "named": true
-          }
-        ]
       }
     }
   },
@@ -3302,8 +3312,7 @@
   },
   {
     "type": "block_comment",
-    "named": true,
-    "extra": true
+    "named": true
   },
   {
     "type": "bool",
@@ -3439,8 +3448,7 @@
   },
   {
     "type": "line_comment",
-    "named": true,
-    "extra": true
+    "named": true
   },
   {
     "type": "match",

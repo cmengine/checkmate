@@ -1,16 +1,19 @@
 //! The §9 schema data model: the host contract a `.cm` schema file declares.
 //!
-//! A schema file (WHITEPAPER §9.1) defines ONE top-level namespace root:
+//! A schema file (WHITEPAPER §9.1) defines ONE top-level namespace root.
+//! `since X.Y.Z` versions the BLOCK (§9.5) and applies to every member
+//! inside; the same contract may be declared in several blocks, whose
+//! members union:
 //!
 //! ```text
 //! schema engine 1.4.0
 //!
-//! capability graphics {
-//!     since 1.0.0 TextureHandle LoadTexture(str path)
+//! since 1.0.0 capability graphics {
+//!     TextureHandle LoadTexture(str path)
 //! }
 //!
-//! interface gamemode requires core {
-//!     since 1.0.0 GameState InitGame(GameConfig config)
+//! since 1.0.0 interface gamemode requires core {
+//!     GameState InitGame(GameConfig config)
 //! }
 //! ```
 //!
@@ -45,9 +48,9 @@ pub struct Version {
 }
 
 impl Version {
-    /// The version every untagged member implicitly introduces (§9.5:
-    /// members without `since` have existed since the beginning, so every
-    /// target version sees them).
+    /// The version every untagged BLOCK implicitly introduces (§9.5:
+    /// members of a block without `since` have existed since the
+    /// beginning, so every target version sees them).
     pub const ZERO: Version = Version {
         major: 0,
         minor: 0,

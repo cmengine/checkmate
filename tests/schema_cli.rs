@@ -80,13 +80,16 @@ struct GameState {
     bool active
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.2.0 int DrawSprite(TextureHandle tex, int frame)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
 }
 
-interface gamemode {
-    since 1.0.0 GameState InitGame()
+since 1.2.0 capability graphics {
+    int DrawSprite(TextureHandle tex, int frame)
+}
+
+since 1.0.0 interface gamemode {
+    GameState InitGame()
 }
 ";
 

@@ -107,9 +107,9 @@ mods must communicate, the **host** exposes an explicit bridge capability
 through the schema:
 
 ```checkmate
-capability engine.modBridge {
-    since 1.0.0 void EmitEvent(str eventName, EventPayload payload)
-    since 1.0.0 void Subscribe(str eventName)
+since 1.0.0 capability engine.modBridge {
+    void EmitEvent(str eventName, EventPayload payload)
+    void Subscribe(str eventName)
 }
 ```
 

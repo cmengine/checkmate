@@ -372,9 +372,9 @@ struct Item {
     int price
 }
 
-capability store {
-    since 1.0.0 Item FetchItem(str sku)
-    since 1.0.0 void RecordSale(Item item, int qty)
+since 1.0.0 capability store {
+    Item FetchItem(str sku)
+    void RecordSale(Item item, int qty)
 }
 ```
 

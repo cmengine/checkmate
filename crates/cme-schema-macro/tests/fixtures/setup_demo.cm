@@ -8,12 +8,15 @@ struct Greeting {
     int loudness
 }
 
-capability speaker {
-    since 1.0.0 void Shout(str message)
-    since 1.0.0 Greeting Compose(str name)
+since 1.0.0 capability speaker {
+    void Shout(str message)
+    Greeting Compose(str name)
 }
 
-interface reporter {
-    since 1.0.0 int Report(int value)
-    since 1.2.0 optional void Snapshot(str path)
+since 1.0.0 interface reporter {
+    int Report(int value)
+}
+
+since 1.2.0 interface reporter {
+    optional void Snapshot(str path)
 }

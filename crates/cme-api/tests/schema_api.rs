@@ -29,15 +29,18 @@ struct GameConfig {
     bool active
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
-    since 1.2.0 int DrawSprite(TextureHandle tex, Vec2 position, int frame)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, Vec2 position)
 }
 
-interface gamemode {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
+since 1.2.0 capability graphics {
+    int DrawSprite(TextureHandle tex, Vec2 position, int frame)
+}
+
+since 1.0.0 interface gamemode {
+    GameState InitGame(GameConfig config)
+    void OnTick(GameState state, float deltaTime)
 }
 ";
 
@@ -637,8 +640,8 @@ impl CapabilityProvider for Reentrant {
 const TRACER_SCHEMA: &str = "
 schema tracer 1.0.0
 
-capability probe {
-    since 1.0.0 int Ping()
+since 1.0.0 capability probe {
+    int Ping()
 }
 ";
 

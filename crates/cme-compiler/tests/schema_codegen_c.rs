@@ -39,15 +39,21 @@ enum LoadError {
     Stale(int generation)
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2Like position)
-    since 1.2.0 int DrawSprite(TextureHandle tex, Vec2Like position, int frame)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, Vec2Like position)
 }
 
-interface loader {
-    since 1.0.0 bool IsAvailable(str name)
-    since 1.4.0 optional void Invalidate(str token)
+since 1.2.0 capability graphics {
+    int DrawSprite(TextureHandle tex, Vec2Like position, int frame)
+}
+
+since 1.0.0 interface loader {
+    bool IsAvailable(str name)
+}
+
+since 1.4.0 interface loader {
+    optional void Invalidate(str token)
 }
 ";
 
@@ -374,8 +380,9 @@ schema physics 2.0.0
 struct Body {
     float mass
 }
-capability dynamics {
-    since 2.0.0 void Apply(Body body)
+
+since 2.0.0 capability dynamics {
+    void Apply(Body body)
 }
 ";
     let physics = generate(PHYSICS);
@@ -399,9 +406,9 @@ struct Price {
     int cents
 }
 
-capability pricing {
-    since 0.1.0 result<Price, str> GetPrice(str sku)
-    since 0.1.0 option<Price> PeekPrice(str sku)
+since 0.1.0 capability pricing {
+    result<Price, str> GetPrice(str sku)
+    option<Price> PeekPrice(str sku)
 }
 
 struct Holder {
@@ -436,9 +443,9 @@ fn scalar_only_sum_shapes_get_scalar_helpers() {
         "
 schema stats 1.0.0
 
-capability probe {
-    since 1.0.0 result<int, str> Read(str key)
-    since 1.0.0 option<float> Best()
+since 1.0.0 capability probe {
+    result<int, str> Read(str key)
+    option<float> Best()
 }
 ",
     );

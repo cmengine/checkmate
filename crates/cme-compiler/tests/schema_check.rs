@@ -80,28 +80,34 @@ enum LoadError {
     Corrupt(str reason)
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
-    since 1.0.0 void DrawTexture(TextureHandle tex, Vec2 position)
-    since 1.2.0 void DrawSprite(TextureHandle tex, Vec2 position, int frame)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
+    void DrawTexture(TextureHandle tex, Vec2 position)
 }
 
-capability assets requires loader {
-    since 1.0.0 TextureHandle LoadBundled(str name)
+since 1.2.0 capability graphics {
+    void DrawSprite(TextureHandle tex, Vec2 position, int frame)
 }
 
-interface loader {
-    since 1.0.0 bool IsAvailable(str name)
+since 1.0.0 capability assets requires loader {
+    TextureHandle LoadBundled(str name)
 }
 
-interface core {
-    since 1.0.0 void Tick()
+since 1.0.0 interface loader {
+    bool IsAvailable(str name)
 }
 
-interface gamemode requires core {
-    since 1.0.0 GameState InitGame(GameConfig config)
-    since 1.0.0 void OnTick(GameState state, float deltaTime)
-    since 1.4.0 optional void OnSave(str path)
+since 1.0.0 interface core {
+    void Tick()
+}
+
+since 1.0.0 interface gamemode requires core {
+    GameState InitGame(GameConfig config)
+    void OnTick(GameState state, float deltaTime)
+}
+
+since 1.4.0 interface gamemode {
+    optional void OnSave(str path)
 }
 ";
 
@@ -620,19 +626,22 @@ impl engine.gamemode {
 const CROSS: &str = "
 schema engine 1.0.0
 
-interface hud requires ui.widgets {
-    since 1.0.0 void DrawHud()
+since 1.0.0 interface hud requires ui.widgets {
+    void DrawHud()
 }
 
-capability overlay requires ui.widgets {
-    since 1.0.0 void Show(str text)
+since 1.0.0 capability overlay requires ui.widgets {
+    void Show(str text)
 }
 
 schema ui 1.2.0
 
-interface widgets {
-    since 1.0.0 void Layout(int slot)
-    since 1.2.0 optional void Blink(int slot)
+since 1.0.0 interface widgets {
+    void Layout(int slot)
+}
+
+since 1.2.0 interface widgets {
+    optional void Blink(int slot)
 }
 ";
 
@@ -721,14 +730,14 @@ fn requires_may_not_name_a_capability() {
     const BAD: &str = "
 schema a 1.0.0
 
-interface broken requires b.helper {
-    since 1.0.0 void Go()
+since 1.0.0 interface broken requires b.helper {
+    void Go()
 }
 
 schema b 1.0.0
 
-capability helper {
-    since 1.0.0 void Do()
+since 1.0.0 capability helper {
+    void Do()
 }
 ";
     let (first, second) = BAD.split_once("schema b").expect("two headers");
@@ -771,13 +780,16 @@ fn cross_context() -> SchemaContext {
 const GATING: &str = "
 schema gating 2.0.0
 
-interface base {
-    since 1.0.0 void Basic()
-    since 2.0.0 void Future()
+since 1.0.0 interface base {
+    void Basic()
 }
 
-interface derived requires base {
-    since 1.0.0 void Do()
+since 2.0.0 interface base {
+    void Future()
+}
+
+since 1.0.0 interface derived requires base {
+    void Do()
 }
 ";
 

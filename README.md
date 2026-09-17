@@ -141,16 +141,16 @@ struct TextureHandle {
     int id
 }
 
-capability graphics {
-    since 1.0.0 TextureHandle LoadTexture(str path)
+since 1.0.0 capability graphics {
+    TextureHandle LoadTexture(str path)
 }
 
-interface gamemode {
-    since 1.0.0 GameState InitGame(GameConfig config)
+since 1.0.0 interface gamemode {
+    GameState InitGame(GameConfig config)
 }
 ```
 
-Register the schema (with the engine or the CLI's `--schema` flag) and every load enforces the contract at compile time: capability calls type-check against the schema signatures and require the import, `import engine.assets` itself demands the capability's prerequisite (the §9.4 "cannot import or call"), `impl engine.gamemode` blocks must implement every required visible member with the exact signature, an impl naming an ungranted or unknown namespace is an error, members introduced after the program's target version are hidden (§9.5), and `requires` edges gate both directions. Schema-authoring defects are rejected too: an `optional` capability member (§9.5 defines the flag for interfaces) and a member tagged `since` beyond the schema's own version both fail validation.
+Register the schema (with the engine or the CLI's `--schema` flag) and every load enforces the contract at compile time: capability calls type-check against the schema signatures and require the import, `import engine.assets` itself demands the capability's prerequisite (the §9.4 "cannot import or call"), `impl engine.gamemode` blocks must implement every required visible member with the exact signature, an impl naming an ungranted or unknown namespace is an error, members introduced after the program's target version are hidden (§9.5), and `requires` edges gate both directions. Schema-authoring defects are rejected too: an `optional` capability member (§9.5 defines the flag for interfaces) and a block tagged `since` beyond the schema's own version both fail validation.
 
 **Rust hosts get compile-time-verified bindings** (§9.6) through a procedural macro that runs the real schema parser at host build time:
 

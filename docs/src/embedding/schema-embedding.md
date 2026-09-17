@@ -177,6 +177,92 @@ the same way, field by name, recursively for nested types.
 Every layer has a deterministic, positioned failure — none waits for a
 mysterious runtime misbehavior.
 
+## When your IDE caches stale bindings (`SCHEMAS_HASH`)
+
+The macro reads `schemas/*.cm` from disk at compile time, so a plain
+`cargo build` re-expands the bindings whenever the file's *content*
+changes the build inputs. But some IDEs — RustRover is the reported
+case — cache a procedural macro's expansion keyed on its **input
+tokens**. `cme_schema_bindings!("schemas/origout.cm")` has tokens that
+never change when you edit the schema file, so the IDE keeps showing the
+stale expansion: members you added are "missing", types you renamed
+still exist, and the errors vanish the moment a real build runs.
+
+The fix is to make the macro's input tokens depend on the schema
+contents. Pin a hash of every schema file into the invocation with a
+`#[doc]` attribute:
+
+```rust
+pub mod bindings {
+    #[doc = env!("SCHEMAS_HASH")]
+    cme::cme_schema_bindings!(path = "schemas/origout.cm", crate = ::cme::api);
+}
+```
+
+and produce that environment variable with a `build.rs` in the same
+crate:
+
+```rust
+// build.rs
+use std::fs;
+use std::path::Path;
+
+fn main() {
+    let schema_dir = Path::new("schemas");
+
+    let mut entries: Vec<_> = fs::read_dir(schema_dir)
+        .expect("failed to read schemas/ dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "cm"))
+        .map(|e| e.path())
+        .collect();
+
+    entries.sort();
+
+    let mut hash: u64 = 0;
+    for path in &entries {
+        let contents = fs::read(path).unwrap_or_else(|_| panic!("failed to read {path:?}"));
+        for &b in &contents {
+            hash = hash.wrapping_mul(31).wrapping_add(b as u64);
+        }
+        for b in path.to_string_lossy().bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(b as u64);
+        }
+
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    println!("cargo:rerun-if-changed={}", schema_dir.display());
+
+    println!("cargo:rustc-env=SCHEMAS_HASH={:x}", hash);
+}
+```
+
+Two things now happen on every schema edit:
+
+1. **cargo rebuilds the host crate.** The `cargo:rerun-if-changed` lines
+   make the build script (and therefore the crate) re-run when any
+   `schemas/*.cm` file changes, and the changed `SCHEMAS_HASH` value
+   invalidates the previous compilation.
+2. **the IDE re-expands the macro.** `#[doc = env!("SCHEMAS_HASH")]`
+   is part of the invocation's tokens; when the hash changes, the
+   token stream the IDE feeds to its macro-expansion cache changes with
+   it, and the cache misses — so the bindings are regenerated from the
+   file that is now on disk.
+
+The recipe also works for **multiple schema usages**: with several
+`cme_schema_bindings!` invocations (one per namespace), add the same
+`#[doc = env!("SCHEMAS_HASH")]` line on top of each. One `build.rs`
+hashes the whole `schemas/` directory, so every invocation sees the same
+variable and every one of them invalidates together — editing any single
+schema file refreshes all of the bindings.
+
+> The hash is not a security boundary and its algorithm is unspecified —
+> it only needs to change when the schema files change. Keep the doc
+> attribute on its own line directly above the macro invocation, and
+> keep the `schemas/` directory layout stable so the file list (and
+> therefore the hash) is deterministic.
+
 ## C hosts: `cme codegen-c`
 
 Generate the header once per schema (CI-friendly; the output is

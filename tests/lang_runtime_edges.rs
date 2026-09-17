@@ -1,11 +1,12 @@
 //! Runtime-edges suite: observable semantics the other suites do not pin —
 //! the unary grammar corners of §A.2 (`--` is two operators, not one),
-//! the digit-led identifier rules of §2 (and the hex spelling that is an
-//! identifier, not a literal), compound chains through indexed paths,
-//! multi-level `?` propagation with the payload pinned at each hop,
-//! `match` as both statement and expression with the wildcard fallback,
-//! early returns from nested loops, and structural values at their
-//! composition edges. Every value goes through the full pipeline.
+//! the digit-led identifier rules of §2 (and the hex spelling that became
+//! a literal once numeric prefixes were introduced), compound chains
+//! through indexed paths, multi-level `?` propagation with the payload
+//! pinned at each hop, `match` as both statement and expression with the
+//! wildcard fallback, early returns from nested loops, and structural
+//! values at their composition edges. Every value goes through the full
+//! pipeline.
 
 use cme_compiler::check::check;
 use cme_compiler::parse_source;
@@ -28,26 +29,6 @@ fn run_main(source: &str) -> Result<Value, InterpError> {
 
 fn expect(source: &str, value: Value) {
     assert_eq!(run_main(source), Ok(value), "source: {source:?}");
-}
-
-fn check_one_error(source: &str, contains: &str) {
-    let outcome = parse_source(source);
-    assert!(
-        outcome.diagnostics.is_empty(),
-        "front end must be clean: {:?}",
-        outcome.diagnostics
-    );
-    let diagnostics = check(&outcome.statements);
-    assert_eq!(
-        diagnostics.len(),
-        1,
-        "expected exactly one diagnostic: {diagnostics:?}\nsource: {source:?}"
-    );
-    assert!(
-        diagnostics[0].to_string().contains(contains),
-        "message {:?} should mention {contains:?}",
-        diagnostics[0].to_string()
-    );
 }
 
 fn int_main(body: &str) -> String {
@@ -118,14 +99,12 @@ fn digit_led_identifiers_are_names() {
 }
 
 #[test]
-fn the_hex_spelling_is_an_identifier_not_a_literal() {
-    // `0x10` is a digit-led word with non-digit characters: an identifier
-    // by §2, so the declaration fails with an unknown name — never a hex
-    // literal.
-    check_one_error(
-        "int main() {\nint x = 0x10\nreturn x\n}",
-        "unknown name `0x10`",
-    );
+fn the_hex_spelling_is_a_literal_now() {
+    // `0x10` used to be a digit-led identifier (the old §2 longest-match
+    // rule); it is now a hex integer literal — the whole word matches the
+    // numeric grammar, so the numeric rule claims it and it evaluates to
+    // the decimal value.
+    expect(&int_main("return 0x10"), Value::Int(16));
 }
 
 #[test]

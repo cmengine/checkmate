@@ -186,6 +186,58 @@ fn classify_interp_string_error(source: &str, start: usize) -> LexError {
     }
 }
 
+/// The callback for every [`Token::IntLit`] regex: parses the matched
+/// slice into its `i64` value, honoring the radix prefix (`0x`/`0X` hex,
+/// `0o`/`0O` octal, `0b`/`0B` binary) and stripping `_` digit separators.
+/// A digit run too large for `i64` fails the callback, which turns the
+/// token into a lexing error — recovery classifies it as
+/// [`LexError::IntegerOverflow`] via [`classify_error`].
+fn int_lit<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Result<i64, ()> {
+    parse_int_slice(lex.slice()).ok_or(())
+}
+
+/// Parses a full integer-literal slice (radix prefix and `_` separators
+/// allowed) into its value. Returns `None` when the digits overflow `i64`.
+pub(crate) fn parse_int_slice(slice: &str) -> Option<i64> {
+    let (radix, digits) = if let Some(rest) = strip_radix_prefix(slice, "0x") {
+        (16, rest)
+    } else if let Some(rest) = strip_radix_prefix(slice, "0o") {
+        (8, rest)
+    } else if let Some(rest) = strip_radix_prefix(slice, "0b") {
+        (2, rest)
+    } else {
+        (10, slice)
+    };
+    // The regexes only deliver separators *between* digits, so stripping
+    // them cannot empty the digit field; a decimal slice of `_`-free digits
+    // either parses or overflows.
+    let cleaned: String = digits.chars().filter(|c| *c != '_').collect();
+    i64::from_str_radix(&cleaned, radix).ok()
+}
+
+/// Case-insensitive prefix strip: `slice` beginning with `prefix` in
+/// either all-lowercase or all-uppercase form yields the remainder.
+fn strip_radix_prefix<'a>(slice: &'a str, prefix: &str) -> Option<&'a str> {
+    if slice.len() > prefix.len() && slice[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&slice[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+/// The callback for every [`Token::FloatLit`] regex: strips `_` digit
+/// separators and parses the remainder as `f64`. A literal whose value
+/// would be infinite fails the callback — recovery classifies the region
+/// as [`LexError::FloatOverflow`].
+fn float_lit<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Result<f64, ()> {
+    let cleaned: String = lex.slice().chars().filter(|c| *c != '_').collect();
+    cleaned
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or(())
+}
+
 /// The callback for [`Token::BlockComment`]: after the regex matches the
 /// `/*` opener, consumes through the first `*/`. `None` (failing the token)
 /// for an unterminated comment — everything from the opener on is comment.
@@ -319,13 +371,59 @@ pub enum Token<'a> {
     #[token("?")]
     Question,
 
+    // Numeric literals (§2.4). These variants are declared BEFORE `Ident`
+    // on purpose: logos breaks same-length matches in declaration order,
+    // and every numeric form collides with the digit-led identifier rule
+    // at equal length (`0x1F`, `1_000`, `1e10`). A digit-led word is a
+    // number only when the WHOLE maximal word matches a numeric grammar;
+    // anything else (`0xFFg`, `0b12`, `1e`, `1__0`) falls back to the
+    // longest-match identifier — no backtracking, no new diagnostics.
+    //
+    // Float literals: a fractional part (with optional `_` separators on
+    // both sides) and/or an exponent (`e`/`E`, optional sign, with
+    // separators). `1.5e3` and `1e10` are floats; `1.5e` degrades to the
+    // float `1.5` followed by the identifier `e`. An infinite value fails
+    // the callback — recovery reports `FloatOverflow`.
+    // `priority` beats the digit-led identifier rule on LENGTH TIES
+    // (logos prefers the longest match; equal lengths resolve by priority,
+    // and every pattern here would otherwise tie with the identifier at
+    // the same specificity). Longer identifier matches still win by
+    // length, which is exactly the `0xFFg`-stays-a-name fallback.
+    // Distinct priorities per pattern: patterns sharing a priority can
+    // merge their automaton states in a way that drops the shared integer
+    // leaf (observed as `1.length` failing to fall back to `IntLit(1)`).
+    // Length still dominates, so these numbers only break true ties.
+    #[regex(
+        r"[0-9](_[0-9]|[0-9])*\.[0-9](_[0-9]|[0-9])*([eE][+-]?[0-9](_[0-9]|[0-9])*)?",
+        float_lit,
+        priority = 12
+    )]
+    #[regex(
+        r"[0-9](_[0-9]|[0-9])*[eE][+-]?[0-9](_[0-9]|[0-9])*",
+        float_lit,
+        priority = 11
+    )]
+    FloatLit(f64),
+
+    // Integer literals: radix prefixes with separators, then decimal. A
+    // digit run too large for i64 fails the callback, which turns the
+    // token into a lexing error instead of panicking — recovery then
+    // classifies the literal like any other invalid region.
+    #[regex(r"0[xX][0-9a-fA-F](_?[0-9a-fA-F])*", int_lit, priority = 10)]
+    #[regex(r"0[oO][0-7](_?[0-7])*", int_lit, priority = 9)]
+    #[regex(r"0[bB][01](_?[01])*", int_lit, priority = 8)]
+    #[regex(r"[0-9](_[0-9]|[0-9])*", int_lit, priority = 7)]
+    IntLit(i64),
+
     // Identifiers (e.g., variable names, function names)
     // Two shapes match: a letter or underscore followed by word characters,
     // and (§2.4 identifiers) a digit-led run containing at least one
     // non-digit character (`3Vector`, `2D`, `2_D`) — a pure digit run is an
-    // integer literal, never an identifier. The callback fails the
-    // reserved `mega<N>` shape (see [`is_reserved_mega_ident`]); recovery
-    // reports the dedicated diagnostic.
+    // integer literal, never an identifier. The numeric literal rules above
+    // claim their shapes first; this fallback keeps every other digit-led
+    // word a name, so `0xFFg` and `123abc` stay identifiers by longest
+    // match. The callback fails the reserved `mega<N>` shape (see
+    // [`is_reserved_mega_ident`]); recovery reports the dedicated diagnostic.
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", ident)]
     #[regex(r"[0-9]+[a-zA-Z_][a-zA-Z0-9_]*", ident)]
     Ident(&'a str),
@@ -372,21 +470,6 @@ pub enum Token<'a> {
     #[token("import")]
     KwImport,
 
-    // Integer Literals
-    // This regex matches digits, and the closure parses it into an i64. A
-    // digit run too large for i64 fails the callback, which turns the token
-    // into a lexing error instead of panicking — recovery then skips the
-    // literal like any other invalid region.
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().map_err(|_| ()))]
-    IntLit(i64),
-
-    // Float Literals
-    #[regex(
-        r"[0-9]+\.[0-9]+",
-        |lex| lex.slice().parse::<f64>().ok().filter(|v| v.is_finite()).ok_or(())
-    )]
-    FloatLit(f64),
-
     /// Synthetic end-of-input marker appended by the lexer. Never produced by a
     /// regex; the parser relies on it to make `advance` infallible.
     Eof,
@@ -413,9 +496,11 @@ pub enum LexError {
     /// A backslash inside a string literal that is not followed by one of
     /// the four accepted escape characters (`n`, `t`, `\\`, `"`).
     InvalidEscape { span: Span },
-    /// An integer literal whose digit run does not fit in `i64`.
+    /// An integer literal whose digit run does not fit in `i64` (decimal,
+    /// or any radix prefix: hex `0x`, octal `0o`, binary `0b`).
     IntegerOverflow { span: Span },
-    /// A float literal that would parse to infinity.
+    /// A float literal that would parse to infinity (fractional and/or
+    /// exponent form, `_` separators allowed).
     FloatOverflow { span: Span },
     /// An identifier spelled `mega` followed only by digits (`mega0`,
     /// `mega1`, `mega42`, …): reserved for future use by the megaprogramming
@@ -587,7 +672,7 @@ fn classify_error(source: &str, span: Span) -> LexError {
     }
     // The scan reached a closing quote without incident, so the failure
     // lies outside this literal; fall through to the shape rules below.
-    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+    if is_int_shape(text) {
         LexError::IntegerOverflow { span }
     } else if is_float_shape(text) {
         LexError::FloatOverflow { span }
@@ -674,15 +759,153 @@ pub fn unescape_str_lit(raw: &str) -> String {
     out
 }
 
+/// True when `text` is a full integer-literal shape (§2.4): a decimal run
+/// with `_` separators between digits, or a radix-prefixed run (`0x`
+/// hex, `0o` octal, `0b` binary). Used by [`classify_error`] to pin a
+/// failed callback to `IntegerOverflow` — the only way a well-shaped
+/// integer token can fail is an `i64` overflow.
+fn is_int_shape(text: &str) -> bool {
+    let (radix, digits) = if let Some(rest) = text.get(2..) {
+        match &text[..2] {
+            "0x" | "0X" => (16u32, rest),
+            "0o" | "0O" => (8, rest),
+            "0b" | "0B" => (2, rest),
+            _ => (10, text),
+        }
+    } else {
+        (10, text)
+    };
+    separated_digits(digits, radix)
+}
+
+/// True when `text` is a full float-literal shape (§2.4): a fractional
+/// part with optional `_` separators and/or an exponent (`e`/`E`, optional
+/// sign, digit field with separators). Used by [`classify_error`] to pin a
+/// failed callback to `FloatOverflow` — the only way a well-shaped float
+/// token can fail is an infinite value. Only reached after
+/// [`is_int_shape`] declined, so a bare digit run (which is both a valid
+/// decimal integer shape and the mantissa-only float form) is already
+/// reported as an integer overflow before this can see it.
 fn is_float_shape(text: &str) -> bool {
-    match text.split_once('.') {
+    let (mantissa, exponent) = match split_float_exponent(text) {
+        Some((m, e)) => (m, e),
+        None => (text, ""),
+    };
+    if !exponent.is_empty()
+        && !separated_digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent), 10)
+    {
+        return false;
+    }
+    // The mantissa is either `digits.digits` or bare digits (the
+    // exponent-only float form).
+    match mantissa.split_once('.') {
         Some((int_part, frac_part)) => {
             !int_part.is_empty()
                 && !frac_part.is_empty()
-                && int_part.bytes().all(|b| b.is_ascii_digit())
-                && frac_part.bytes().all(|b| b.is_ascii_digit())
+                && separated_digits(int_part, 10)
+                && separated_digits(frac_part, 10)
         }
-        None => false,
+        None => separated_digits(mantissa, 10),
+    }
+}
+
+/// Splits `text` at the `e`/`E` that starts a float exponent, returning
+/// `(mantissa, exponent)`. `None` when there is no exponent (the `e`
+/// boundary search must only fire at a real exponent: it requires digits
+/// or a sign-and-digits tail).
+fn split_float_exponent(text: &str) -> Option<(&str, &str)> {
+    let byte_index = text
+        .char_indices()
+        .skip(1) // an exponent cannot start the literal
+        .find(|(_, c)| matches!(c, 'e' | 'E'))
+        .map(|(index, _)| index)?;
+    let (mantissa, exponent) = (&text[..byte_index], &text[byte_index + 1..]);
+    let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
+        return None;
+    }
+    Some((mantissa, exponent))
+}
+
+/// True when `text` is a nonempty digit run in `radix` where every `_`
+/// sits strictly between two digits — the separator discipline of §2.4.
+fn separated_digits(text: &str, radix: u32) -> bool {
+    let mut previous_was_digit = false;
+    let mut any_digit = false;
+    for c in text.chars() {
+        match c {
+            '_' if previous_was_digit => previous_was_digit = false,
+            _ => {
+                if !c.is_digit(radix) {
+                    return false;
+                }
+                previous_was_digit = true;
+                any_digit = true;
+            }
+        }
+    }
+    // A trailing `_` (separator not followed by a digit) is not a number.
+    any_digit && previous_was_digit
+}
+
+/// Recognizes the dead fractional-float extent: separated decimal digits
+/// followed by exactly one `.` (the dot the float pattern consumed while
+/// waiting for a fraction digit that never came — `1.length`, `1.`,
+/// `1..2`). Returns the integer value of the digit run so the driver can
+/// split the region into `IntLit` + `Dot` without a diagnostic. Radix
+/// prefixes never reach here: `0x1.` keeps its hex leaf and loses only at
+/// the dot, where the integer leaf still covers the extent.
+fn split_member_access_digits(text: &str) -> Option<i64> {
+    let digits = text.strip_suffix('.')?;
+    if digits.is_empty() || !separated_digits(digits, 10) {
+        return None;
+    }
+    parse_int_slice(digits)
+}
+
+/// Recognizes the dead incomplete-exponent extent: a valid numeric prefix
+/// followed by an exponent opener that never got its digits (`1.5e`,
+/// `1.5E+`). Returns the byte length of the valid prefix so the driver can
+/// emit it as one token and let the `e`/`E` (plus any sign) lex as an
+/// identifier and operator. `1e` alone does NOT reach here — the digit-led
+/// identifier leaf covers that extent, so it stays one name.
+fn split_incomplete_exponent(text: &str) -> Option<usize> {
+    let (head, tail) = text.split_once(['e', 'E'])?;
+    // The tail must be exactly the optional sign (or nothing): any digit
+    // after the opener means the float pattern itself accepted or a real
+    // error lies elsewhere.
+    let tail = tail.strip_prefix(['+', '-']).unwrap_or(tail);
+    if !tail.is_empty() {
+        return None;
+    }
+    if head.contains('.') {
+        let (int_part, frac_part) = head.split_once('.')?;
+        if separated_digits(int_part, 10)
+            && separated_digits(frac_part, 10)
+            && parse_f64_prefix(head).is_some()
+        {
+            return Some(head.len());
+        }
+        None
+    } else if separated_digits(head, 10) && parse_int_slice(head).is_some() {
+        Some(head.len())
+    } else {
+        None
+    }
+}
+
+/// Parses a cleaned numeric prefix for [`split_incomplete_exponent`].
+fn parse_f64_prefix(text: &str) -> Option<f64> {
+    text.parse::<f64>().ok().filter(|value| value.is_finite())
+}
+
+/// The token kind for a numeric prefix: float when the text has a dot
+/// (fractional form), integer otherwise.
+fn numeric_prefix_token(prefix: &str) -> Token<'_> {
+    if prefix.contains('.') {
+        Token::FloatLit(prefix.parse::<f64>().unwrap_or(f64::NAN))
+    } else {
+        Token::IntLit(parse_int_slice(prefix).unwrap_or(0))
     }
 }
 
@@ -708,6 +931,49 @@ pub fn lex_with_errors(source: &str) -> (Vec<SpannedToken<'_>>, Vec<LexError>) {
             Ok(Token::BlockComment) => {}
             Ok(token) => tokens.push(SpannedToken { token, span }),
             Err(()) => {
+                // The fractional-float pattern walks through `digits.` while
+                // waiting for a fraction digit; when none follows (`1.length`,
+                // `1.`, `1..2`), the pattern dies over the `digits.` extent.
+                // No identifier leaf can cover that extent (identifiers cannot
+                // contain the dot), so logos reports it as one error region —
+                // even though the integer leaf one character earlier is the
+                // match the user meant. Split the extent back into the integer
+                // literal and the dot, and resume lexing right after it.
+                if let Some(value) = split_member_access_digits(&source[span.start..span.end]) {
+                    tokens.push(SpannedToken {
+                        token: Token::IntLit(value),
+                        span: Span::new(span.start, span.end - 1),
+                    });
+                    tokens.push(SpannedToken {
+                        token: Token::Dot,
+                        span: Span::new(span.end - 1, span.end),
+                    });
+                    continue;
+                }
+                // The same walk happens through the exponent opener: `1.5e`
+                // (optionally `1.5e+`) dies waiting for exponent digits. No
+                // leaf covers the extent, so split off the float the user
+                // wrote and let the `e` (and any sign) lex as an identifier
+                // and operator, exactly the graceful degradation of the
+                // decimal-only lexer.
+                if let Some(prefix_len) = split_incomplete_exponent(&source[span.start..span.end]) {
+                    let prefix = &source[span.start..span.start + prefix_len];
+                    tokens.push(SpannedToken {
+                        token: numeric_prefix_token(prefix),
+                        span: Span::new(span.start, span.start + prefix_len),
+                    });
+                    tokens.push(SpannedToken {
+                        token: Token::Ident(
+                            if source.as_bytes()[span.start + prefix_len] == b'e' {
+                                "e"
+                            } else {
+                                "E"
+                            },
+                        ),
+                        span: Span::new(span.start + prefix_len, span.start + prefix_len + 1),
+                    });
+                    continue;
+                }
                 let error = classify_error(source, span);
                 let is_unterminated_comment =
                     matches!(error, LexError::UnterminatedBlockComment { .. });
@@ -1581,5 +1847,309 @@ mod digit_start_ident_tests {
                 .iter()
                 .any(|spanned| matches!(spanned.token, Token::Ident("0mega")))
         );
+    }
+}
+
+#[cfg(test)]
+mod numeric_literal_tests {
+    use super::Token;
+    use crate::lexer::{LexError, lex, lex_with_errors};
+    use cme_core::Span;
+
+    // ------------------------------------------------------------------
+    // Numeric literals (§2): radix prefixes, digit separators, exponents,
+    // and the collision rules against the digit-led identifier shape.
+    // ------------------------------------------------------------------
+
+    fn lex_ints(source: &str) -> Vec<i64> {
+        lex(source)
+            .expect("source should lex")
+            .into_iter()
+            .filter_map(|spanned| match spanned.token {
+                Token::IntLit(value) => Some(value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn lex_ids(source: &str) -> Vec<&str> {
+        lex(source)
+            .expect("source should lex")
+            .into_iter()
+            .filter_map(|spanned| match spanned.token {
+                Token::Ident(name) => Some(name),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hex_integers_lex_in_both_prefix_cases() {
+        assert_eq!(
+            lex_ints("0x0 0xff 0XFF 0xAbCdEf 0x7F"),
+            vec![0, 255, 255, 11259375, 127]
+        );
+    }
+
+    #[test]
+    fn octal_and_binary_integers_lex_in_both_prefix_cases() {
+        assert_eq!(lex_ints("0o0 0o7 0O777"), vec![0, 7, 511]);
+        assert_eq!(lex_ints("0b0 0b1 0B1010"), vec![0, 1, 10]);
+    }
+
+    #[test]
+    fn i64_extremes_in_every_radix() {
+        assert_eq!(lex_ints("9223372036854775807"), vec![i64::MAX]);
+        assert_eq!(lex_ints("0x7FFFFFFFFFFFFFFF"), vec![i64::MAX]);
+        assert_eq!(lex_ints("0o777777777777777777777"), vec![i64::MAX]);
+        assert_eq!(
+            lex_ints("0b0111111111111111111111111111111111111111111111111111111111111111"),
+            vec![i64::MAX]
+        );
+    }
+
+    #[test]
+    fn separators_group_decimal_digits() {
+        assert_eq!(
+            lex_ints("1_000 1_000_000 0_1 12_345_678"),
+            vec![1000, 1000000, 1, 12345678]
+        );
+    }
+
+    #[test]
+    fn separators_group_radix_digits() {
+        assert_eq!(
+            lex_ints("0xFF_FF 0x1_F 0o7_7 0b1_0_1"),
+            vec![65535, 31, 63, 5]
+        );
+    }
+
+    #[test]
+    fn separator_discipline_falls_back_to_identifiers() {
+        // A separator must sit strictly between two digits; anything else
+        // degrades to the longest-match identifier, never a partial number.
+        assert_eq!(
+            lex_ids("1__0 1_ _1 1_000_"),
+            vec!["1__0", "1_", "_1", "1_000_"]
+        );
+    }
+
+    #[test]
+    fn invalid_radix_digits_fall_back_to_identifiers() {
+        assert_eq!(
+            lex_ids("0b12 0b2 0o8 0o_7 0b_1 0x_1"),
+            vec!["0b12", "0b2", "0o8", "0o_7", "0b_1", "0x_1"]
+        );
+    }
+
+    #[test]
+    fn a_broken_radix_word_never_splits_into_two_tokens() {
+        // The whole digit-led word scans as ONE identifier: `0x1G` is not
+        // the literal `0x1` followed by a name.
+        assert_eq!(
+            lex_ids("0x1G 0xFFg 0b101z"),
+            vec!["0x1G", "0xFFg", "0b101z"]
+        );
+    }
+
+    #[test]
+    fn a_bare_prefix_stays_an_identifier() {
+        assert_eq!(lex_ids("0x 0b 0o 0X"), vec!["0x", "0b", "0o", "0X"]);
+    }
+
+    #[test]
+    fn whitepaper_digit_led_idents_survive_the_numeric_rules() {
+        assert_eq!(
+            lex_ids("3Vector 2D 2_D 123abc 0mega"),
+            vec!["3Vector", "2D", "2_D", "123abc", "0mega"]
+        );
+    }
+
+    #[test]
+    fn floats_carry_exponents() {
+        assert_eq!(lex_ints("1e10"), vec![]);
+        let floats: Vec<f64> = lex("1e10 1E10 1e+10 1e-10 1.5e3 1.5E-3 2.5e0")
+            .expect("floats lex")
+            .into_iter()
+            .filter_map(|spanned| match spanned.token {
+                Token::FloatLit(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(floats, vec![1e10, 1e10, 1e10, 1e-10, 1500.0, 0.0015, 2.5]);
+    }
+
+    #[test]
+    fn floats_take_separators() {
+        let floats: Vec<f64> = lex("1_000.5 1.500_001e1_0")
+            .expect("floats lex")
+            .into_iter()
+            .filter_map(|spanned| match spanned.token {
+                Token::FloatLit(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(floats, vec![1000.5, 15000010000.0]);
+    }
+
+    #[test]
+    fn an_incomplete_exponent_degrades_gracefully() {
+        // `1.5e` is the float `1.5` followed by the identifier `e`; `1e`
+        // stays one digit-led identifier; `1e+` is the identifier `1e`
+        // plus a Plus token.
+        assert_eq!(
+            lex("1.5e")
+                .expect("lexes")
+                .iter()
+                .map(|t| t.token)
+                .collect::<Vec<_>>(),
+            vec![Token::FloatLit(1.5), Token::Ident("e"), Token::Eof]
+        );
+        assert_eq!(lex_ids("1e 1E"), vec!["1e", "1E"]);
+    }
+
+    #[test]
+    fn a_digit_dot_word_is_member_access_not_a_float() {
+        // `1.length` must remain IntLit + Dot + Ident (field access on a
+        // literal): the dead float extent is split by the driver, never
+        // reported as an error.
+        let tokens = lex("1.length").expect("member access lexes");
+        assert_eq!(
+            tokens.into_iter().map(|t| t.token).collect::<Vec<_>>(),
+            vec![
+                Token::IntLit(1),
+                Token::Dot,
+                Token::Ident("length"),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn radix_literal_dot_is_still_member_access() {
+        let tokens = lex("0xFF.5").expect("lexes");
+        assert_eq!(
+            tokens.into_iter().map(|t| t.token).collect::<Vec<_>>(),
+            vec![Token::IntLit(255), Token::Dot, Token::IntLit(5), Token::Eof]
+        );
+        let tokens = lex("1_000.5").expect("lexes");
+        assert_eq!(
+            tokens.into_iter().map(|t| t.token).collect::<Vec<_>>(),
+            vec![Token::FloatLit(1000.5), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn a_dangling_digit_dot_yields_int_then_dot() {
+        assert_eq!(
+            lex("return 1.\n")
+                .expect("lexes")
+                .into_iter()
+                .map(|t| t.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::KwReturn,
+                Token::IntLit(1),
+                Token::Dot,
+                Token::Newline,
+                Token::Eof
+            ]
+        );
+        assert_eq!(
+            lex("1..2")
+                .expect("lexes")
+                .into_iter()
+                .map(|t| t.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::IntLit(1),
+                Token::Dot,
+                Token::Dot,
+                Token::IntLit(2),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn hex_overflow_is_a_compile_time_error() {
+        let (_, errors) = lex_with_errors("0x8000000000000000");
+        assert_eq!(
+            errors,
+            vec![LexError::IntegerOverflow {
+                span: Span::new(0, 18)
+            }]
+        );
+        let (_, errors) = lex_with_errors("0xFFFFFFFFFFFFFFFF");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], LexError::IntegerOverflow { .. }));
+        let (_, errors) =
+            lex_with_errors("0b1000000000000000000000000000000000000000000000000000000000000000");
+        assert!(matches!(errors[0], LexError::IntegerOverflow { .. }));
+    }
+
+    #[test]
+    fn decimal_and_separator_overflow_is_a_compile_time_error() {
+        let (_, errors) = lex_with_errors("99999999999999999999");
+        assert!(matches!(errors[0], LexError::IntegerOverflow { .. }));
+        let (_, errors) = lex_with_errors("9_999_999_999_999_999_999_9");
+        assert!(matches!(errors[0], LexError::IntegerOverflow { .. }));
+    }
+
+    #[test]
+    fn float_overflow_in_exponent_form_is_a_compile_time_error() {
+        let (_, errors) = lex_with_errors("1e999");
+        assert_eq!(
+            errors,
+            vec![LexError::FloatOverflow {
+                span: Span::new(0, 5)
+            }]
+        );
+        let (_, errors) = lex_with_errors("1.5e308x");
+        assert!(
+            errors.is_empty(),
+            "`1.5e308x` is the identifier `1.5e308x`... no float dies here: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn literal_spans_cover_the_whole_spelling() {
+        let tokens = lex("0xFF_FF 1_000 1.5e-3").expect("lexes");
+        let spans: Vec<(usize, usize)> = tokens
+            .into_iter()
+            .map(|t| (t.span.start, t.span.end))
+            .collect();
+        assert_eq!(spans[0], (0, 7));
+        assert_eq!(spans[1], (8, 13));
+        assert_eq!(spans[2], (14, 20));
+    }
+
+    #[test]
+    fn numerics_win_length_ties_but_never_shorter_matches() {
+        // Same-length ties resolve to the numeric rule (`0x1F`, `1_000`,
+        // `1e10`); a longer identifier always wins (`0xFFg`).
+        assert_eq!(lex_ints("0x1F 1_000 0b1_0 0o777"), vec![31, 1000, 2, 511]);
+        assert_eq!(
+            lex("1e10")
+                .expect("lexes")
+                .iter()
+                .filter(|t| matches!(t.token, Token::FloatLit(_)))
+                .count(),
+            1,
+            "`1e10` is a float"
+        );
+        assert_eq!(lex_ids("0xFFg 123abc"), vec!["0xFFg", "123abc"]);
+    }
+
+    #[test]
+    fn leading_zero_decimals_keep_their_value() {
+        assert_eq!(lex_ints("0 00 0123 007"), vec![0, 0, 123, 7]);
+    }
+
+    #[test]
+    fn integer_describe_shows_the_value_not_the_spelling() {
+        let described = Token::IntLit(255).describe();
+        assert!(described.contains("255"), "{described}");
+        assert!(!described.contains("0xFF"), "{described}");
     }
 }

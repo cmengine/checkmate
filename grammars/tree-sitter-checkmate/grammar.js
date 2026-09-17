@@ -127,9 +127,30 @@ module.exports = grammar({
 
     char_literal: ($) => token(/'(?:\\.|[^\\'])'/),
 
-    int_literal: ($) => token(/\d+/),
+    // Integer literals (§2.4): decimal with `_` separators between
+    // digits, or a radix prefix — hex `0x`/`0X`, octal `0o`/`0O`, binary
+    // `0b`/`0B` — with optional separators inside the digit field. A
+    // digit-led word that does not match a full numeric grammar stays an
+    // identifier (the rule below), so `0xFFg` and `0b12` remain names.
+    int_literal: ($) =>
+      token(
+        choice(
+          /0[xX][0-9a-fA-F](_?[0-9a-fA-F])*/,
+          /0[oO][0-7](_?[0-7])*/,
+          /0[bB][01](_?[01])*/,
+          /[0-9](_[0-9]|[0-9])*/,
+        ),
+      ),
 
-    float_literal: ($) => token(/\d+\.\d+/),
+    // Float literals (§2.4): a fractional part and/or an exponent
+    // (`e`/`E`, optional sign), `_` separators allowed inside digit runs.
+    float_literal: ($) =>
+      token(
+        choice(
+          /[0-9](_[0-9]|[0-9])*\.[0-9](_[0-9]|[0-9])*([eE][+-]?[0-9](_[0-9]|[0-9])*)?/,
+          /[0-9](_[0-9]|[0-9])*[eE][+-]?[0-9](_[0-9]|[0-9])*/,
+        ),
+      ),
 
     bool_literal: ($) => choice('true', 'false'),
 
@@ -139,7 +160,10 @@ module.exports = grammar({
 
     // A letter- or underscore-led word, or a digit-led word carrying at
     // least one non-digit character (`3Vector`, `2D`): a pure digit run is
-    // an integer literal, never an identifier.
+    // an integer literal, never an identifier, and the numeric literal
+    // rules above claim their shapes first (`0x1F`, `1_000`, `1e10` are
+    // literals). Every other digit-led word stays a name by longest match:
+    // `0xFFg`, `0b12`, `123abc`.
     identifier: ($) => /([a-zA-Z_]|[0-9]+[a-zA-Z_])[a-zA-Z0-9_]*/,
 
     dotted_path: ($) =>

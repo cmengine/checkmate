@@ -39,12 +39,15 @@ apply to the Checkmate source itself.
 ## Identifiers
 
 An identifier is a letter- or underscore-led word (`[A-Za-z_][A-Za-z0-9_]*`),
-or a **digit-led** word that carries at least one non-digit character —
-`3Vector`, `2D`, and `2_D` are all legal identifiers, while a pure digit run
-(`123`) is an integer literal and never a name. Longest match decides: the
-moment a digit run runs into a letter or underscore, the whole word scans as
-one identifier (`123abc` is the identifier `123abc`, not the literal `123`
-followed by a name). Case is significant and carries
+or a **digit-led** word that is not a numeric literal — the numeric grammar
+claims a digit-led word only when the whole word matches, so `3Vector`,
+`2D`, and `2_D` are all legal identifiers, while a pure digit run (`123`)
+is an integer literal and never a name. Longest match decides: the moment a
+digit run runs into a letter or underscore that keeps the word from being a
+number, the whole word scans as one identifier (`123abc` is the identifier
+`123abc`, not the literal `123` followed by a name; `0xFFg` is the
+identifier `0xFFg`, not the literal `0xFF` followed by a name). Case is
+significant and carries
 meaning — see [Boundary Capitalization](#boundary-capitalization) below.
 
 Keywords cannot be identifiers. The reserved set includes the declaration
@@ -83,19 +86,49 @@ Details in [Types](../language/types.md).
 ```checkmate
 int decimal = 42
 int negative = -17          // unary minus applied to a literal
+int hex = 0xFF              // 255 — hexadecimal (0x/0X)
+int octal = 0o777           // 511 — octal (0o/0O)
+int binary = 0b1010         // 10 — binary (0b/0B)
+int grouped = 1_000_000     // underscores separate digits
+int masked = 0xFF_FF        // separators work in every radix
+
 float pi = 3.14159
 float tiny = 0.5
-float sci = 6.02e23
+float sci = 6.02e23         // exponent form: `e`/`E`, optional sign
+float fast = 1e10           // integer-shaped with an exponent is a float
+float grouped = 1_000.5
 ```
 
-- Integer literals are decimal.
-- Float literals require a fractional part (`0.5`, not `5.`) and may carry
-  an exponent.
+- Integer literals are decimal by default; the `0x`/`0X` (hex), `0o`/`0O`
+  (octal), and `0b`/`0B` (binary) prefixes select the radix. Radix-prefixed
+  literals are always integers — there is no hex float form.
+- An underscore `_` may separate digits of any form (`1_000_000`,
+  `0xFF_FF`, `0b1_0`) and must sit strictly between two digits:
+  `1_000` is one thousand, while `1__0`, `1_`, and `0x_1F` are not
+  numbers.
+- A digit-led word is a numeric literal only when the **whole word**
+  matches a numeric grammar. Anything else scans as an identifier by
+  longest match — `123abc`, `0xFFg`, `0b12`, and `1e` are all names. This
+  is why `2_D` stays a legal identifier while `1_000` is a number: the
+  separator rule claims words where every `_` sits between two digits,
+  and `2_D`'s underscore is followed by a letter.
+- Float literals require a fractional part (`0.5`, not `5.`) and/or an
+  exponent; `1.5e3` is one token, and an incomplete exponent (`1.5e`)
+  degrades gracefully to the float `1.5` followed by the identifier `e`.
 - Numeric conversions between `int` and `float` are strictly explicit in
   intent — there is currently no cast operator, and **implicit coercions
   are disallowed** (see [Types](../language/types.md)).
-- Integer arithmetic is overflow-checked at runtime: an overflowing
-  operation terminates the invocation with a clean error.
+- Literals are checked at compile time: an integer that does not fit in
+  `i64` (in any radix) or a float that would render infinite is a lex
+  error, not a runtime surprise. Runtime integer arithmetic is still
+  overflow-checked — an overflowing operation terminates the invocation
+  with a clean error.
+- All spellings denote the same value: `0xFF == 255`, `0b1010 == 0o12`,
+  and string concatenation renders every integer in decimal
+  (`"mask: " + 0xFF` is `"mask: 255"`).
+- A literal in `byte` position crystallizes as a `byte` after a range
+  check — `byte b = 0xFF` is fine, `byte b = 0x100` is the same compile
+  error as `byte b = 256`.
 
 ## String literals
 

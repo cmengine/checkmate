@@ -68,11 +68,18 @@
                                         "name": "constant.numeric.version.checkmate"
                                 },
                                 {
-                                        "match": "\\b\\d+\\.\\d+\\b",
+                                        "comment": "Hex / octal / binary integers with `_` separators",
+                                        "match": "\\b0[xX][0-9a-fA-F](_?[0-9a-fA-F])*\\b|\\b0[oO][0-7](_?[0-7])*\\b|\\b0[bB][01](_?[01])*\\b",
+                                        "name": "constant.numeric.integer.checkmate"
+                                },
+                                {
+                                        "comment": "Floats: fractional part and/or exponent, `_` separators",
+                                        "match": "\\b\\d[0-9_]*\\.[0-9](_[0-9])*([eE][+-]?\\d(_[0-9])*)?\\b|\\b\\d[0-9_]*[eE][+-]?\\d(_[0-9])*\\b",
                                         "name": "constant.numeric.float.checkmate"
                                 },
                                 {
-                                        "match": "\\b\\d+\\b",
+                                        "comment": "Decimal integers with `_` separators",
+                                        "match": "\\b\\d(_[0-9])*\\b",
                                         "name": "constant.numeric.integer.checkmate"
                                 }
                         ]

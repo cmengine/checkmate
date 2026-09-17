@@ -44,7 +44,9 @@ The host contract is governed by versioned `.cm` schema files acting as the sing
 
 Checkmate’s syntax prioritizes visual clarity, regular grammatical structure, and predictability for human authors and large language models (LLMs).
 
-**Identifiers** are letter- or underscore-led words (`[A-Za-z_][A-Za-z0-9_]*`), or digit-led words that contain at least one non-digit character: `3Vector`, `2D`, and `2_D` are all legal identifiers, while a pure digit run is an integer literal, never a name. The digit-led shape scans by longest match — `123abc` is the single identifier `123abc`.
+**Numeric literals** are decimal by default, or carry a radix prefix: hexadecimal `0x`/`0X`, octal `0o`/`0O`, and binary `0b`/`0B` — `0xFF` is 255, `0b1010` is 10, `0o777` is 511. An underscore `_` may separate digits of any form (`1_000_000`, `0xFF_FF`, `0b1_0`) and must sit strictly between two digits. Float literals have a fractional part (`1.5`, `0.5`) and/or an exponent (`1e10`, `2.5e-3`, `1.5E+8`); an integer-shaped literal that carries an exponent is a float. Radix-prefixed literals are always integers — there is no hex float form. A literal whose value does not fit its type (`int` overflow, a float that renders infinite) is a compile-time lex error.
+
+**Identifiers** are letter- or underscore-led words (`[A-Za-z_][A-Za-z0-9_]*`), or digit-led words: a digit-led word is a numeric literal when the whole word matches a numeric grammar, and an identifier otherwise. `3Vector`, `2D`, `2_D`, `123abc`, `0xFFg`, and `0b12` are all legal identifiers, while a pure digit run is an integer literal, never a name. The digit-led shape scans by longest match — the identifier wins whenever the whole word is not a valid literal.
 
 ### 2.1. Files and Organization
 
@@ -88,7 +90,7 @@ Numeric conversions are strictly explicit; implicit coercions between `int` and 
 
 The `byte` type is the `u8` of the language. It follows two extra rules:
 
-- **Literal crystallization** — an integer literal in `byte` position crystallizes as a `byte` after a compile-time range check (`byte b = 200` is fine, `byte b = 300` is a compile error). A non-literal `int` never converts.
+- **Literal crystallization** — an integer literal in `byte` position crystallizes as a `byte` after a compile-time range check (`byte b = 200` is fine, `byte b = 300` is a compile error). Integer literals may be written in any of the §2 forms, so `byte b = 0xFF` is fine and `byte b = 0x100` is the same out-of-range error as `byte b = 256`. A non-literal `int` never converts.
 - **Lossless widening** — a `byte` value widens to `int` wherever an int is expected (declarations, parameters, returns, fields, and mixed arithmetic such as `b + i`, which yields an `int`). `byte op byte` stays `byte` and is overflow-checked. Equality remains strict: `byte == int` is a type error.
 
 ### 2.5. Boundary Capitalization

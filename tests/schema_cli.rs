@@ -36,7 +36,9 @@ impl Drop for TempFile {
     }
 }
 
-/// A schema fixture exercising the shapes codegen-c must render.
+/// A schema fixture exercising the shapes codegen-c must render. `since`
+/// versions the capability/interface BLOCK (member-level `since` was
+/// removed — the parser reports it with a migration diagnostic).
 const SCHEMA_FIXTURE: &str = "schema det 1.0.0\n\
 struct Handle {\n\
 int id\n\
@@ -49,11 +51,11 @@ enum Kind {\n\
 Off\n\
 Loaded(int amount)\n\
 }\n\
-capability cap {\n\
-since 1.0.0 Item Make(str label)\n\
+since 1.0.0 capability cap {\n\
+Item Make(str label)\n\
 }\n\
-interface iface {\n\
-since 1.0.0 bool Ready()\n\
+since 1.0.0 interface iface {\n\
+bool Ready()\n\
 }\n";
 
 fn cme(args: &[&str]) -> (i32, String, String) {

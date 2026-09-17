@@ -19,6 +19,10 @@ cme-compiler = { path = "../cme-compiler", version = "0.3.0" }
 cme-core = { path = "../cme-core", version = "0.3.0" }
 
 # Test-only: the generated bindings reference the host API, so the
-# integration tests compile and run them end to end.
+# integration tests compile and run them end to end. `cme` is the facade
+# the setup macro's generated glue references by default (::cme::api);
+# the dev-dependency cycle (facade → this proc macro) is the same shape
+# cme-api pins from a consumer's view.
 [dev-dependencies]
 cme-api = { path = "../cme-api", version = "0.3.0" }
+cme = { path = "../..", version = "0.3.0", features = ["api", "schema-macro"] }

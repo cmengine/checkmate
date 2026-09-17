@@ -1,0 +1,7 @@
+name = "demo_mod"
+version = "1.0.0"
+checkmate_version = "0.3.0"
+
+[schemas]
+demo = "1.2.0"
+extra = "1.0.0"

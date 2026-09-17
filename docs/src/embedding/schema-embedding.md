@@ -261,7 +261,88 @@ schema file refreshes all of the bindings.
 > it only needs to change when the schema files change. Keep the doc
 > attribute on its own line directly above the macro invocation, and
 > keep the `schemas/` directory layout stable so the file list (and
-> therefore the hash) is deterministic.
+> therefore the hash) is deterministic. rustdoc never renders a doc
+> attribute placed on a macro invocation and emits an
+> `unused_doc_comments` note saying so — that is expected (the
+> attribute's only job is to perturb the token stream); the note can
+> only be silenced from an enclosing scope, not by a sibling attribute,
+> so add `#![allow(unused_doc_comments)]` at the top of the file if your
+> build treats warnings as errors. The same recipe applies unchanged to
+> the [`cme_schema_setup!`](#the-one-macro-quick-start-cme_schema_setup)
+> invocation.
+
+## The one-macro quick start: `cme_schema_setup!`
+
+The manual flow above — generate bindings, register the schema, wire
+providers, load the program, create a context under limits, construct
+proxies — is the right surface for advanced hosts because every step is
+a decision you can steer. For a first embedding it is a lot of ceremony.
+`cme_schema_setup!` does all of it in one invocation, with the manual
+flow left untouched underneath:
+
+```rust
+pub mod bindings {
+    cme::cme_schema_setup! {
+        schema = "schemas/origout.cm",
+        program = mod "checkmate",
+        proxy = OrigoutTestProxy,
+    }
+}
+
+fn main() {
+    let host = bindings::Host::new().expect("checkmate host setup failed");
+    host.run(|run| {
+        println!("{}", run.origout_test.cow().unwrap());
+        // `run` derefs to the context, so plain calls work too:
+        let result = run.invoke("main", &[]).unwrap();
+        println!("{result}");
+    });
+}
+```
+
+### The settings
+
+| Setting | Value | Notes |
+| --- | --- | --- |
+| `schema` | `"schemas/app.cm"` | Repeatable — one bindings module is generated per namespace, and all are registered by `Host::new`. |
+| `program` | `mod "checkmate"`, `file "scripts/hud.cm"`, or `source "int main() { … }"` | Required. Which `Engine::load_*` call the setup performs; relative paths resolve at RUNTIME against the process working directory. |
+| `crate` | `::cme::api` | Optional; the crate the generated code references. Defaults to the facade's `api` re-export. |
+| `limits` | `{ fuel: 1_000_000, deadline_ms: 50, max_call_depth: 64 }` | Optional; any subset of the keys, `none` allowed for `fuel`/`deadline_ms`. Omitted keys keep the API defaults (§5.5). |
+| `proxy` | `OrigoutTestProxy` or `namespace.Proxy as field` | Repeatable. Unqualified names must be unique across the schemas. The session field is the alias, or the type's snake_case without its `Proxy` suffix. |
+| `provider` | `window => MyService` or `namespace.capability => MyService` | Repeatable. The expression is wrapped in `Arc::new(...)` and handed to the generated registration bridge — pass the service itself, not an `Arc`. |
+
+### What the expansion defines
+
+The macro emits, at the invocation site:
+
+- one **bindings module per schema namespace** — byte-for-byte the
+  `cme_schema_bindings!` output (traits, proxies, boundary types,
+  descriptor), so everything on
+  [the manual page](#rust-hosts-cme_schema_bindings) still applies;
+- **`Host`** — owns the engine, the compiled program, and the limits.
+  `Host::new()` registers every schema, wires every `provider`, and
+  loads the `program` through the same schema-gated pipeline the CLI
+  uses, returning `Result<Host, HostError>`; `engine()`, `program()`,
+  `limits()`, and `context()` expose the pieces for advanced use;
+- **`HostError`** — the setup's failure modes (`Schema`, `Provider`,
+  `Compile`, `Io`), each rendering the underlying API error;
+- **`Session`** — one execution pass: the `context` field (plus every
+  requested proxy as a named field). `Session` derefs to the context.
+
+`host.run(|session| …)` builds the context, constructs every proxy, and
+hands the session to your closure; a proxy whose interface the program
+never implemented panics with the rendered error. `host.try_run(…)`
+returns that failure as `Err(ExecutionError)` (kind `UnknownEntry`)
+instead — the same host-side §10.4 guard the manual flow gives you.
+
+### Generated bindings and the setup macro: pick one
+
+`cme_schema_setup!` already generates the bindings for every `schema`
+you list. Invoking `cme_schema_bindings!` for the same file in the same
+module would define the namespace module twice — keep one macro per
+schema per module, and note that the
+[`SCHEMAS_HASH` recipe](#when-your-ide-caches-stale-bindings-schemas_hash)
+applies to `cme_schema_setup!` invocations identically.
 
 ## C hosts: `cme codegen-c`
 

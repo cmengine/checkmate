@@ -1,0 +1,9 @@
+// A second namespace: exercises multiple `schema =` settings and proxy
+// resolution across namespaces (the setup macro generates one module per
+// namespace and requires unqualified proxy names to be unique).
+
+schema extra 1.0.0
+
+interface ping {
+    since 1.0.0 int Ping()
+}

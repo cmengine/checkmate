@@ -135,6 +135,7 @@ dependencies = [
 name = "cme-schema-macro"
 version = "0.3.0"
 dependencies = [
+ "cme",
  "cme-api",
  "cme-compiler",
  "cme-core",

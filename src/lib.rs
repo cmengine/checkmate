@@ -14,9 +14,11 @@ pub use cme_compiler as compiler;
 
 // §9.6: the procedural macro that turns a .cm schema file into
 // compile-time-verified host bindings (capability traits, interface
-// proxies, and the runtime schema descriptor).
+// proxies, and the runtime schema descriptor) — plus its one-call
+// quick-start layer, which emits the same bindings and the
+// engine → program → context → proxy glue in a single invocation.
 #[cfg(feature = "schema-macro")]
-pub use cme_schema_macro::cme_schema_bindings;
+pub use cme_schema_macro::{cme_schema_bindings, cme_schema_setup};
 
 #[cfg(feature = "core")]
 pub use cme_core as lang;

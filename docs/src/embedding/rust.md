@@ -60,6 +60,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 That is the whole loop. Every step after this section is detail.
 
+> Embedding **with a schema contract** and want all of it — bindings,
+> registration, program load, context, proxies — from one invocation?
+> The [`cme_schema_setup!`](schema-embedding.md#the-one-macro-quick-start-cme_schema_setup)
+> quick-start macro collapses the flow; this page remains the
+> advanced-user surface it automates.
+
 ## The `Engine`: compiling programs
 
 `Engine` is the host's handle. It starts empty — no schemas, no

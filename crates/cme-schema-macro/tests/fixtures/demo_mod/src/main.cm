@@ -1,0 +1,18 @@
+import demo.speaker
+
+impl demo.reporter {
+    int Report(int value) {
+        return value * 2
+    }
+}
+
+impl extra.ping {
+    int Ping() {
+        return 9
+    }
+}
+
+int main() {
+    demo.speaker.Shout("hello from the mod")
+    return 7
+}

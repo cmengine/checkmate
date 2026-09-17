@@ -143,16 +143,51 @@ fn expect_punct(
     }
 }
 
-/// Strips the quotes a string literal carries, handling the `\\` escapes
-/// the preprocessor produces for paths.
-fn unquote(literal: &str) -> Option<String> {
-    let mut text = literal;
-    for prefix in ["r\"", "br\"", "b\""] {
-        if let Some(rest) = literal.strip_prefix(prefix) {
-            text = rest;
-            break;
+/// Strips the quotes a string literal carries. Handles the whole literal
+/// surface the invocation grammar accepts: plain `"…"` (with the escapes
+/// Rust processes), byte strings, and raw strings `r"…"`, `r#"…"#`,
+/// `br#"…"#` (taken verbatim, no unescaping).
+pub(crate) fn unquote(literal: &str) -> Option<String> {
+    // Raw forms first: an optional `b`, then `r`, then any number of `#`.
+    let byte_stripped = literal.strip_prefix('b').unwrap_or(literal);
+    if let Some(rest) = byte_stripped.strip_prefix('r') {
+        let hashes = rest.chars().take_while(|&c| c == '#').count();
+        let after_hashes = &rest[hashes..];
+        let inner = after_hashes.strip_prefix('"')?;
+        let closing = format!("\"{}", "#".repeat(hashes));
+        return inner.strip_suffix(&closing).map(str::to_string);
+    }
+    let after_open = byte_stripped.strip_prefix('"')?;
+    let inner = after_open.strip_suffix('"')?;
+    Some(unescape(inner))
+}
+
+/// Processes the escape sequences a plain Rust string literal carries —
+/// the ones the invocation grammar has a reason to accept. Unknown
+/// escapes keep the backslash so the defect surfaces downstream instead
+/// of silently disappearing.
+fn unescape(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some('\'') => out.push('\''),
+            Some('"') => out.push('"'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
         }
     }
-    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-    Some(inner.replace("\\\"", "\"").replace("\\\\", "\\"))
+    out
 }

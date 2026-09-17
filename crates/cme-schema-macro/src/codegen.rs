@@ -188,23 +188,7 @@ impl<'s> Generator<'s> {
     /// `LoadTexture` → `load_texture`, `DrawHUD` → `draw_hud`,
     /// `authHeader` → `auth_header`.
     fn snake(name: &str) -> String {
-        let chars: Vec<char> = name.chars().collect();
-        let mut out = String::new();
-        for (index, ch) in chars.iter().enumerate() {
-            if ch.is_ascii_uppercase() {
-                let previous_upper = index > 0 && chars[index - 1].is_ascii_uppercase();
-                let next_lower = index + 1 < chars.len() && chars[index + 1].is_ascii_lowercase();
-                if (index > 0 && !previous_upper || (previous_upper && next_lower))
-                    && !out.ends_with('_')
-                {
-                    out.push('_');
-                }
-                out.push(ch.to_ascii_lowercase());
-            } else {
-                out.push(*ch);
-            }
-        }
-        out
+        snake_case(name)
     }
 
     /// A snake_case identifier with keyword escaping — usable for members,
@@ -220,19 +204,7 @@ impl<'s> Generator<'s> {
 
     /// `engine` + `graphics` → `EngineGraphics`.
     fn pascal(name: &str) -> String {
-        let mut out = String::new();
-        let mut upper_next = true;
-        for ch in name.chars() {
-            if ch == '_' || ch == '.' {
-                upper_next = true;
-            } else if upper_next {
-                out.push(ch.to_ascii_uppercase());
-                upper_next = false;
-            } else {
-                out.push(ch);
-            }
-        }
-        out
+        pascal_case(name)
     }
 
     fn capability_trait_name(&self, capability: &str) -> String {
@@ -1237,9 +1209,49 @@ fn is_plain_ident(name: &str) -> bool {
         && !is_rust_keyword(name)
 }
 
+/// `LoadTexture` → `load_texture`, `DrawHUD` → `draw_hud`,
+/// `authHeader` → `auth_header`. Shared with the setup macro, which
+/// derives session field names from the generated proxy types.
+pub(crate) fn snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (index, ch) in chars.iter().enumerate() {
+        if ch.is_ascii_uppercase() {
+            let previous_upper = index > 0 && chars[index - 1].is_ascii_uppercase();
+            let next_lower = index + 1 < chars.len() && chars[index + 1].is_ascii_lowercase();
+            if (index > 0 && !previous_upper || (previous_upper && next_lower))
+                && !out.ends_with('_')
+            {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(*ch);
+        }
+    }
+    out
+}
+
+/// `engine` + `graphics` → `EngineGraphics`.
+pub(crate) fn pascal_case(name: &str) -> String {
+    let mut out = String::new();
+    let mut upper_next = true;
+    for ch in name.chars() {
+        if ch == '_' || ch == '.' {
+            upper_next = true;
+        } else if upper_next {
+            out.push(ch.to_ascii_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// The Rust keywords that need `r#` (a few get a suffix instead, handled
 /// by the caller).
-fn is_rust_keyword(name: &str) -> bool {
+pub(crate) fn is_rust_keyword(name: &str) -> bool {
     const KEYWORDS: [&str; 49] = [
         "as", "async", "await", "become", "box", "break", "const", "continue", "do", "dyn", "else",
         "enum", "extern", "false", "final", "fn", "for", "if", "impl", "in", "let", "loop",

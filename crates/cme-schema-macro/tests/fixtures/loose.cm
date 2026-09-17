@@ -1,0 +1,7 @@
+// A loose single-file program for the `program = file "…"` shape. It
+// imports nothing and implements no interface, so it loads under any
+// registered schema (loose sources inherit the whole grant) and its
+// proxies fail construction with UnknownEntry — the failure path.
+int main() {
+    return 5
+}

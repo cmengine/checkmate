@@ -1,0 +1,19 @@
+// The §9.1-shaped fixture the cme_schema_setup! tests bootstrap from.
+// Kept as a real file because the macro's contract IS reading real files.
+
+schema demo 1.2.0
+
+struct Greeting {
+    str text
+    int loudness
+}
+
+capability speaker {
+    since 1.0.0 void Shout(str message)
+    since 1.0.0 Greeting Compose(str name)
+}
+
+interface reporter {
+    since 1.0.0 int Report(int value)
+    since 1.2.0 optional void Snapshot(str path)
+}

@@ -263,3 +263,149 @@ fn prefix_truncation_never_panics_the_pipeline_or_the_interpreter() {
         }
     }
 }
+
+const BYTE_CM: &str = r#"
+struct sensor {
+    str name
+    byte level
+}
+
+byte clampToByte(int raw) {
+    byte clamped = 255
+    if (raw < 0) {
+        clamped = 0
+    }
+    if (raw > 255) {
+        clamped = 255
+    }
+    return clamped
+}
+
+byte mix(byte a, byte b) {
+    byte half = b / 2
+    byte sum = a + half
+    return sum
+}
+
+int main() {
+    // Literal crystallization in every byte position.
+    byte direct = 200
+    byte fromExpr = clampToByte(300)
+    byte fromVar = mix(100, 60)
+
+    // Byte-typed slots inside containers and option.
+    byte[] levels = [1, 2, 3]
+    option<byte> maybe = Some(9)
+    byte[] two = [direct, fromExpr]
+
+    // Struct fields crystallize too.
+    sensor s = sensor(name: "lidar", level: 42)
+
+    // Bytes widen losslessly into int arithmetic.
+    int total = levels.length
+    match (maybe) {
+        Some(byte m) => {
+            total += m
+        }
+        None() => {
+            total += 0
+        }
+        _ => {
+            total += 0
+        }
+    }
+    total += s.level
+    total += two[0]
+    total += two[1]
+    total += fromVar
+    return total
+}
+"#;
+
+#[test]
+fn byte_program_runs_with_crystallized_literals() {
+    // 3 (levels.length) + 9 (maybe) + 42 (s.level) + 200 + 255 (two)
+    // + 130 (mix(100, 60): 100 + 60/2) = 639.
+    assert_eq!(run_main(BYTE_CM), Ok(Value::Int(639)));
+}
+
+const BYTE_OVERFLOW_CM: &str = r#"
+int main() {
+    byte a = 250
+    byte b = 10
+    return a + b
+}
+"#;
+
+#[test]
+fn byte_overflow_terminates_the_invocation() {
+    let outcome = cme_compiler::parse_source(BYTE_OVERFLOW_CM);
+    assert!(outcome.diagnostics.is_empty(), "parses clean");
+    let diagnostics = check(&outcome.statements);
+    assert!(
+        diagnostics.is_empty(),
+        "byte + byte within the range check passes compile"
+    );
+    let interpreter = Interpreter::new(&outcome.statements);
+    let error = interpreter.invoke("main", &[]).unwrap_err();
+    assert!(
+        error.message.contains("overflow"),
+        "byte overflow is a clean runtime error: {error:?}"
+    );
+}
+
+const BYTE_ERRORS_CM: &str = r#"
+int main() {
+    byte big = 300
+    return big
+}
+"#;
+
+#[test]
+fn byte_literal_out_of_range_is_a_compile_error() {
+    let outcome = cme_compiler::parse_source(BYTE_ERRORS_CM);
+    let mut diagnostics = check(&outcome.statements);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.to_string().contains("byte literal out of range")),
+        "300 does not fit in byte: {diagnostics:?}"
+    );
+    diagnostics.clear();
+}
+
+const BYTE_MIXING_CM: &str = r#"
+int main() {
+    byte a = 10
+    int i = 20
+    if (a == i) {
+        return 1
+    }
+    return 0
+}
+"#;
+
+#[test]
+fn byte_and_int_equality_never_mixes() {
+    let outcome = cme_compiler::parse_source(BYTE_MIXING_CM);
+    let diagnostics = check(&outcome.statements);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.to_string().contains("cannot apply `==`")),
+        "byte == int stays a type error (§A.4 strict equality): {diagnostics:?}"
+    );
+}
+
+const BYTE_WIDENING_CM: &str = r#"
+int main() {
+    byte a = 10
+    int i = 20
+    return a + i
+}
+"#;
+
+#[test]
+fn byte_widens_losslessly_in_int_arithmetic() {
+    assert_eq!(run_main(BYTE_WIDENING_CM), Ok(Value::Int(30)));
+}

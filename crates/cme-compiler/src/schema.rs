@@ -1225,6 +1225,7 @@ impl SchemaParser {
                 "float" => Type::Prim(PrimitiveType::Float),
                 "bool" => Type::Prim(PrimitiveType::Bool),
                 "str" => Type::Prim(PrimitiveType::Str),
+                "byte" => Type::Prim(PrimitiveType::Byte),
                 "void" => {
                     if !allow_void {
                         self.record(

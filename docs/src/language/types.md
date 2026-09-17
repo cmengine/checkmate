@@ -4,20 +4,49 @@ Checkmate is statically typed: every expression has a type known at compile
 time, and the type checker rejects anything that does not line up. There
 are no implicit conversions, no `any`, no unions-by-inference.
 
-## The five scalar types
+## The scalar types
 
 | Type | Values | Notes |
 | --- | --- | --- |
 | `int` | Signed 64-bit integers | Arithmetic is overflow-checked; overflow terminates the invocation |
 | `float` | IEEE 754 double-precision | Division follows IEEE 754; `NaN != NaN` |
-| `bool` | `true`, `false` | The only operand type of `&&`, `||`, `!` |
+| `bool` | `true`, `false` | The only operand type of `&&`, `\|\|`, `!` |
 | `str` | Immutable UTF-8 text | Compared by content; concatenation via `+` |
+| `byte` | Unsigned 8-bit integers, 0..=255 | `u8` of the language — see [the byte rules](#the-byte-type) |
 | `void` | The absence of a value | Return type only; a `void` call is a statement |
 
 Numeric conversions between `int` and `float` are **strictly explicit in
 intent** — implicit coercions are disallowed, including through operators.
 `1 + 2.0` is a compile error, not `3.0`. (A general cast/conversion
 operator is not part of the language yet.)
+
+## The byte type
+
+`byte` is an unsigned 8-bit integer — the `u8` of the language. It follows
+two rules that keep it safe and usable:
+
+- **Literal crystallization.** An integer literal in `byte` position
+  crystallizes as a `byte` after a compile-time range check:
+
+  ```checkmate
+  byte ok = 255      // fine
+  byte bad = 300     // compile error: byte literal out of range
+  ```
+
+- **Lossless widening.** A `byte` value widens to `int` wherever an int is
+  expected — declarations, parameters, returns, struct fields, and mixed
+  arithmetic:
+
+  ```checkmate
+  byte b = 200
+  int total = b          // widening: lossless
+  int mixed = b + 10     // byte + int widens the byte, yields int
+  ```
+
+`byte op byte` stays `byte` and is overflow-checked at runtime — `250 + 10`
+on two bytes terminates the invocation, exactly like int overflow.
+Equality stays strict: `byte == int` is a compile error, because widening
+is an arithmetic rule, not an equality mixing.
 
 ## Structs
 

@@ -155,7 +155,7 @@ s += 100          // identical to: s = s + 100 (uses stringification)
 
 Beyond the operator grammar, expression positions accept:
 
-- literals (int, float, bool, string, interpolated string),
+- literals (int, float, bool, byte, string, interpolated string),
 - identifiers,
 - struct construction and enum construction (named or positional args),
 - calls (top-level functions, `impl` members by qualified path),

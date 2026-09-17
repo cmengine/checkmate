@@ -664,6 +664,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             Token::KwFloat => Some(Type::Prim(PrimitiveType::Float)),
             Token::KwStr => Some(Type::Prim(PrimitiveType::Str)),
             Token::KwBool => Some(Type::Prim(PrimitiveType::Bool)),
+            Token::KwByte => Some(Type::Prim(PrimitiveType::Byte)),
             Token::KwInfer => Some(Type::Infer),
             Token::KwVoid => Some(Type::Void),
             _ => None,
@@ -693,6 +694,7 @@ impl<'a, 'src> Parser<'a, 'src> {
             | Token::KwFloat
             | Token::KwStr
             | Token::KwBool
+            | Token::KwByte
             | Token::KwInfer
             | Token::KwVoid => {
                 let ty = Self::parse_type_from_token(&token.token)?;

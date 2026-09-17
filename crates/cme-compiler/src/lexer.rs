@@ -351,6 +351,8 @@ pub enum Token<'a> {
     KwStr,
     #[token("bool")]
     KwBool,
+    #[token("byte")]
+    KwByte,
     #[token("true")]
     KwTrue,
     #[token("false")]
@@ -451,6 +453,7 @@ impl<'a> Token<'a> {
             Token::KwFloat => "`float`".into(),
             Token::KwStr => "`str`".into(),
             Token::KwBool => "`bool`".into(),
+            Token::KwByte => "`byte`".into(),
             Token::KwInfer => "`infer`".into(),
             Token::KwReturn => "`return`".into(),
             Token::KwIf => "`if`".into(),
@@ -505,7 +508,12 @@ impl<'a> Token<'a> {
     pub(crate) fn is_type_keyword(&self) -> bool {
         matches!(
             self,
-            Token::KwInt | Token::KwFloat | Token::KwStr | Token::KwBool | Token::KwInfer
+            Token::KwInt
+                | Token::KwFloat
+                | Token::KwStr
+                | Token::KwBool
+                | Token::KwByte
+                | Token::KwInfer
         )
     }
 

@@ -239,6 +239,7 @@ impl<'s> Generator<'s> {
         match ty {
             Type::Infer | Type::Void => "()".to_string(),
             Type::Prim(PrimitiveType::Int) => "i64".to_string(),
+            Type::Prim(PrimitiveType::Byte) => "u8".to_string(),
             Type::Prim(PrimitiveType::Float) => "f64".to_string(),
             Type::Prim(PrimitiveType::Bool) => "bool".to_string(),
             Type::Prim(PrimitiveType::Str) => "::std::string::String".to_string(),
@@ -279,6 +280,7 @@ impl<'s> Generator<'s> {
     fn to_value_expr(&self, ty: &Type, value_name: &str) -> String {
         match ty {
             Type::Prim(PrimitiveType::Int) => format!("__convert::int_to({value_name})"),
+            Type::Prim(PrimitiveType::Byte) => format!("__convert::byte_to({value_name})"),
             Type::Prim(PrimitiveType::Float) => format!("__convert::float_to({value_name})"),
             Type::Prim(PrimitiveType::Bool) => format!("__convert::bool_to({value_name})"),
             Type::Prim(PrimitiveType::Str) => format!("__convert::string_to({value_name})"),
@@ -313,6 +315,7 @@ impl<'s> Generator<'s> {
     fn value_from_expr(&self, ty: &Type, value_name: &str) -> String {
         match ty {
             Type::Prim(PrimitiveType::Int) => format!("__convert::int_from({value_name})"),
+            Type::Prim(PrimitiveType::Byte) => format!("__convert::byte_from({value_name})"),
             Type::Prim(PrimitiveType::Float) => format!("__convert::float_from({value_name})"),
             Type::Prim(PrimitiveType::Bool) => format!("__convert::bool_from({value_name})"),
             Type::Prim(PrimitiveType::Str) => format!("__convert::string_from({value_name})"),
@@ -356,6 +359,9 @@ impl<'s> Generator<'s> {
             }
             Type::Prim(PrimitiveType::Str) => {
                 format!("{api}::Type::Prim({api}::PrimitiveType::Str)")
+            }
+            Type::Prim(PrimitiveType::Byte) => {
+                format!("{api}::Type::Prim({api}::PrimitiveType::Byte)")
             }
             Type::Array(elem) => format!(
                 "{api}::Type::Array(::std::boxed::Box::new({}))",
@@ -414,6 +420,7 @@ impl<'s> Generator<'s> {
         pub fn kind_of(value: &{API}::Value) -> &'static str {{
             match value {{
                 {API}::Value::Int(_) => "int",
+                {API}::Value::Byte(_) => "byte",
                 {API}::Value::Float(_) => "float",
                 {API}::Value::Str(_) => "str",
                 {API}::Value::Bool(_) => "bool",
@@ -436,6 +443,13 @@ impl<'s> Generator<'s> {
             match value {{
                 {API}::Value::Int(inner) => ::core::result::Result::Ok(*inner),
                 other => ::core::result::Result::Err(::std::format!("expected `int`, found `{{}}`", kind_of(other))),
+            }}
+        }}
+        pub fn byte_to(value: &u8) -> {API}::Value {{ {API}::Value::Byte(*value) }}
+        pub fn byte_from(value: &{API}::Value) -> ::core::result::Result<u8, ::std::string::String> {{
+            match value {{
+                {API}::Value::Byte(inner) => ::core::result::Result::Ok(*inner),
+                other => ::core::result::Result::Err(::std::format!("expected `byte`, found `{{}}`", kind_of(other))),
             }}
         }}
         pub fn float_from(value: &{API}::Value) -> ::core::result::Result<f64, ::std::string::String> {{

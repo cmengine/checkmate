@@ -225,8 +225,8 @@ is the loop you keep when suspension lands. Polling is idempotent:
 ```c
 typedef enum cm_value_kind {
     CM_VALUE_INVALID, CM_VALUE_VOID, CM_VALUE_INT, CM_VALUE_FLOAT,
-    CM_VALUE_BOOL, CM_VALUE_STR, CM_VALUE_STRUCT, CM_VALUE_ENUM,
-    CM_VALUE_ARRAY, CM_VALUE_MAP
+    CM_VALUE_BOOL, CM_VALUE_STR, CM_VALUE_BYTE, CM_VALUE_STRUCT,
+    CM_VALUE_ENUM, CM_VALUE_ARRAY, CM_VALUE_MAP
 } cm_value_kind_t;
 ```
 
@@ -235,6 +235,7 @@ typedef enum cm_value_kind {
 ```c
 cm_value_t* cm_value_void(void);
 cm_value_t* cm_value_int(int64_t);
+cm_value_t* cm_value_byte(uint8_t);
 cm_value_t* cm_value_float(double);
 cm_value_t* cm_value_bool(int);              // non-zero is true
 cm_value_t* cm_value_str(const char*);       // NUL-terminated, valid UTF-8
@@ -270,6 +271,7 @@ cm_struct_set_field(item, "price", cm_value_int(25));
 ```c
 cm_value_kind_t cm_value_kind(const cm_value_t*);
 cm_status_t cm_value_as_int(const cm_value_t*, int64_t* out);
+cm_status_t cm_value_as_byte(const cm_value_t*, uint8_t* out);
 cm_status_t cm_value_as_float(const cm_value_t*, double* out);
 cm_status_t cm_value_as_bool(const cm_value_t*, int* out);
 cm_status_t cm_value_as_str(const cm_value_t*, char** out, size_t* out_length); // OWNED copy

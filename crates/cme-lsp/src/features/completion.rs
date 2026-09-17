@@ -902,8 +902,9 @@ fn impl_open_brace(analysis: &Analysis<'_>, span: cme_core::Span) -> Option<usiz
 /// Statement/expression position: keywords, locals in scope, top-level
 /// declarations, and the built-in constructors.
 fn scope_completions(analysis: &Analysis<'_>, offset: usize) -> Vec<ls_types::CompletionItem> {
-    const KEYWORDS: [(&str, &str); 24] = [
+    const KEYWORDS: [(&str, &str); 25] = [
         ("bool", "built-in type (§2.4)"),
+        ("byte", "unsigned 8-bit integer type, 0..=255 (§2.4)"),
         ("else", "conditional alternative (§2.14)"),
         ("enum", "algebraic data type (§2.7)"),
         ("false", "boolean literal"),

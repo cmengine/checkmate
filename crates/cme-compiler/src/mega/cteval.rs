@@ -666,6 +666,11 @@ pub fn value_to_capture(value: &Value) -> Result<Capture, String> {
             matched: value.to_string(),
             span,
         }),
+        Value::Byte(value) => Ok(Capture {
+            kind: CaptureKind::Int(*value as i64),
+            matched: value.to_string(),
+            span,
+        }),
         Value::Float(value) => Ok(Capture {
             kind: CaptureKind::Float(*value),
             matched: format!("{value}"),
@@ -767,6 +772,7 @@ pub fn render_value(value: &Value) -> Result<String, String> {
     match value {
         Value::Str(text) => Ok(format!("\"{}\"", escape_checkmate(text))),
         Value::Int(value) => Ok(value.to_string()),
+        Value::Byte(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(format!("{value}")),
         Value::Bool(value) => Ok(value.to_string()),
         Value::Array(items) => {

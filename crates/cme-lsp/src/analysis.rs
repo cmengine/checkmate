@@ -1132,6 +1132,7 @@ pub fn render_type(ty: &Type) -> String {
         Type::Prim(cme_core::ast::PrimitiveType::Float) => "float".to_string(),
         Type::Prim(cme_core::ast::PrimitiveType::Bool) => "bool".to_string(),
         Type::Prim(cme_core::ast::PrimitiveType::Str) => "str".to_string(),
+        Type::Prim(cme_core::ast::PrimitiveType::Byte) => "byte".to_string(),
         Type::Void => "void".to_string(),
         Type::Named { name, args } => {
             if args.is_empty() {

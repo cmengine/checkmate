@@ -187,11 +187,12 @@ const CONTRACT_KEYWORDS: [(&str, &str); 2] = [
 ];
 
 /// The scalar types every schema type position accepts (§2.4, §9.3).
-const BUILTIN_TYPES: [(&str, &str); 5] = [
+const BUILTIN_TYPES: [(&str, &str); 6] = [
     ("int", "signed 64-bit integer (§2.4)"),
     ("float", "64-bit IEEE 754 float (§2.4)"),
     ("bool", "`true` or `false` (§2.4)"),
     ("str", "immutable UTF-8 string (§2.4)"),
+    ("byte", "unsigned 8-bit integer, 0..=255 (§2.4)"),
     ("void", "no-value return — return position only (§2.4)"),
 ];
 
@@ -545,6 +546,7 @@ fn render_type(ty: &cme_core::ast::Type) -> String {
         cme_core::ast::Type::Prim(PrimitiveType::Float) => "float".to_string(),
         cme_core::ast::Type::Prim(PrimitiveType::Bool) => "bool".to_string(),
         cme_core::ast::Type::Prim(PrimitiveType::Str) => "str".to_string(),
+        cme_core::ast::Type::Prim(PrimitiveType::Byte) => "byte".to_string(),
         cme_core::ast::Type::Void => "void".to_string(),
         cme_core::ast::Type::Named { name, args } => {
             if args.is_empty() {

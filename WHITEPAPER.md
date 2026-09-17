@@ -80,10 +80,16 @@ int          // Signed 64-bit integer
 float        // 64-bit IEEE 754 floating-point number
 bool         // true or false
 str          // Immutable UTF-8 string
+byte         // Unsigned 8-bit integer (0..=255)
 void         // Function returning no value
 ```
 
 Numeric conversions are strictly explicit; implicit coercions between `int` and `float` are disallowed. Arithmetic operations are overflow-checked by default; runtime integer overflow immediately terminates the invocation.
+
+The `byte` type is the `u8` of the language. It follows two extra rules:
+
+- **Literal crystallization** — an integer literal in `byte` position crystallizes as a `byte` after a compile-time range check (`byte b = 200` is fine, `byte b = 300` is a compile error). A non-literal `int` never converts.
+- **Lossless widening** — a `byte` value widens to `int` wherever an int is expected (declarations, parameters, returns, fields, and mixed arithmetic such as `b + i`, which yields an `int`). `byte op byte` stays `byte` and is overflow-checked. Equality remains strict: `byte == int` is a type error.
 
 ### 2.5. Boundary Capitalization
 
@@ -1851,7 +1857,7 @@ since 1.0.0 capability engine.modBridge {
 
 Checkmate includes a minimal, host-neutral standard library:
 
-- **Primitives & Collections**: `str`, `int`, `float`, `bool`, arrays (`T[]`), maps (`map<K, V>`).
+- **Primitives & Collections**: `str`, `int`, `float`, `bool`, `byte`, arrays (`T[]`), maps (`map<K, V>`).
 - **Control Types**: `option<T>`, `result<T, E>`.
 - **String Utilities**: Formatting, UTF-8 validation, slicing, search.
 - **Math Utilities**: Standard IEEE 754 floating-point operations.
@@ -2112,11 +2118,15 @@ types (§2.4), including through operators.
 | Operators         | Operand types                                                          | Result      |
 | ----------------- | ---------------------------------------------------------------------- | ----------- |
 | `+`               | both `int`, or both `float`                                            | as operands |
+| `+`               | both `byte`                                                            | `byte`      |
+| `+`               | one `byte` and one `int`                                               | `int`       |
 | `+`               | at least one `str`; other side `str`, `int`, `float`, or `bool` (§A.6) | `str`       |
 | `-` `*`           | both `int`, or both `float`                                            | as operands |
+| `-` `*` `/` `%`   | both `byte`, or one `byte` and one `int`                               | `byte` when both are `byte`, else `int` |
 | `/`               | both `int`, or both `float`                                            | as operands |
 | `%`               | both `int`                                                             | `int`       |
 | `<` `<=` `>` `>=` | both `int`, or both `float`                                            | `bool`      |
+| `<` `<=` `>` `>=` | both `byte`, or one `byte` and one `int`                               | `bool`      |
 | `==` `!=`         | both operands of the same type                                         | `bool`      |
 | `&&` `\|\|`       | both `bool`                                                            | `bool`      |
 | `-` (unary)       | `int` or `float`                                                       | as operand  |
@@ -2160,6 +2170,7 @@ canonical string form and concatenated:
 - `int` — decimal digits, prefixed by `-` when negative
 - `bool` — `true` or `false`
 - `float` — the shortest decimal representation that round-trips to the same value
+- `byte` — decimal digits (a byte renders exactly like its int value)
 - `str` — used as-is
 
 ```checkmate

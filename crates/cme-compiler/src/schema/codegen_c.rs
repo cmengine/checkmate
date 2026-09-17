@@ -159,6 +159,7 @@ fn c_scalar_type(ty: &Type) -> Option<&'static str> {
         Type::Prim(PrimitiveType::Float) => Some("double"),
         Type::Prim(PrimitiveType::Bool) => Some("int"),
         Type::Prim(PrimitiveType::Str) => Some("char*"),
+        Type::Prim(PrimitiveType::Byte) => Some("uint8_t"),
         _ => None,
     }
 }
@@ -310,6 +311,7 @@ fn scalar_accessor(ty: &Type) -> &'static str {
         Type::Prim(PrimitiveType::Int) => "int",
         Type::Prim(PrimitiveType::Float) => "float",
         Type::Prim(PrimitiveType::Bool) => "bool",
+        Type::Prim(PrimitiveType::Byte) => "byte",
         _ => "int",
     }
 }
@@ -319,6 +321,7 @@ fn scalar_constructor(ty: &Type) -> &'static str {
         Type::Prim(PrimitiveType::Int) => "int",
         Type::Prim(PrimitiveType::Float) => "float",
         Type::Prim(PrimitiveType::Bool) => "bool",
+        Type::Prim(PrimitiveType::Byte) => "byte",
         _ => "int",
     }
 }
@@ -661,6 +664,7 @@ fn c_type_comment(ty: &Type) -> String {
         Type::Prim(PrimitiveType::Float) => "float".to_string(),
         Type::Prim(PrimitiveType::Bool) => "bool".to_string(),
         Type::Prim(PrimitiveType::Str) => "str".to_string(),
+        Type::Prim(PrimitiveType::Byte) => "byte".to_string(),
         Type::Array(elem) => format!("{}[]", c_type_comment(elem)),
         Type::Map { key, value } => {
             format!("map<{}, {}>", c_type_comment(key), c_type_comment(value))
@@ -804,6 +808,7 @@ fn type_spelling(ty: &Type) -> String {
         Type::Prim(PrimitiveType::Float) => "float".to_string(),
         Type::Prim(PrimitiveType::Bool) => "bool".to_string(),
         Type::Prim(PrimitiveType::Str) => "str".to_string(),
+        Type::Prim(PrimitiveType::Byte) => "byte".to_string(),
         Type::Array(elem) => format!("{}[]", type_spelling(elem)),
         Type::Map { key, value } => {
             format!("map<{}, {}>", type_spelling(key), type_spelling(value))
@@ -830,6 +835,7 @@ fn sum_name_segment(ty: &Type) -> Option<String> {
         Type::Prim(PrimitiveType::Float) => Some("float".to_string()),
         Type::Prim(PrimitiveType::Bool) => Some("bool".to_string()),
         Type::Prim(PrimitiveType::Str) => Some("str".to_string()),
+        Type::Prim(PrimitiveType::Byte) => Some("byte".to_string()),
         Type::Named { name, args } if args.is_empty() && field_is_typed(ty) => Some(name.clone()),
         Type::Named { name, args } => {
             // Nested sums: `option<option<int>>` → `option_option_int`
@@ -951,6 +957,7 @@ fn sum_payload_read(ns: &str, ty: &Type, value_expr: &str, out_slot: &str) -> St
         Type::Prim(PrimitiveType::Int) => format!("cm_value_as_int({value_expr}, {out_slot})"),
         Type::Prim(PrimitiveType::Float) => format!("cm_value_as_float({value_expr}, {out_slot})"),
         Type::Prim(PrimitiveType::Bool) => format!("cm_value_as_bool({value_expr}, {out_slot})"),
+        Type::Prim(PrimitiveType::Byte) => format!("cm_value_as_byte({value_expr}, {out_slot})"),
         Type::Prim(PrimitiveType::Str) => {
             format!("cm_value_as_str({value_expr}, {out_slot}, NULL)")
         }
@@ -969,6 +976,7 @@ fn sum_payload_pack(ns: &str, ty: &Type, slot_expr: &str) -> String {
         Type::Prim(PrimitiveType::Int) => format!("cm_value_int({slot_expr})"),
         Type::Prim(PrimitiveType::Float) => format!("cm_value_float({slot_expr})"),
         Type::Prim(PrimitiveType::Bool) => format!("cm_value_bool({slot_expr})"),
+        Type::Prim(PrimitiveType::Byte) => format!("cm_value_byte({slot_expr})"),
         Type::Prim(PrimitiveType::Str) => format!("cm_value_str({slot_expr})"),
         Type::Named { name, .. } => format!("cme_{ns}_{name}_pack({slot_expr})"),
         _ => String::new(),
@@ -1001,6 +1009,13 @@ fn sum_slot_params(ns: &str, ty: &Type, unpack: bool) -> String {
                 "int*".to_string()
             } else {
                 "int".to_string()
+            }
+        }
+        Type::Prim(PrimitiveType::Byte) => {
+            if unpack {
+                "uint8_t*".to_string()
+            } else {
+                "uint8_t".to_string()
             }
         }
         Type::Prim(PrimitiveType::Str) => {

@@ -211,6 +211,7 @@ fn value_kind(value: Option<&Value>) -> i32 {
         Some(value) => match value {
             Value::Void => 1,
             Value::Int(_) => 2,
+            Value::Byte(_) => 10,
             Value::Float(_) => 3,
             Value::Bool(_) => 4,
             Value::Str(_) => 5,
@@ -941,6 +942,13 @@ pub extern "C" fn cm_value_bool(value: c_int) -> *mut CmValue {
 }
 
 /// # Safety
+/// Pure constructor.
+#[unsafe(no_mangle)]
+pub extern "C" fn cm_value_byte(value: u8) -> *mut CmValue {
+    Box::into_raw(Box::new(CmValue(Value::Byte(value))))
+}
+
+/// # Safety
 /// `text` must be NUL-terminated valid UTF-8, or NULL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cm_value_str(text: *const c_char) -> *mut CmValue {
@@ -1171,6 +1179,7 @@ macro_rules! scalar_accessor {
 }
 
 scalar_accessor!(cm_value_as_int, i64, Value::Int(v) => *v);
+scalar_accessor!(cm_value_as_byte, u8, Value::Byte(v) => *v);
 scalar_accessor!(cm_value_as_float, f64, Value::Float(v) => *v);
 scalar_accessor!(cm_value_as_bool, c_int, Value::Bool(v) => c_int::from(*v));
 

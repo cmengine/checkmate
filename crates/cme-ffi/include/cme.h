@@ -388,7 +388,9 @@ typedef enum cm_value_kind {
     CM_VALUE_STRUCT = 6,
     CM_VALUE_ENUM = 7,
     CM_VALUE_ARRAY = 8,
-    CM_VALUE_MAP = 9
+    CM_VALUE_MAP = 9,
+    /** Unsigned 8-bit integer (0-255), the `byte` primitive (§2.4). */
+    CM_VALUE_BYTE = 10
 } cm_value_kind_t;
 
 /* Constructors — each returns an OWNED handle, NULL on invalid input
@@ -396,6 +398,8 @@ typedef enum cm_value_kind {
 
 cm_value_t* cm_value_void(void);
 cm_value_t* cm_value_int(int64_t value);
+/** Unsigned 8-bit integer: the `byte` primitive (§2.4). */
+cm_value_t* cm_value_byte(uint8_t value);
 cm_value_t* cm_value_float(double value);
 /** Non-zero is true. */
 cm_value_t* cm_value_bool(int value);
@@ -437,6 +441,9 @@ cm_value_t* cm_value_clone(const cm_value_t* value);
 
 cm_value_kind_t cm_value_kind(const cm_value_t* value);
 cm_status_t cm_value_as_int(const cm_value_t* value, int64_t* out);
+/** Reads the `byte` primitive (§2.4): fails with CM_ERR_KIND for any
+ *  other kind. */
+cm_status_t cm_value_as_byte(const cm_value_t* value, uint8_t* out);
 cm_status_t cm_value_as_float(const cm_value_t* value, double* out);
 cm_status_t cm_value_as_bool(const cm_value_t* value, int* out);
 /** Owned copy of the text; free with cm_string_free. */

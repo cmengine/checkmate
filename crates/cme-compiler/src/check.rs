@@ -12,7 +12,7 @@
 //! broken initializer still declares its name, and nothing inside a broken
 //! subtree is reported twice.
 //!
-//! Types resolve to [`Ty`]: the four scalars, `void`, and structural
+//! Types resolve to [`Ty`]: the five scalars, `void`, and structural
 //! references into a registry of the program's struct and enum
 //! declarations. The built-in generic enums `option<T>` and `result<T, E>`
 //! are registered before user declarations, and their constructor names
@@ -102,6 +102,7 @@ fn type_display(ty: &Type) -> String {
         Type::Prim(PrimitiveType::Float) => "float".into(),
         Type::Prim(PrimitiveType::Bool) => "bool".into(),
         Type::Prim(PrimitiveType::Str) => "str".into(),
+        Type::Prim(PrimitiveType::Byte) => "byte".into(),
         Type::Array(elem) => format!("{}[]", type_display(elem)),
         Type::Map { key, value } => {
             format!("map<{}, {}>", type_display(key), type_display(value))
@@ -124,6 +125,10 @@ enum Ty {
     Float,
     Bool,
     Str,
+    /// The unsigned 8-bit scalar: 0–255, overflow-checked, byte-typed
+    /// arithmetic, and integer literals in byte positions crystallize
+    /// after a compile-time range check.
+    Byte,
     Void,
     /// Already reported or unrecoverable; every check against it passes
     /// silently so recovery diagnostics never cascade.
@@ -161,6 +166,7 @@ impl Ty {
             Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::Str => "str".into(),
+            Ty::Byte => "byte".into(),
             Ty::Void => "void".into(),
             Ty::Poison => "poison".into(),
             Ty::Ambiguous => "ambiguous".into(),
@@ -1429,6 +1435,7 @@ impl<'a> Checker<'a> {
             Type::Prim(PrimitiveType::Float) => Ty::Float,
             Type::Prim(PrimitiveType::Bool) => Ty::Bool,
             Type::Prim(PrimitiveType::Str) => Ty::Str,
+            Type::Prim(PrimitiveType::Byte) => Ty::Byte,
             Type::Array(elem) => Ty::Array(Box::new(self.subst_type(elem, params, args, span))),
             Type::Map { key, value } => Ty::Map(
                 Box::new(self.subst_type(key, params, args, span)),
@@ -1632,7 +1639,8 @@ impl<'a> Checker<'a> {
                             Some(declared.clone())
                         };
                         let init = self.type_expr(expr, expected.as_ref());
-                        if !init.is_poison() && !declared.is_poison() && init != declared {
+                        if !init.is_poison() && !declared.is_poison() && !accepts(&declared, &init)
+                        {
                             self.report(
                                 format!(
                                     "type mismatch in declaration of `{name}`: expected `{}`, found `{}`",
@@ -1656,7 +1664,7 @@ impl<'a> Checker<'a> {
                     Some(target_ty.clone())
                 };
                 let rhs = self.type_expr(expr, expected.as_ref());
-                if !target_ty.is_poison() && !rhs.is_poison() && rhs != target_ty {
+                if !target_ty.is_poison() && !rhs.is_poison() && !accepts(&target_ty, &rhs) {
                     self.report(
                         format!(
                             "type mismatch in assignment to `{}`: expected `{}`, found `{}`",
@@ -1671,9 +1679,16 @@ impl<'a> Checker<'a> {
             StmtKind::CompoundAssign { target, op, expr } => {
                 // §A.7: `x op= e` is exactly `x = x op e`, so the operator
                 // rules of §A.4/§A.6 apply with the target as the left
-                // operand and the result must equal the target's type.
+                // operand and the result must equal the target's type. The
+                // target type threads into the right operand so a byte
+                // target accepts an in-range integer literal.
                 let target_ty = self.resolve_lvalue(target, stmt.span);
-                let rhs = self.type_expr(expr, None);
+                let expected = if target_ty.is_poison() {
+                    None
+                } else {
+                    Some(target_ty.clone())
+                };
+                let rhs = self.type_expr(expr, expected.as_ref());
                 if !target_ty.is_poison() && !rhs.is_poison() {
                     let matches = binary_result(compound_to_binary(*op), &target_ty, &rhs)
                         .is_some_and(|result| result == target_ty);
@@ -2011,7 +2026,7 @@ impl<'a> Checker<'a> {
                 ),
                 Some(expr) => {
                     let actual = self.type_expr(expr, Some(&expected));
-                    if !actual.is_poison() && actual != expected {
+                    if !actual.is_poison() && !accepts(&expected, &actual) {
                         self.report(
                             format!(
                                 "wrong return type in `{name}`: expected `{}`, found `{}`",
@@ -2129,10 +2144,24 @@ impl<'a> Checker<'a> {
     }
 
     /// Types an expression, threading the expected type where bare
-    /// constructors need it (§2.8, §2.16).
+    /// constructors need it (§2.8, §2.16) and where an integer literal
+    /// crystallizes as a `byte` (0–255, §2.4).
     fn type_expr(&mut self, expr: &Expr, expected: Option<&Ty>) -> Ty {
         match &expr.kind {
-            ExprKind::IntLit(_) => Ty::Int,
+            ExprKind::IntLit(value) => match expected {
+                // An integer literal in byte position crystallizes as a
+                // byte after a compile-time range check — literal typing,
+                // not a conversion: a non-literal int never coerces.
+                Some(Ty::Byte) if (0..=u8::MAX as i64).contains(value) => Ty::Byte,
+                Some(Ty::Byte) => {
+                    self.report(
+                        format!("byte literal out of range: `{value}` does not fit in 0..=255"),
+                        expr.span,
+                    );
+                    Ty::Byte
+                }
+                _ => Ty::Int,
+            },
             ExprKind::FloatLit(_) => Ty::Float,
             ExprKind::StrLit(_) => Ty::Str,
             ExprKind::BoolLit(_) => Ty::Bool,
@@ -2166,7 +2195,7 @@ impl<'a> Checker<'a> {
                         // §A.6: only scalars stringify.
                         let ty = self.type_expr(island, None);
                         match ty {
-                            Ty::Int | Ty::Float | Ty::Bool | Ty::Str => {}
+                            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Byte => {}
                             Ty::Poison | Ty::Ambiguous => {}
                             other => self.report(
                                 format!("cannot interpolate `{}`", other.name(&self.types)),
@@ -2200,8 +2229,20 @@ impl<'a> Checker<'a> {
                 operand
             }
             ExprKind::Binary { op, lhs, rhs } => {
+                // Byte unification: a direct integer literal operand of a
+                // byte-typed operand crystallizes as a byte (§2.4 literal
+                // typing), so `b + 1` and `1 + b` both stay byte-typed.
                 let left = self.type_expr(lhs, None);
-                let right = self.type_expr(rhs, None);
+                let right = match (&left, &rhs.kind) {
+                    (Ty::Byte, ExprKind::IntLit(_)) => self.type_expr(rhs, Some(&Ty::Byte)),
+                    _ => self.type_expr(rhs, None),
+                };
+                let left = match (&right, &lhs.kind) {
+                    (Ty::Byte, ExprKind::IntLit(_)) if left == Ty::Int => {
+                        self.type_expr(lhs, Some(&Ty::Byte))
+                    }
+                    _ => left,
+                };
                 if left.is_poison() || right.is_poison() {
                     return Ty::Poison;
                 }
@@ -2313,7 +2354,7 @@ impl<'a> Checker<'a> {
                             Some(param_ty.clone())
                         };
                         let actual = self.type_expr(value, expected.as_ref());
-                        if !sig.poisoned && !actual.is_poison() && actual != *param_ty {
+                        if !sig.poisoned && !actual.is_poison() && !accepts(param_ty, &actual) {
                             self.report(
                                 format!(
                                     "wrong argument type in call to `{name}`: expected `{}`, found `{}`",
@@ -2360,7 +2401,7 @@ impl<'a> Checker<'a> {
                     Some(param_ty.clone())
                 };
                 let actual = self.type_expr(value, expected.as_ref());
-                if !sig.poisoned && !actual.is_poison() && actual != *param_ty {
+                if !sig.poisoned && !actual.is_poison() && !accepts(param_ty, &actual) {
                     self.report(
                         format!(
                             "wrong argument type in call to `{name}`: expected `{}`, found `{}`",
@@ -2500,7 +2541,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let field_ty = self.subst_type(&field.ty, &def.params, &resolved, span);
-            if !actual.is_poison() && *actual != field_ty {
+            if !actual.is_poison() && !accepts(&field_ty, actual) {
                 self.report(
                     format!(
                         "wrong type for field `{field_name}` in construction of `{}`: expected `{}`, found `{}`",
@@ -2536,6 +2577,7 @@ impl<'a> Checker<'a> {
             Type::Prim(PrimitiveType::Float) => Ty::Float,
             Type::Prim(PrimitiveType::Bool) => Ty::Bool,
             Type::Prim(PrimitiveType::Str) => Ty::Str,
+            Type::Prim(PrimitiveType::Byte) => Ty::Byte,
             Type::Array(elem) => Ty::Array(Box::new(self.peek_subst_type(elem, params, args))),
             Type::Map { key, value } => Ty::Map(
                 Box::new(self.peek_subst_type(key, params, args)),
@@ -3030,7 +3072,7 @@ impl<'a> Checker<'a> {
         }
         for (actual, field) in typed.iter().zip(&variant_def.fields) {
             let field_ty = self.subst_type(&field.ty, &def.params, &resolved, span);
-            if !actual.is_poison() && *actual != field_ty {
+            if !actual.is_poison() && !accepts(&field_ty, actual) {
                 self.report(
                     format!(
                         "wrong type for payload `{}` of `{}.{variant}`: expected `{}`, found `{}`",
@@ -3247,7 +3289,7 @@ impl<'a> Checker<'a> {
                 if !actual.is_poison() {
                     elem_ty = actual;
                 }
-            } else if !actual.is_poison() && actual != elem_ty {
+            } else if !actual.is_poison() && !accepts(&elem_ty, &actual) {
                 self.report(
                     format!(
                         "array elements must all have type `{}`, found `{}`",
@@ -3339,6 +3381,14 @@ impl TypeDef {
     }
 }
 
+/// Slot acceptance with the one §2.4 byte rule: a `byte` value widens
+/// (losslessly) to `int` at any slot that expects an int. Every other
+/// pairing stays exact — int never narrows into a byte slot except
+/// through the crystallized-literal path in `type_expr`.
+fn accepts(expected: &Ty, actual: &Ty) -> bool {
+    expected == actual || (expected == &Ty::Int && actual == &Ty::Byte)
+}
+
 /// The base name of an lvalue, for assignment diagnostics.
 fn lvalue_name(target: &LValue) -> String {
     match target {
@@ -3362,25 +3412,37 @@ fn binary_result(op: BinaryOp, left: &Ty, right: &Ty) -> Option<Ty> {
         BinaryOp::Add => match (left, right) {
             (Ty::Int, Ty::Int) => Some(Ty::Int),
             (Ty::Float, Ty::Float) => Some(Ty::Float),
+            // Byte stays byte-typed (§2.4): overflow-checked arithmetic in
+            // the 0..=255 domain. A byte mixed with an int widens the byte
+            // operand (lossless — every byte is an int value).
+            (Ty::Byte, Ty::Byte) => Some(Ty::Byte),
+            (Ty::Int, Ty::Byte) | (Ty::Byte, Ty::Int) => Some(Ty::Int),
             // §A.6: either side str (scalars only), the other stringifies.
-            (Ty::Str, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
-            | (Ty::Int | Ty::Float | Ty::Bool, Ty::Str) => Some(Ty::Str),
+            (Ty::Str, Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Byte)
+            | (Ty::Int | Ty::Float | Ty::Bool | Ty::Byte, Ty::Str) => Some(Ty::Str),
             _ => None,
         },
         BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => match (left, right) {
             (Ty::Int, Ty::Int) => Some(Ty::Int),
             (Ty::Float, Ty::Float) => Some(Ty::Float),
+            (Ty::Byte, Ty::Byte) => Some(Ty::Byte),
+            (Ty::Int, Ty::Byte) | (Ty::Byte, Ty::Int) => Some(Ty::Int),
             _ => None,
         },
         BinaryOp::Rem => match (left, right) {
             (Ty::Int, Ty::Int) => Some(Ty::Int),
+            (Ty::Byte, Ty::Byte) => Some(Ty::Byte),
+            (Ty::Int, Ty::Byte) | (Ty::Byte, Ty::Int) => Some(Ty::Int),
             _ => None,
         },
         // §A.4: strict same-type value equality, structural for structs
         // and enums (Ty equality compares registry index and arguments).
+        // byte == int stays forbidden: widening is a lossless arithmetic
+        // rule, not an equality mixing.
         BinaryOp::Eq | BinaryOp::Ne => (left == right).then_some(Ty::Bool),
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => match (left, right) {
-            (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => Some(Ty::Bool),
+            (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) | (Ty::Byte, Ty::Byte) => Some(Ty::Bool),
+            (Ty::Int, Ty::Byte) | (Ty::Byte, Ty::Int) => Some(Ty::Bool),
             _ => None,
         },
         BinaryOp::And | BinaryOp::Or => match (left, right) {

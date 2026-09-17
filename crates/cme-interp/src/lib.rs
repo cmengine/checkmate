@@ -69,8 +69,8 @@ use std::time::Instant;
 
 use cme_core::Span;
 use cme_core::ast::{
-    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, InterpPart, LValue, Pattern, Stmt,
-    StmtKind, Type, UnaryOp,
+    BinaryOp, Block, CallArg, CompoundOp, Expr, ExprKind, InterpPart, LValue, Pattern,
+    PrimitiveType, Stmt, StmtKind, Type, UnaryOp,
 };
 
 /// The call-depth bound. [`MAX_CALL_DEPTH`] is the interpreter default; a
@@ -92,6 +92,11 @@ pub const MAX_CALL_DEPTH: usize = 1024;
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
+    /// An unsigned 8-bit value (0–255): the runtime shape of the `byte`
+    /// primitive (§2.4). The checker guarantees a byte slot receives a
+    /// byte value or an in-range integer literal, so the walker
+    /// crystallizes the literal at every byte-typed slot it fills.
+    Byte(u8),
     Float(f64),
     Str(String),
     Bool(bool),
@@ -114,9 +119,11 @@ pub enum Value {
 impl fmt::Display for Value {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // Decimal for ints, shortest-round-trip for floats (Rust's
-            // `{}` is exactly the §A.6 canonical form), raw text for str.
+            // Decimal for ints and bytes, shortest-round-trip for floats
+            // (Rust's `{}` is exactly the §A.6 canonical form), raw text
+            // for str.
             Value::Int(value) => write!(formatter, "{value}"),
+            Value::Byte(value) => write!(formatter, "{value}"),
             Value::Float(value) => write!(formatter, "{value}"),
             Value::Str(text) => write!(formatter, "{text}"),
             Value::Bool(value) => write!(formatter, "{value}"),
@@ -156,6 +163,7 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Byte(a), Value::Byte(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -198,6 +206,7 @@ impl Value {
     fn kind_name(&self) -> String {
         match self {
             Value::Int(_) => "int".into(),
+            Value::Byte(_) => "byte".into(),
             Value::Float(_) => "float".into(),
             Value::Str(_) => "str".into(),
             Value::Bool(_) => "bool".into(),
@@ -215,6 +224,14 @@ impl Value {
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Value::Int(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The `byte` payload, or `None` for any other kind (§13.1).
+    pub fn as_byte(&self) -> Option<u8> {
+        match self {
+            Value::Byte(value) => Some(*value),
             _ => None,
         }
     }
@@ -270,6 +287,12 @@ impl Value {
 impl From<i64> for Value {
     fn from(value: i64) -> Self {
         Value::Int(value)
+    }
+}
+
+impl From<u8> for Value {
+    fn from(value: u8) -> Self {
+        Value::Byte(value)
     }
 }
 
@@ -740,9 +763,10 @@ impl<'env, 'a> Runner<'env, 'a> {
         self.depth += 1;
         // The function frame holds the parameters together with the body's
         // top-level declarations; each nested block execution gets its own
-        // frame below it.
+        // frame below it. Parameter slots crystallize byte literals (§2.4).
         let mut frame = HashMap::with_capacity(params.len());
         for (param, value) in params.iter().zip(args) {
+            let value = self.coerce_to_declared(value, &param.ty);
             frame.insert(param.name.clone(), value);
         }
         self.scopes.push(frame);
@@ -751,11 +775,12 @@ impl<'env, 'a> Runner<'env, 'a> {
         self.depth -= 1;
 
         match flow {
-            Ok(Flow::Return(value)) => Ok(value),
+            Ok(Flow::Return(value)) => Ok(self.coerce_to_declared(value, return_ty)),
             // The `?` control signal: the enclosing function returns the
             // carried value (an `Err` construction) at this boundary.
             Err(error) if error.control.is_some() => {
-                Ok(error.control.map(|boxed| *boxed).unwrap_or(Value::Void))
+                let value = error.control.map(|boxed| *boxed).unwrap_or(Value::Void);
+                Ok(self.coerce_to_declared(value, return_ty))
             }
             Err(error) => Err(error),
             // Falling off the end of a void function is normal; falling
@@ -798,9 +823,12 @@ impl<'env, 'a> Runner<'env, 'a> {
                 self.eval(expr)?;
                 Ok(Flow::Normal)
             }
-            // Type-agnostic: the checker ran; evaluate and bind.
-            StmtKind::VarDecl { name, expr, .. } => {
+            // Type-aware at byte slots (§2.4): the checker admits only
+            // byte-typed values or in-range integer literals, so the
+            // walker crystallizes the literal via the declared type.
+            StmtKind::VarDecl { ty, name, expr } => {
                 let value = self.eval(expr)?;
+                let value = self.coerce_to_declared(value, ty);
                 self.declare_variable(name, value, stmt.span)?;
                 Ok(Flow::Normal)
             }
@@ -816,6 +844,15 @@ impl<'env, 'a> Runner<'env, 'a> {
                 let current = self.read_variable(&base_name, stmt.span)?;
                 let current = read_path(&current, &ops, stmt.span)?;
                 let right = self.eval(expr)?;
+                // Byte slot: the checker guarantees the right operand is a
+                // byte value or an in-range integer literal — crystallize
+                // the literal against the slot's runtime kind (§2.4).
+                let right = match (&current, right) {
+                    (Value::Byte(_), Value::Int(v)) if (0..=u8::MAX as i64).contains(&v) => {
+                        Value::Byte(v as u8)
+                    }
+                    (_, other) => other,
+                };
                 let result =
                     self.apply_binary(compound_to_binary(*op), current, right, stmt.span)?;
                 let mut base = self.read_variable(&base_name, stmt.span)?;
@@ -866,10 +903,10 @@ impl<'env, 'a> Runner<'env, 'a> {
             // §2.14: iterate the array in order, binding each element to a
             // fresh per-iteration declaration.
             StmtKind::For {
+                elem_ty,
                 elem_name,
                 iterable,
                 body,
-                ..
             } => {
                 let collection = self.eval(iterable)?;
                 // §1.4.10 (plan): iterating a map yields its KEYS in
@@ -887,6 +924,7 @@ impl<'env, 'a> Runner<'env, 'a> {
                 };
                 for element in keys_or_elements {
                     let mut scope = HashMap::new();
+                    let element = self.coerce_to_declared(element, elem_ty);
                     scope.insert(elem_name.clone(), element);
                     self.scopes.push(scope);
                     let flow = self.exec_stmts(&body.stmts);
@@ -1383,7 +1421,11 @@ impl<'env, 'a> Runner<'env, 'a> {
                 .iter()
                 .find(|(arg_name, _)| *arg_name == field.name.as_str())
             {
-                Some((_, expr)) => values.push((field.name.clone(), self.eval(expr)?)),
+                Some((_, expr)) => {
+                    let value = self.eval(expr)?;
+                    let value = self.coerce_to_declared(value, &field.ty);
+                    values.push((field.name.clone(), value))
+                }
                 None => {
                     return Err(InterpError::new(
                         format!("missing field `{}` in construction of `{name}`", field.name),
@@ -1578,11 +1620,13 @@ impl<'env, 'a> Runner<'env, 'a> {
         span: Span,
     ) -> Result<Value, InterpError> {
         let mut values = Vec::with_capacity(args.len());
-        for arg in args {
+        for (arg, field) in args.iter().zip(&variant_def.fields) {
             let expr = match arg {
                 CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
             };
-            values.push(self.eval(expr)?);
+            let value = self.eval(expr)?;
+            let value = self.coerce_to_declared(value, &field.ty);
+            values.push(value);
         }
         if values.len() != variant_def.fields.len() {
             return Err(InterpError::new(
@@ -1694,6 +1738,83 @@ impl<'env, 'a> Runner<'env, 'a> {
         }
     }
 
+    /// Crystallizes an integer literal's runtime shape at a byte-typed
+    /// slot (§2.4): the checker admits only byte-typed values or in-range
+    /// integer literals into byte positions, so this converts `Int → Byte`
+    /// at every byte-typed slot the walker fills — declarations, params,
+    /// returns, struct fields, enum payloads, for-each elements — and
+    /// recurses through arrays, maps, and the §2.8 built-in generics.
+    fn coerce_to_declared(&self, value: Value, ty: &Type) -> Value {
+        match (value, ty) {
+            // §2.4 byte rules: crystallize an in-range int literal into a
+            // byte slot, and widen a byte value losslessly into an int
+            // slot — the two directions the checker admits.
+            (Value::Int(v), Type::Prim(PrimitiveType::Byte))
+                if (0..=u8::MAX as i64).contains(&v) =>
+            {
+                Value::Byte(v as u8)
+            }
+            (Value::Byte(v), Type::Prim(PrimitiveType::Int)) => Value::Int(v as i64),
+            (Value::Array(items), Type::Array(elem)) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| self.coerce_to_declared(item, elem))
+                    .collect(),
+            ),
+            (Value::Map(entries), Type::Map { key, value }) => Value::Map(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            self.coerce_to_declared(k, key),
+                            self.coerce_to_declared(v, value),
+                        )
+                    })
+                    .collect(),
+            ),
+            (
+                Value::Enum {
+                    name,
+                    variant,
+                    payload,
+                },
+                Type::Named {
+                    name: ty_name,
+                    args,
+                },
+            ) if ty_name == "option" && args.len() == 1 => Value::Enum {
+                name,
+                variant,
+                payload: payload
+                    .into_iter()
+                    .map(|p| self.coerce_to_declared(p, &args[0]))
+                    .collect(),
+            },
+            (
+                Value::Enum {
+                    name,
+                    variant,
+                    payload,
+                },
+                Type::Named {
+                    name: ty_name,
+                    args,
+                },
+            ) if ty_name == "result" && args.len() == 2 => {
+                let arg = if variant == "Ok" { &args[0] } else { &args[1] };
+                Value::Enum {
+                    name,
+                    variant,
+                    payload: payload
+                        .into_iter()
+                        .map(|p| self.coerce_to_declared(p, arg))
+                        .collect(),
+                }
+            }
+            (value, _) => value,
+        }
+    }
+
     /// Strict binary arithmetic/comparison/equality on already-evaluated
     /// operands. `&&` and `||` never reach this path (they short-circuit).
     fn apply_binary(
@@ -1719,6 +1840,13 @@ impl<'env, 'a> Runner<'env, 'a> {
                 (Value::Int(a), Value::Int(b)) => {
                     a.checked_add(b).map(Value::Int).ok_or_else(overflow)
                 }
+                (Value::Byte(a), Value::Byte(b)) => {
+                    a.checked_add(b).map(Value::Byte).ok_or_else(overflow)
+                }
+                // A byte mixed with an int widens (lossless) and computes
+                // as int (§2.4).
+                (Value::Byte(a), Value::Int(b)) => Ok(Value::Int(a as i64 + b)),
+                (Value::Int(a), Value::Byte(b)) => Ok(Value::Int(a + b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 // §A.6: when either operand is a str, + concatenates with
                 // the other side's canonical string form.
@@ -1741,6 +1869,11 @@ impl<'env, 'a> Runner<'env, 'a> {
                 (Value::Int(a), Value::Int(b)) => {
                     a.checked_sub(b).map(Value::Int).ok_or_else(overflow)
                 }
+                (Value::Byte(a), Value::Byte(b)) => {
+                    a.checked_sub(b).map(Value::Byte).ok_or_else(overflow)
+                }
+                (Value::Byte(a), Value::Int(b)) => Ok(Value::Int(a as i64 - b)),
+                (Value::Int(a), Value::Byte(b)) => Ok(Value::Int(a - b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
                 _ => Err(mismatch()),
             },
@@ -1748,6 +1881,11 @@ impl<'env, 'a> Runner<'env, 'a> {
                 (Value::Int(a), Value::Int(b)) => {
                     a.checked_mul(b).map(Value::Int).ok_or_else(overflow)
                 }
+                (Value::Byte(a), Value::Byte(b)) => {
+                    a.checked_mul(b).map(Value::Byte).ok_or_else(overflow)
+                }
+                (Value::Byte(a), Value::Int(b)) => Ok(Value::Int(a as i64 * b)),
+                (Value::Int(a), Value::Byte(b)) => Ok(Value::Int(a * b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                 _ => Err(mismatch()),
             },
@@ -1765,11 +1903,27 @@ impl<'env, 'a> Runner<'env, 'a> {
                 // Float division is ordinary IEEE 754: a zero divisor is
                 // inf/NaN, not an error.
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+                // Unsigned byte division cannot overflow, so
+                // `checked_div`'s only failure mode is the zero divisor.
+                (Value::Byte(a), Value::Byte(b)) => a
+                    .checked_div(b)
+                    .map(Value::Byte)
+                    .ok_or_else(|| InterpError::new("integer division by zero", span)),
+                (Value::Byte(a), Value::Int(b)) => (a as i64)
+                    .checked_div(b)
+                    .map(Value::Int)
+                    .ok_or_else(|| InterpError::new("integer division by zero", span)),
+                (Value::Int(a), Value::Byte(b)) => a
+                    .checked_div(b as i64)
+                    .map(Value::Int)
+                    .ok_or_else(|| InterpError::new("integer division by zero", span)),
                 _ => Err(mismatch()),
             },
             BinaryOp::Rem => match (left, right) {
                 // §A.5: remainder of truncated division, sign of the
-                // dividend: -7 % 2 is -1, 7 % -2 is 1. Int-only (§A.4).
+                // dividend: -7 % 2 is -1, 7 % -2 is 1. Int-only (§A.4);
+                // byte remainder is unsigned, so the dividend's sign is
+                // its own value.
                 (Value::Int(a), Value::Int(b)) => {
                     if b == 0 {
                         Err(InterpError::new("integer remainder by zero", span))
@@ -1777,6 +1931,21 @@ impl<'env, 'a> Runner<'env, 'a> {
                         a.checked_rem(b).map(Value::Int).ok_or_else(overflow)
                     }
                 }
+                // As with division: unsigned byte remainder cannot
+                // overflow, so `checked_rem` only fails on the zero
+                // divisor.
+                (Value::Byte(a), Value::Byte(b)) => a
+                    .checked_rem(b)
+                    .map(Value::Byte)
+                    .ok_or_else(|| InterpError::new("integer remainder by zero", span)),
+                (Value::Byte(a), Value::Int(b)) => (a as i64)
+                    .checked_rem(b)
+                    .map(Value::Int)
+                    .ok_or_else(|| InterpError::new("integer remainder by zero", span)),
+                (Value::Int(a), Value::Byte(b)) => a
+                    .checked_rem(b as i64)
+                    .map(Value::Int)
+                    .ok_or_else(|| InterpError::new("integer remainder by zero", span)),
                 _ => Err(mismatch()),
             },
             // §A.4: strict same-type value equality; float follows IEEE 754
@@ -1786,21 +1955,33 @@ impl<'env, 'a> Runner<'env, 'a> {
             BinaryOp::Ne => Ok(Value::Bool(left != right)),
             BinaryOp::Lt => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a < b)),
+                (Value::Byte(a), Value::Byte(b)) => Ok(Value::Bool(a < b)),
+                (Value::Byte(a), Value::Int(b)) => Ok(Value::Bool((*a as i64) < *b)),
+                (Value::Int(a), Value::Byte(b)) => Ok(Value::Bool(*a < *b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a < b)),
                 _ => Err(mismatch()),
             },
             BinaryOp::Le => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a <= b)),
+                (Value::Byte(a), Value::Byte(b)) => Ok(Value::Bool(a <= b)),
+                (Value::Byte(a), Value::Int(b)) => Ok(Value::Bool((*a as i64) <= *b)),
+                (Value::Int(a), Value::Byte(b)) => Ok(Value::Bool(*a <= *b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a <= b)),
                 _ => Err(mismatch()),
             },
             BinaryOp::Gt => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a > b)),
+                (Value::Byte(a), Value::Byte(b)) => Ok(Value::Bool(a > b)),
+                (Value::Byte(a), Value::Int(b)) => Ok(Value::Bool((*a as i64) > *b)),
+                (Value::Int(a), Value::Byte(b)) => Ok(Value::Bool(*a > *b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
                 _ => Err(mismatch()),
             },
             BinaryOp::Ge => match (&left, &right) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
+                (Value::Byte(a), Value::Byte(b)) => Ok(Value::Bool(a >= b)),
+                (Value::Byte(a), Value::Int(b)) => Ok(Value::Bool((*a as i64) >= *b)),
+                (Value::Int(a), Value::Byte(b)) => Ok(Value::Bool(*a >= *b as i64)),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
                 _ => Err(mismatch()),
             },
@@ -1885,7 +2066,15 @@ fn write_path(
     span: Span,
 ) -> Result<(), InterpError> {
     let Some((op, rest)) = ops.split_first() else {
-        *value = new;
+        // Byte slot write: the checker admits a byte-typed value or an
+        // in-range integer literal, so crystallize the literal against the
+        // slot's existing runtime kind (§2.4).
+        *value = match (&*value, new) {
+            (Value::Byte(_), Value::Int(v)) if (0..=u8::MAX as i64).contains(&v) => {
+                Value::Byte(v as u8)
+            }
+            (_, new) => new,
+        };
         return Ok(());
     };
     match (op, value) {

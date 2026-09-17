@@ -90,6 +90,11 @@ pub mod ast {
         Float,
         Bool,
         Str,
+        /// An unsigned 8-bit integer (0–255), the `u8` of the language.
+        /// Arithmetic stays `byte`-typed and overflow-checked; an integer
+        /// literal in `byte` position crystallizes as a `byte` after a
+        /// compile-time range check.
+        Byte,
     }
 
     /// A function parameter: declared type plus name.

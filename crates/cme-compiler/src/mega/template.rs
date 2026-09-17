@@ -1513,6 +1513,7 @@ pub(crate) fn escape_checkmate(text: &str) -> String {
 fn value_kind_name(value: &Value) -> &'static str {
     match value {
         Value::Int(_) => "int",
+        Value::Byte(_) => "byte",
         Value::Float(_) => "float",
         Value::Str(_) => "str",
         Value::Bool(_) => "bool",

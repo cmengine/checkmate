@@ -65,7 +65,7 @@ in every identifier position and in schema files too. `mega` alone,
 
 ## Primitive type names
 
-The five scalar type names are reserved:
+The scalar type names are reserved:
 
 | Type | Meaning |
 | --- | --- |
@@ -73,6 +73,7 @@ The five scalar type names are reserved:
 | `float` | 64-bit IEEE 754 floating point |
 | `bool` | `true` or `false` |
 | `str` | Immutable UTF-8 string |
+| `byte` | Unsigned 8-bit integer, 0..=255 |
 | `void` | The type of "no value"; functions returning nothing |
 
 Details in [Types](../language/types.md).

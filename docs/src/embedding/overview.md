@@ -78,6 +78,7 @@ Script values map to a tagged value type on the host side:
 | --- | --- | --- |
 | `void` | `Value::Void` | `CM_VALUE_VOID` |
 | `int` | `Value::Int(i64)` | `CM_VALUE_INT` |
+| `byte` | `Value::Byte(u8)` | `CM_VALUE_BYTE` |
 | `float` | `Value::Float(f64)` | `CM_VALUE_FLOAT` |
 | `bool` | `Value::Bool(bool)` | `CM_VALUE_BOOL` |
 | `str` | `Value::Str(String)` | `CM_VALUE_STR` |

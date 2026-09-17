@@ -38,7 +38,13 @@ apply to the Checkmate source itself.
 
 ## Identifiers
 
-Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. Case is significant and carries
+An identifier is a letter- or underscore-led word (`[A-Za-z_][A-Za-z0-9_]*`),
+or a **digit-led** word that carries at least one non-digit character —
+`3Vector`, `2D`, and `2_D` are all legal identifiers, while a pure digit run
+(`123`) is an integer literal and never a name. Longest match decides: the
+moment a digit run runs into a letter or underscore, the whole word scans as
+one identifier (`123abc` is the identifier `123abc`, not the literal `123`
+followed by a name). Case is significant and carries
 meaning — see [Boundary Capitalization](#boundary-capitalization) below.
 
 Keywords cannot be identifiers. The reserved set includes the declaration

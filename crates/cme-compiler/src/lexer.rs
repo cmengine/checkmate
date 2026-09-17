@@ -320,11 +320,14 @@ pub enum Token<'a> {
     Question,
 
     // Identifiers (e.g., variable names, function names)
-    // This regex matches a letter or underscore, followed by any number of
-    // letters, numbers, or underscores. The callback fails the reserved
-    // `mega<N>` shape (see [`is_reserved_mega_ident`]); recovery reports
-    // the dedicated diagnostic.
+    // Two shapes match: a letter or underscore followed by word characters,
+    // and (§2.4 identifiers) a digit-led run containing at least one
+    // non-digit character (`3Vector`, `2D`, `2_D`) — a pure digit run is an
+    // integer literal, never an identifier. The callback fails the
+    // reserved `mega<N>` shape (see [`is_reserved_mega_ident`]); recovery
+    // reports the dedicated diagnostic.
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", ident)]
+    #[regex(r"[0-9]+[a-zA-Z_][a-zA-Z0-9_]*", ident)]
     Ident(&'a str),
 
     // Keywords
@@ -1496,5 +1499,79 @@ mod reserved_ident_tests {
                 "`{source}` must report the reserved shape"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod digit_start_ident_tests {
+    use crate::lexer::{Token, lex, lex_with_errors};
+
+    #[test]
+    fn digit_led_identifiers_with_a_non_digit_lex_as_one_ident() {
+        let tokens = lex("int 3Vector = 1\nfloat 2D = 2.0\nbool _2fast = true\n")
+            .expect("digit-led idents are legal");
+        let names: Vec<_> = tokens
+            .into_iter()
+            .filter_map(|spanned| match spanned.token {
+                Token::Ident(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["3Vector", "2D", "_2fast"]);
+    }
+
+    #[test]
+    fn pure_digit_runs_stay_integer_literals() {
+        let tokens = lex("int x = 123").expect("a digit run is an int literal");
+        assert!(
+            tokens
+                .iter()
+                .any(|spanned| matches!(spanned.token, Token::IntLit(123)))
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|spanned| matches!(spanned.token, Token::Ident("123"))),
+            "a pure digit run never scans as an identifier"
+        );
+    }
+
+    #[test]
+    fn float_literals_still_scan_through_a_digit_dot_digit() {
+        let tokens = lex("float x = 2.5").expect("float literals unchanged");
+        assert!(
+            tokens.iter().any(
+                |spanned| matches!(spanned.token, Token::FloatLit(v) if (v - 2.5).abs() < 1e-9)
+            )
+        );
+    }
+
+    #[test]
+    fn a_digit_run_with_a_trailing_letter_becomes_one_ident() {
+        // `123abc` used to lex as INT(123) + IDENT(abc); the longest-match
+        // digit-led ident now consumes the whole run.
+        let tokens = lex("int 123abc = 1").expect("123abc is an identifier");
+        let names: Vec<_> = tokens
+            .into_iter()
+            .filter_map(|spanned| match spanned.token {
+                Token::Ident(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["123abc"]);
+    }
+
+    #[test]
+    fn reserved_mega_shape_is_rejected_in_digit_form_too() {
+        // `mega0` cannot start with a digit, but the digit-led ident path
+        // still feeds the same callback: `0mega` is a legal ident.
+        let (_, errors) = lex_with_errors("int mega0 = 1\n");
+        assert!(!errors.is_empty(), "mega0 stays reserved");
+        let tokens = lex("int 0mega = 1").expect("0mega is a legal identifier");
+        assert!(
+            tokens
+                .iter()
+                .any(|spanned| matches!(spanned.token, Token::Ident("0mega")))
+        );
     }
 }

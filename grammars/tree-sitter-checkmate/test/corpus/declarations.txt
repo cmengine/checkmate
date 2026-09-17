@@ -193,3 +193,50 @@ impl engine.gamemode {
       body: (block
         (return_statement
           value: (identifier))))))
+
+================================================================================
+Digit-led identifiers: legal with a non-digit character, pure digits are literals
+================================================================================
+
+struct 2D {
+    int x
+}
+
+int 3Vector(int 2d_px) {
+    return 2d_px
+}
+
+int main() {
+    int count = 123
+    return count
+}
+
+---
+
+(source_file
+  (struct_declaration
+    name: (identifier)
+    (field_declaration
+      type: (primitive_type)
+      name: (identifier)))
+  (function_declaration
+    return_type: (primitive_type)
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        type: (primitive_type)
+        name: (identifier)))
+    body: (block
+      (return_statement
+        value: (identifier))))
+  (function_declaration
+    return_type: (primitive_type)
+    name: (identifier)
+    parameters: (parameter_list)
+    body: (block
+      (variable_declaration
+        type: (primitive_type)
+        name: (identifier)
+        value: (int_literal))
+      (return_statement
+        value: (identifier)))))

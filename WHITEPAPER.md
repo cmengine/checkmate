@@ -44,6 +44,8 @@ The host contract is governed by versioned `.cm` schema files acting as the sing
 
 Checkmate’s syntax prioritizes visual clarity, regular grammatical structure, and predictability for human authors and large language models (LLMs).
 
+**Identifiers** are letter- or underscore-led words (`[A-Za-z_][A-Za-z0-9_]*`), or digit-led words that contain at least one non-digit character: `3Vector`, `2D`, and `2_D` are all legal identifiers, while a pure digit run is an integer literal, never a name. The digit-led shape scans by longest match — `123abc` is the single identifier `123abc`.
+
 ### 2.1. Files and Organization
 
 Source files use the `.cm` extension. There is no implicit global entry point (such as `main()`); host execution targets specific interface functions or exposed entry points.

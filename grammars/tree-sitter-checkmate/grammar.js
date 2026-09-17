@@ -137,7 +137,10 @@ module.exports = grammar({
 
     wildcard: ($) => token(prec(1, '_')),
 
-    identifier: ($) => /[a-zA-Z_][a-zA-Z0-9_]*/,
+    // A letter- or underscore-led word, or a digit-led word carrying at
+    // least one non-digit character (`3Vector`, `2D`): a pure digit run is
+    // an integer literal, never an identifier.
+    identifier: ($) => /([a-zA-Z_]|[0-9]+[a-zA-Z_])[a-zA-Z0-9_]*/,
 
     dotted_path: ($) =>
       prec.left(seq($.identifier, repeat(seq('.', $.identifier)))),

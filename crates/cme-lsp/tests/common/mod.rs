@@ -144,3 +144,7 @@ pub fn outline(
         })
         .collect()
 }
+
+/// The wire-level lifecycle harness shared by the lifecycle suites
+/// (authoring, project, robustness).
+pub mod wire;

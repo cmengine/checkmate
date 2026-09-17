@@ -1254,21 +1254,19 @@ impl<'env, 'a> Runner<'env, 'a> {
                 let left = self.eval(lhs)?;
                 // §2.4 literal crystallization, walker side (mirrors the
                 // checker's Binary typing in `check::type_expr`): a
-                // byte-typed operand crystallizes a direct integer literal
-                // on the other side — and a parenthesized one, because the
-                // checker threads the expected type through parens — so
-                // `b + 100`, `100 + b`, and `b == 5` compute in the byte
-                // domain instead of widening to int.
+                // byte-typed operand crystallizes a DIRECT integer literal
+                // on the other side, so `b + 100`, `100 + b`, and `b == 5`
+                // compute in the byte domain instead of widening to int.
+                // Parenthesized literals do NOT crystallize here — the
+                // checker's Binary arm matches the operand node kind
+                // directly, so `(100) + b` and `b + (1 + 2)` are genuine
+                // int arithmetic; the walker follows suit.
                 let right = match (&left, &rhs.kind) {
-                    (Value::Byte(_), ExprKind::IntLit(_) | ExprKind::Paren { .. }) => {
-                        self.eval_byte_position(rhs)?
-                    }
+                    (Value::Byte(_), ExprKind::IntLit(_)) => self.eval_byte_position(rhs)?,
                     _ => self.eval(rhs)?,
                 };
                 // Mirror pass: a byte-typed right operand crystallizes a
-                // direct integer literal on the left. Only a direct IntLit
-                // re-crystallizes here (the checker's asymmetry: parens
-                // thread on the right side only), and a literal is pure,
+                // direct integer literal on the left. A literal is pure,
                 // so the re-evaluation cannot reorder side effects.
                 let left = match (&right, &lhs.kind) {
                     (Value::Byte(_), ExprKind::IntLit(_)) => self.eval_byte_position(lhs)?,

@@ -766,7 +766,7 @@ impl<'env, 'a> Runner<'env, 'a> {
         // frame below it. Parameter slots crystallize byte literals (§2.4).
         let mut frame = HashMap::with_capacity(params.len());
         for (param, value) in params.iter().zip(args) {
-            let value = self.coerce_to_declared(value, &param.ty);
+            let value = self.coerce_to_declared(value, &param.ty, call_span)?;
             frame.insert(param.name.clone(), value);
         }
         self.scopes.push(frame);
@@ -775,12 +775,12 @@ impl<'env, 'a> Runner<'env, 'a> {
         self.depth -= 1;
 
         match flow {
-            Ok(Flow::Return(value)) => Ok(self.coerce_to_declared(value, return_ty)),
+            Ok(Flow::Return(value)) => Ok(self.coerce_to_declared(value, return_ty, call_span)?),
             // The `?` control signal: the enclosing function returns the
             // carried value (an `Err` construction) at this boundary.
             Err(error) if error.control.is_some() => {
                 let value = error.control.map(|boxed| *boxed).unwrap_or(Value::Void);
-                Ok(self.coerce_to_declared(value, return_ty))
+                Ok(self.coerce_to_declared(value, return_ty, call_span)?)
             }
             Err(error) => Err(error),
             // Falling off the end of a void function is normal; falling
@@ -828,7 +828,7 @@ impl<'env, 'a> Runner<'env, 'a> {
             // walker crystallizes the literal via the declared type.
             StmtKind::VarDecl { ty, name, expr } => {
                 let value = self.eval(expr)?;
-                let value = self.coerce_to_declared(value, ty);
+                let value = self.coerce_to_declared(value, ty, stmt.span)?;
                 self.declare_variable(name, value, stmt.span)?;
                 Ok(Flow::Normal)
             }
@@ -924,7 +924,7 @@ impl<'env, 'a> Runner<'env, 'a> {
                 };
                 for element in keys_or_elements {
                     let mut scope = HashMap::new();
-                    let element = self.coerce_to_declared(element, elem_ty);
+                    let element = self.coerce_to_declared(element, elem_ty, iterable.span)?;
                     scope.insert(elem_name.clone(), element);
                     self.scopes.push(scope);
                     let flow = self.exec_stmts(&body.stmts);
@@ -1252,9 +1252,51 @@ impl<'env, 'a> Runner<'env, 'a> {
             }
             _ => {
                 let left = self.eval(lhs)?;
-                let right = self.eval(rhs)?;
+                // §2.4 literal crystallization, walker side (mirrors the
+                // checker's Binary typing in `check::type_expr`): a
+                // byte-typed operand crystallizes a direct integer literal
+                // on the other side — and a parenthesized one, because the
+                // checker threads the expected type through parens — so
+                // `b + 100`, `100 + b`, and `b == 5` compute in the byte
+                // domain instead of widening to int.
+                let right = match (&left, &rhs.kind) {
+                    (Value::Byte(_), ExprKind::IntLit(_) | ExprKind::Paren { .. }) => {
+                        self.eval_byte_position(rhs)?
+                    }
+                    _ => self.eval(rhs)?,
+                };
+                // Mirror pass: a byte-typed right operand crystallizes a
+                // direct integer literal on the left. Only a direct IntLit
+                // re-crystallizes here (the checker's asymmetry: parens
+                // thread on the right side only), and a literal is pure,
+                // so the re-evaluation cannot reorder side effects.
+                let left = match (&right, &lhs.kind) {
+                    (Value::Byte(_), ExprKind::IntLit(_)) => self.eval_byte_position(lhs)?,
+                    _ => left,
+                };
                 self.apply_binary(op, left, right, span)
             }
+        }
+    }
+
+    /// Evaluates an expression in byte position (§2.4 literal
+    /// crystallization — the walker half of the checker's expected-type
+    /// threading): an in-range integer literal evaluates to its Byte
+    /// shape, parens forward the position, everything else ignores it.
+    /// Out-of-range literals are checker-rejected ("byte literal out of
+    /// range"), so the Int fallback is reachable only through an
+    /// unchecked tree.
+    fn eval_byte_position(&mut self, expr: &'a Expr) -> Result<Value, InterpError> {
+        match &expr.kind {
+            ExprKind::IntLit(value) => {
+                if (0..=u8::MAX as i64).contains(value) {
+                    Ok(Value::Byte(*value as u8))
+                } else {
+                    Ok(Value::Int(*value))
+                }
+            }
+            ExprKind::Paren { expr: inner } => self.eval_byte_position(inner),
+            _ => self.eval(expr),
         }
     }
 
@@ -1423,7 +1465,7 @@ impl<'env, 'a> Runner<'env, 'a> {
             {
                 Some((_, expr)) => {
                     let value = self.eval(expr)?;
-                    let value = self.coerce_to_declared(value, &field.ty);
+                    let value = self.coerce_to_declared(value, &field.ty, expr.span)?;
                     values.push((field.name.clone(), value))
                 }
                 None => {
@@ -1625,7 +1667,7 @@ impl<'env, 'a> Runner<'env, 'a> {
                 CallArg::Positional(expr) | CallArg::Named { expr, .. } => expr,
             };
             let value = self.eval(expr)?;
-            let value = self.coerce_to_declared(value, &field.ty);
+            let value = self.coerce_to_declared(value, &field.ty, expr.span)?;
             values.push(value);
         }
         if values.len() != variant_def.fields.len() {
@@ -1744,34 +1786,47 @@ impl<'env, 'a> Runner<'env, 'a> {
     /// at every byte-typed slot the walker fills — declarations, params,
     /// returns, struct fields, enum payloads, for-each elements — and
     /// recurses through arrays, maps, and the §2.8 built-in generics.
-    fn coerce_to_declared(&self, value: Value, ty: &Type) -> Value {
+    /// An out-of-range int reaching a byte slot is a domain violation (the
+    /// byte is 0..=255, §2.4): it terminates the invocation cleanly instead
+    /// of silently storing an int-shaped value in a byte slot — the walker
+    /// mirrors the checker's refuse-to-admit rule at runtime.
+    fn coerce_to_declared(
+        &self,
+        value: Value,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Value, InterpError> {
         match (value, ty) {
             // §2.4 byte rules: crystallize an in-range int literal into a
             // byte slot, and widen a byte value losslessly into an int
-            // slot — the two directions the checker admits.
-            (Value::Int(v), Type::Prim(PrimitiveType::Byte))
-                if (0..=u8::MAX as i64).contains(&v) =>
-            {
-                Value::Byte(v as u8)
+            // slot — the two directions the checker admits. Anything else
+            // int-shaped into byte is out of the byte domain.
+            (Value::Int(v), Type::Prim(PrimitiveType::Byte)) => {
+                if (0..=u8::MAX as i64).contains(&v) {
+                    Ok(Value::Byte(v as u8))
+                } else {
+                    Err(InterpError::new(
+                        format!("byte value out of range: `{v}` does not fit in 0..=255"),
+                        span,
+                    ))
+                }
             }
-            (Value::Byte(v), Type::Prim(PrimitiveType::Int)) => Value::Int(v as i64),
-            (Value::Array(items), Type::Array(elem)) => Value::Array(
-                items
-                    .into_iter()
-                    .map(|item| self.coerce_to_declared(item, elem))
-                    .collect(),
-            ),
-            (Value::Map(entries), Type::Map { key, value }) => Value::Map(
-                entries
-                    .into_iter()
-                    .map(|(k, v)| {
-                        (
-                            self.coerce_to_declared(k, key),
-                            self.coerce_to_declared(v, value),
-                        )
-                    })
-                    .collect(),
-            ),
+            (Value::Byte(v), Type::Prim(PrimitiveType::Int)) => Ok(Value::Int(v as i64)),
+            (Value::Array(items), Type::Array(elem)) => items
+                .into_iter()
+                .map(|item| self.coerce_to_declared(item, elem, span))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array),
+            (Value::Map(entries), Type::Map { key, value }) => entries
+                .into_iter()
+                .map(|(k, v)| {
+                    Ok((
+                        self.coerce_to_declared(k, key, span)?,
+                        self.coerce_to_declared(v, value, span)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Map),
             (
                 Value::Enum {
                     name,
@@ -1782,14 +1837,15 @@ impl<'env, 'a> Runner<'env, 'a> {
                     name: ty_name,
                     args,
                 },
-            ) if ty_name == "option" && args.len() == 1 => Value::Enum {
-                name,
-                variant,
-                payload: payload
-                    .into_iter()
-                    .map(|p| self.coerce_to_declared(p, &args[0]))
-                    .collect(),
-            },
+            ) if ty_name == "option" && args.len() == 1 => payload
+                .into_iter()
+                .map(|p| self.coerce_to_declared(p, &args[0], span))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|payload| Value::Enum {
+                    name,
+                    variant,
+                    payload,
+                }),
             (
                 Value::Enum {
                     name,
@@ -1802,16 +1858,17 @@ impl<'env, 'a> Runner<'env, 'a> {
                 },
             ) if ty_name == "result" && args.len() == 2 => {
                 let arg = if variant == "Ok" { &args[0] } else { &args[1] };
-                Value::Enum {
-                    name,
-                    variant,
-                    payload: payload
-                        .into_iter()
-                        .map(|p| self.coerce_to_declared(p, arg))
-                        .collect(),
-                }
+                payload
+                    .into_iter()
+                    .map(|p| self.coerce_to_declared(p, arg, span))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|payload| Value::Enum {
+                        name,
+                        variant,
+                        payload,
+                    })
             }
-            (value, _) => value,
+            (value, _) => Ok(value),
         }
     }
 

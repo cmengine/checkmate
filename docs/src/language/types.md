@@ -35,18 +35,32 @@ two rules that keep it safe and usable:
 
 - **Lossless widening.** A `byte` value widens to `int` wherever an int is
   expected — declarations, parameters, returns, struct fields, and mixed
-  arithmetic:
+  arithmetic with a genuine `int` operand:
 
   ```checkmate
   byte b = 200
   int total = b          // widening: lossless
-  int mixed = b + 10     // byte + int widens the byte, yields int
+  int i = 10
+  int mixed = b + i      // byte + int widens the byte, yields int
+  ```
+
+- **Literal crystallization extends to operators.** A direct integer
+  literal on the other side of a byte operand crystallizes too, so the
+  arithmetic itself runs in the byte domain — and `byte op byte` is
+  overflow-checked:
+
+  ```checkmate
+  byte b = 200
+  int fits = b + 55      // crystallized: byte + byte = 255, widens to int
+  int boom = b + 100     // runtime error: integer overflow in `+`
   ```
 
 `byte op byte` stays `byte` and is overflow-checked at runtime — `250 + 10`
 on two bytes terminates the invocation, exactly like int overflow.
 Equality stays strict: `byte == int` is a compile error, because widening
-is an arithmetic rule, not an equality mixing.
+is an arithmetic rule, not an equality mixing. A direct integer literal on
+one side of a byte operand crystallizes there as well, so `b == 5` checks
+as `byte == byte` and compares in the byte domain.
 
 ## Structs
 

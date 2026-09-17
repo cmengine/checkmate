@@ -5,11 +5,10 @@
 //! pinned through the full front end + tree-walker pipeline.
 //!
 //! Shape notes: a `byte` value returned through an `int main` widens to an
-//! `Int`-shaped value, so byte-shape pins use a `byte main` entry. Equality
-//! tests never compare a byte against an int literal: the checker
-//! crystallizes the literal (so the program checks clean) but the walker
-//! compares `Byte` against `Int` structurally — a checker/walker seam that
-//! is deliberately NOT pinned here. Byte-vs-byte equality is.
+//! `Int`-shaped value, so byte-shape pins use a `byte main` entry. The
+//! checker/walker crystallization seam (a byte operand vs a direct integer
+//! literal) is now closed and pinned in `lang_byte_crystallization.rs`;
+//! this suite keeps byte-vs-byte equality and the mixed variable cases.
 
 use cme_compiler::check::check;
 use cme_compiler::parse_source;
@@ -213,8 +212,9 @@ fn byte_plus_byte_stays_byte_and_overflows() {
 
 #[test]
 fn byte_addition_that_fits_stays_byte() {
-    // 200 + 55 fits: the walker's mixed-shape addition produces an int,
-    // and the byte declaration slot crystallizes it right back.
+    // 200 + 55 fits: the checker crystallizes the literal, so the walker
+    // computes the addition in the byte domain and the result is
+    // Byte-shaped directly.
     expect(
         &byte_main("byte b = 200\nbyte c = b + 55\nreturn c"),
         Value::Byte(255),

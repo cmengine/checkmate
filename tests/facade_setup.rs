@@ -1,15 +1,16 @@
-//! The `cme_schema_setup!` quick-start flow, end to end, through the
-//! explicit api-crate path (`crate = ::cme_api`) — the shape hosts that
-//! consume the API crate directly take. (The DEFAULT `::cme::api` facade
-//! path is pinned by the root `tests/facade_setup.rs` instead: this crate
-//! must not dev-depend on the facade, or the workspace gains a publish-
-//! blocking dependency cycle.) The invocation asks for everything at
-//! once: two schema namespaces, §5.5 limits, two proxies (one qualified
-//! and renamed, one unqualified with the derived field name), and one
-//! capability provider; the mod program implements both interfaces,
-//! calls the capability, and `main` returns a value the context can
-//! invoke directly.
-
+//! The `cme_schema_setup!` quick-start flow through the DEFAULT api-crate
+//! path (`::cme::api`, the facade re-export) — the shape a newcomer's host
+//! takes. Gated on `schema-macro`: under the default build this file
+//! compiles to nothing, exactly like the rest of the feature-gated facade
+//! (see `tests/facade_api.rs`).
+//!
+//! This test lives in the ROOT crate on purpose. The macro crate pins the
+//! explicit `crate = ::cme_api` path in its own `tests/setup.rs`; pinning
+//! the facade path from there would need a dev-dependency from the macro
+//! crate back onto the facade, which is a dependency cycle that blocks
+//! `cargo publish` in version order. The dependency here points
+//! facade-ward (root → macro), like every other consumer.
+#![cfg(feature = "schema-macro")]
 // The SCHEMAS_HASH recipe's doc attribute sits on a macro invocation,
 // which rustdoc does not render — the note can only be silenced from an
 // enclosing scope, not by a sibling attribute.
@@ -17,17 +18,18 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-// The macro under test: reads the fixture schemas relative to this
-// crate's manifest dir at expansion time and emits the bindings modules
-// (`demo`, `extra`) plus the host glue. The `#[doc]` attribute above the
-// invocation mirrors the documented SCHEMAS_HASH recipe — an attribute
-// changing the invocation's tokens must not change the expansion.
-#[doc = "cme_schema_setup! quick-start test"]
-cme_schema_macro::cme_schema_setup! {
-    schema = "tests/fixtures/setup_demo.cm",
-    schema = "tests/fixtures/setup_extra.cm",
-    program = mod "tests/fixtures/demo_mod",
-    crate = ::cme_api,
+// The macro under test, re-exported by the facade: reads the macro
+// crate's fixture schemas (paths resolve relative to THIS crate's
+// manifest dir, i.e. the workspace root) and emits the bindings modules
+// (`demo`, `extra`) plus the host glue referencing `::cme::api`. The
+// `#[doc]` attribute above the invocation mirrors the documented
+// SCHEMAS_HASH recipe — an attribute changing the invocation's tokens
+// must not change the expansion.
+#[doc = "cme_schema_setup! facade-path test"]
+cme::cme_schema_setup! {
+    schema = "crates/cme-schema-macro/tests/fixtures/setup_demo.cm",
+    schema = "crates/cme-schema-macro/tests/fixtures/setup_extra.cm",
+    program = mod "crates/cme-schema-macro/tests/fixtures/demo_mod",
     limits = { fuel: 100_000, max_call_depth: 64 },
     proxy = demo.DemoReporterProxy as reporter,
     proxy = ExtraPingProxy,
@@ -98,7 +100,7 @@ fn run_builds_the_context_and_every_proxy_in_one_pass() {
         // Session derefs to the context: plain invocations work without
         // naming the field.
         let main = session.invoke("main", &[]).expect("main runs");
-        assert_eq!(main, cme_api::Value::Int(7));
+        assert_eq!(main, cme::Value::Int(7));
 
         // The context reports the configured limits:
         assert_eq!(session.context.limits().fuel, Some(100_000));
@@ -124,5 +126,5 @@ fn context_method_matches_the_manual_flow() {
     let host = Host::new().expect("host setup succeeds");
     let context = host.context();
     let main = context.invoke("main", &[]).expect("main runs");
-    assert_eq!(main, cme_api::Value::Int(7));
+    assert_eq!(main, cme::Value::Int(7));
 }

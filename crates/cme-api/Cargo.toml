@@ -9,6 +9,6 @@ repository.workspace = true
 publish = true
 
 [dependencies]
-cme-core = { path = "../cme-core", version = "0.3.0" }
-cme-compiler = { path = "../cme-compiler", version = "0.3.0" }
-cme-interp = { path = "../cme-interp", version = "0.3.0" }
+cme-core = { path = "../cme-core", version = "0.4.0" }
+cme-compiler = { path = "../cme-compiler", version = "0.4.0" }
+cme-interp = { path = "../cme-interp", version = "0.4.0" }

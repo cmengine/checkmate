@@ -699,7 +699,7 @@ pub fn assemble(modules: &[LoadedModule]) -> AssembledProgram {
 fn validate_imports(statements: &[Stmt], modules: &[LoadedModule]) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for statement in statements {
-        let StmtKind::Import { path } = &statement.kind else {
+        let StmtKind::Import { path, .. } = &statement.kind else {
             continue;
         };
         if path.first().map(String::as_str) != Some("self") {
@@ -746,7 +746,7 @@ pub fn attribute_span(ranges: &[ModuleRange], span: Span) -> Option<(&ModuleRang
 pub fn standalone_import_diagnostics(statements: &[Stmt]) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for statement in statements {
-        let StmtKind::Import { path } = &statement.kind else {
+        let StmtKind::Import { path, .. } = &statement.kind else {
             continue;
         };
         if path.first().map(String::as_str) == Some("self") {

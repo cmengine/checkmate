@@ -148,6 +148,7 @@ pub struct ImplSymbol {
 pub struct ImportSymbol {
     /// Dot-separated path segments with their spans (§2.3).
     pub segments: Vec<(String, Span)>,
+    pub binding: Option<cme_core::ast::ImportBinding>,
     pub span: Span,
 }
 
@@ -226,7 +227,7 @@ impl<'a> Analysis<'a> {
                 StmtKind::StructDecl { .. } => analysis.add_struct(statement),
                 StmtKind::EnumDecl { .. } => analysis.add_enum(statement),
                 StmtKind::ImplDecl { .. } => analysis.add_impl(statement),
-                StmtKind::Import { path } => analysis.add_import(statement, path),
+                StmtKind::Import { path, binding } => analysis.add_import(statement, path, binding),
                 _ => {}
             }
         }
@@ -334,11 +335,16 @@ impl<'a> Analysis<'a> {
             }
         }
         let schema = self.schema.as_ref()?;
-        let mut segments = dotted.split('.');
-        let root = segments.next()?;
+        let mut parts = dotted.split('.').map(str::to_string).collect::<Vec<_>>();
+        if let Some(import) = self.imports.iter().find(|import| {
+            matches!(&import.binding, Some(cme_core::ast::ImportBinding::Alias(alias)) if alias == &parts[0])
+        }) {
+            parts.splice(0..1, import.segments.iter().map(|(name, _)| name.clone()));
+        }
+        let root = parts.first()?.as_str();
         let file = schema.set.namespace(root)?;
         schema.target(root)?; // ungranted namespaces are not paths into the contract
-        Some((file, segments.map(str::to_string).collect()))
+        Some((file, parts[1..].to_vec()))
     }
 
     /// The contract of a granted namespace by name (§9.1).
@@ -795,7 +801,12 @@ impl<'a> Analysis<'a> {
         }
     }
 
-    fn add_import(&mut self, statement: &'a Stmt, path: &[String]) {
+    fn add_import(
+        &mut self,
+        statement: &'a Stmt,
+        path: &[String],
+        binding: &Option<cme_core::ast::ImportBinding>,
+    ) {
         // Segments: idents between `import` and the newline.
         let (start, end) = self.token_range(statement.span);
         let mut segments = Vec::new();
@@ -812,6 +823,7 @@ impl<'a> Analysis<'a> {
             .collect();
         self.imports.push(ImportSymbol {
             segments,
+            binding: binding.clone(),
             span: statement.span,
         });
     }

@@ -224,6 +224,26 @@ pub fn check(statements: &[Stmt]) -> Vec<Diagnostic> {
 /// - §10.4/§9.1 interface completeness — `impl <interface>` blocks must
 ///   implement every required visible member with the exact signature.
 pub fn check_with_schema(statements: &[Stmt], schema: Option<&SchemaContext>) -> Vec<Diagnostic> {
+    prepare(statements, &[], schema).1
+}
+
+/// Resolves file-scoped imports and checks the canonical program. Callers
+/// that execute the program must use the returned AST for dispatch.
+pub fn prepare(
+    statements: &[Stmt],
+    ranges: &[crate::mods::ModuleRange],
+    schema: Option<&SchemaContext>,
+) -> (Vec<Stmt>, Vec<Diagnostic>) {
+    let resolution = crate::imports::resolve(statements, ranges, schema);
+    let mut diagnostics = resolution.diagnostics;
+    diagnostics.extend(check_resolved_with_schema(&resolution.statements, schema));
+    (resolution.statements, diagnostics)
+}
+
+fn check_resolved_with_schema(
+    statements: &[Stmt],
+    schema: Option<&SchemaContext>,
+) -> Vec<Diagnostic> {
     let mut checker = Checker::new_with_schema(schema);
 
     // Pass 1: register every top-level declaration. Forward references and
@@ -283,7 +303,7 @@ pub fn check_with_schema(statements: &[Stmt], schema: Option<&SchemaContext>) ->
             // (§10.3); `self` imports resolve there. Host-rooted imports
             // resolve against the schema contract when one is active
             // (§2.3, §7.2), so every import is collected here.
-            StmtKind::Import { path } => {
+            StmtKind::Import { path, .. } => {
                 checker.imports.push((path.clone(), statement.span));
             }
             // Already reported at parse level; never cascaded here.

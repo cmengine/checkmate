@@ -703,15 +703,24 @@ impl<'a, 'src> Parser<'a, 'src> {
             }
             Token::Ident(name) => {
                 self.advance();
+                let mut name = name.to_string();
+                while self.at(Token::Dot) {
+                    self.advance();
+                    let Token::Ident(segment) = self.advance().token else {
+                        return None;
+                    };
+                    name.push('.');
+                    name.push_str(segment);
+                }
                 if self.at(Token::Lt) {
                     self.advance();
-                    return self.parse_type_generic_tail(name.to_string());
+                    return self.parse_type_generic_tail(name);
                 }
                 if !self.count_type_node() {
                     return None;
                 }
                 Type::Named {
-                    name: name.to_string(),
+                    name,
                     args: Vec::new(),
                 }
             }
@@ -1605,9 +1614,50 @@ impl<'a, 'src> Parser<'a, 'src> {
             };
         }
 
+        let binding = if matches!(self.peek().token, Token::Ident("as")) {
+            self.advance();
+            let token = self.advance();
+            end = token.span.end;
+            match token.token {
+                Token::Ident(alias) if alias != "as" => {
+                    Some(cme_core::ast::ImportBinding::Alias(alias.to_string()))
+                }
+                Token::Star => Some(cme_core::ast::ImportBinding::Glob),
+                other => {
+                    let error = self.record(
+                        format!(
+                            "expected an alias or `*` after `as`, but found {}",
+                            other.describe()
+                        ),
+                        token.span,
+                    );
+                    return Stmt {
+                        span: Span::new(start, end),
+                        kind: StmtKind::Invalid { error },
+                    };
+                }
+            }
+        } else {
+            None
+        };
+        if !matches!(self.peek().token, Token::Newline | Token::Eof) {
+            let token = *self.peek();
+            let end = self.skip_to_statement_end(token.span.end);
+            let error = self.record(
+                format!(
+                    "expected the end of an import, but found {}",
+                    token.token.describe()
+                ),
+                token.span,
+            );
+            return Stmt {
+                span: Span::new(start, end),
+                kind: StmtKind::Invalid { error },
+            };
+        }
         Stmt {
             span: Span::new(start, end),
-            kind: StmtKind::Import { path },
+            kind: StmtKind::Import { path, binding },
         }
     }
 
@@ -2116,9 +2166,18 @@ impl<'a, 'src> Parser<'a, 'src> {
         let Token::Ident(name) = first.token else {
             return None;
         };
+        let mut name = name.to_string();
+        while self.at(Token::Dot) {
+            self.advance();
+            let Token::Ident(segment) = self.advance().token else {
+                return None;
+            };
+            name.push('.');
+            name.push_str(segment);
+        }
         if self.at(Token::Lt) {
             self.advance();
-            return self.parse_type_generic_tail(name.to_string());
+            return self.parse_type_generic_tail(name);
         }
         if self.at(Token::LBracket)
             && matches!(
@@ -2132,13 +2191,13 @@ impl<'a, 'src> Parser<'a, 'src> {
                 return None;
             }
             let array = Type::Array(Box::new(Type::Named {
-                name: name.to_string(),
+                name,
                 args: Vec::new(),
             }));
             return self.parse_type_array_suffixes(array);
         }
         Some(Type::Named {
-            name: name.to_string(),
+            name,
             args: Vec::new(),
         })
     }

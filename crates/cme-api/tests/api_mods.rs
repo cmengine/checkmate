@@ -51,7 +51,7 @@ fn a_well_formed_mod_loads_links_and_runs() {
     temp.write("mod.toml", MANIFEST);
     temp.write(
         "src/main.cm",
-        "import self.helpers.math\nint main() {\nreturn add(2, 3)\n}\n",
+        "import self.helpers.math\nint main() {\nreturn self.helpers.math.add(2, 3)\n}\n",
     );
     temp.write(
         "src/helpers/math.cm",
@@ -226,7 +226,7 @@ fn a_mod_runtime_error_reanchors_to_the_executing_module() {
     temp.write("mod.toml", MANIFEST);
     temp.write(
         "src/main.cm",
-        "import self.boom\nint main() {\nreturn hit()\n}\n",
+        "import self.boom\nint main() {\nreturn self.boom.hit()\n}\n",
     );
     temp.write("src/boom.cm", "int hit() {\nreturn 1 / 0\n}\n");
 
@@ -286,7 +286,10 @@ fn megaprogram_modules_expand_before_linking() {
     temp.write("mod.toml", MANIFEST);
     temp.write(
         "src/main.cm",
-        concat!("import self.data\n", "int main() {\nreturn total()\n}\n",),
+        concat!(
+            "import self.data\n",
+            "int main() {\nreturn self.data.total()\n}\n",
+        ),
     );
     temp.write(
         "src/data.cm",
@@ -333,7 +336,7 @@ fn nested_module_paths_map_to_self_imports() {
         "src/main.cm",
         concat!(
             "import self.a.b.deep\n",
-            "int main() {\nreturn value()\n}\n",
+            "int main() {\nreturn self.a.b.deep.value()\n}\n",
         ),
     );
     temp.write("src/a/b/deep.cm", "int value() {\nreturn 11\n}\n");

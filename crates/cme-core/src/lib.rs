@@ -494,6 +494,7 @@ pub mod ast {
         /// rejected like any other misplaced declaration.
         Import {
             path: Vec<String>,
+            binding: Option<ImportBinding>,
         },
         If {
             cond: Expr,
@@ -532,6 +533,14 @@ pub mod ast {
         Invalid {
             error: ErrorId,
         },
+    }
+
+    /// Optional local spelling introduced by an import. Without a binding,
+    /// imported names remain accessible only through their full path.
+    #[derive(Debug, PartialEq, Clone)]
+    pub enum ImportBinding {
+        Alias(String),
+        Glob,
     }
 }
 

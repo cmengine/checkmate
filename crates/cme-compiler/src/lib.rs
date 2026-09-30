@@ -15,6 +15,7 @@
 
 pub mod check;
 pub mod diagnostics;
+pub mod imports;
 pub mod lexer;
 pub mod mega;
 /// Multi-file mod support (§10): manifest, discovery, assembly.
@@ -1540,7 +1541,7 @@ mod tests {
             let (stmts, errors) = parse_program_parts(&format!("{source}\n"));
             assert!(errors.is_empty(), "{source:?}: {errors:#?}");
             match &stmts[0].kind {
-                StmtKind::Import { path } => {
+                StmtKind::Import { path, .. } => {
                     assert_eq!(
                         path,
                         &expected

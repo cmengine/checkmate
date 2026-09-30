@@ -216,6 +216,31 @@ impl<'a> Analysis<'a> {
         if let Some(enum_type) = self.schema_enum(name) {
             return Some(Resolved::SchemaEnum(enum_type));
         }
+        if let Some(schema) = self.schema.as_ref() {
+            for import in &self.imports {
+                if !matches!(import.binding, Some(cme_core::ast::ImportBinding::Glob))
+                    || import.segments.len() != 2
+                {
+                    continue;
+                }
+                let namespace = &import.segments[0].0;
+                let capability = &import.segments[1].0;
+                if let Some(file) = schema.set.namespace(namespace)
+                    && let Some(contract) = file.capability(capability)
+                    && let Some(target) = schema.target(namespace)
+                    && let Some(member) = contract
+                        .members
+                        .iter()
+                        .find(|member| member.name == *name && member.visible_at(target))
+                {
+                    return Some(Resolved::SchemaMember {
+                        namespace: file.namespace.as_str(),
+                        contract,
+                        member,
+                    });
+                }
+            }
+        }
         // A bare variant name in a `match` arm pattern (§2.15).
         if let Some((enum_type, variant)) = self.find_variant(name) {
             return Some(Resolved::Variant { enum_type, variant });

@@ -4,12 +4,14 @@
 capabilities** (declared in a [schema](../schema/overview.md)) and **internal
 modules** of the current [mod](../mods/mods.md).
 
-## The two forms
+## Full paths, aliases, and wildcard bindings
 
 ```checkmate
 import engine.graphics     // a host capability namespace
 import engine.input        // another host namespace
 import self.gamemode.rules // an internal module of the current mod
+import engine.audio as sound
+import engine.input as *
 ```
 
 - The first segment is a **root**: `engine`, `physics`, `ui`, ... name
@@ -18,6 +20,13 @@ import self.gamemode.rules // an internal module of the current mod
 - Further segments drill into that root: `engine.graphics` targets the
   `graphics` capability of the `engine` namespace; `self.gamemode.rules`
   targets the module file `src/gamemode/rules.cm` of the mod.
+- A plain import retains the full path for calls. `as sound` creates a
+  file-local prefix (`sound.Play()`); `as *` makes visible capability
+  members callable without a prefix (`ReadInput()`).
+- Wildcard imports expose a self module's top-level functions and types, or
+  the visible members of a schema capability. They do not expose enum
+  variants or impl members as bare names. A binding that collides with
+  another import or a top-level declaration is a compile error naming both.
 - Imports appear before use; the checker treats them as preconditions for
   the names they unlock.
 
@@ -43,7 +52,7 @@ interface completely before the import (let alone the call) compiles — see
 **Self imports** unlock *cross-module code within a mod*:
 
 ```checkmate
-import self.gamemode.rules
+import self.gamemode.rules as rules
 
 str main() {
     return rules.describe(gameEvent.Damage(25))
@@ -56,9 +65,11 @@ standalone-file rule are in [Imports and Module Paths](../mods/imports.md).
 
 ## Imports are explicit and scoped
 
-- No wildcard imports, no star-globs, no transitive re-export. If module A
-  imports `engine.graphics` and module B imports A, B does **not** thereby
-  see `engine.graphics` — B writes its own import.
+- Imports and their bindings apply only to the importing file. If module A
+  imports `engine.graphics` and module B imports A, B must still import
+  `engine.graphics` before calling it. Cross-file function and type
+  references likewise require an import; declarations in the same file
+  remain available by bare name.
 - Because modules hold no mutable global state, imports carry no
   initialization order, no side effects, and no cycles to untangle: an
   import makes *names* visible, nothing else.

@@ -251,7 +251,7 @@ fn mod_command(
     // With schemas registered, the mod's [schemas] manifest table narrows
     // the grant (§9.5, §10.2); a manifest listing nothing denies
     // everything — the §7.2 sandbox.
-    let check_errors = match schema {
+    let (resolved, check_errors) = match schema {
         Some(context) => {
             // A manifest listing nothing denies every namespace — the
             // §7.2 sandbox: only granted namespaces are visible.
@@ -264,7 +264,7 @@ fn mod_command(
                 cme_compiler::schema::SchemaContext::grant_targets(context.set.clone(), targets);
             match grant {
                 Ok(grant) => {
-                    cme_compiler::check::check_with_schema(&program.statements, Some(&grant))
+                    cme_compiler::check::prepare(&program.statements, &program.ranges, Some(&grant))
                 }
                 Err(issues) => {
                     return Err(CliError::Schema(
@@ -273,7 +273,7 @@ fn mod_command(
                 }
             }
         }
-        None => cme_compiler::check::check(&program.statements),
+        None => cme_compiler::check::prepare(&program.statements, &program.ranges, None),
     };
     if !check_errors.is_empty() {
         // Checker diagnostics live in virtual-text coordinates too: run
@@ -308,7 +308,7 @@ fn mod_command(
                     "no `main` function to run in mod {display_root}"
                 )));
             }
-            let interpreter = Interpreter::new(&program.statements);
+            let interpreter = Interpreter::new(&resolved);
             match interpreter.invoke("main", &[]) {
                 Ok(value) => {
                     if !matches!(value, Value::Void) {
@@ -510,10 +510,8 @@ fn run_program(
     let declarations = schema
         .map(cme_compiler::schema::declaration_statements)
         .unwrap_or_default();
-    errors.extend(match schema {
-        Some(context) => cme_compiler::check::check_with_schema(&outcome.statements, Some(context)),
-        None => cme_compiler::check::check(&outcome.statements),
-    });
+    let (resolved, check_errors) = cme_compiler::check::prepare(&outcome.statements, &[], schema);
+    errors.extend(check_errors);
     // Never run broken code: refuse before invoking anything.
     render_diagnostics(errors, source)?;
 
@@ -529,7 +527,7 @@ fn run_program(
         )));
     }
 
-    let interpreter = Interpreter::new(&outcome.statements).with_declarations(&declarations);
+    let interpreter = Interpreter::new(&resolved).with_declarations(&declarations);
     match interpreter.invoke("main", &[]) {
         Ok(value) => {
             // Void prints nothing; every other value prints via Display.

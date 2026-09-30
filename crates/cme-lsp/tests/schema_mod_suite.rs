@@ -502,13 +502,12 @@ async fn cross_module_calls_link_through_the_mod() {
     let root = temp_root("linking");
     write(&root, "mod.toml", MOD_MANIFEST);
     write(&root, "schemas/game.cm", GAME_SCHEMA);
-    // §10.3: an import links the module's top-level names into the shared
-    // namespace — the helper is called UNQUALIFIED, exactly like the
-    // repository's own mod_cli fixtures.
+    // §10.3: a wildcard import makes the helper's top-level names available
+    // without a prefix in this file.
     write(
         &root,
         "src/main.cm",
-        "import self.helpers\n\nint main() {\n    return triple(3)\n}\n",
+        "import self.helpers as *\n\nint main() {\n    return triple(3)\n}\n",
     );
     let helpers = write(
         &root,
@@ -530,14 +529,14 @@ async fn cross_module_calls_link_through_the_mod() {
     harness
         .open(
             &main,
-            "import self.helpers\n\nint main() {\n    return triple(3)\n}\n",
+            "import self.helpers as *\n\nint main() {\n    return triple(3)\n}\n",
         )
         .await;
     let diagnostics = harness.publish_for(&main).await;
     assert_eq!(
         diagnostics.as_array().map(Vec::len),
         Some(0),
-        "`import self.helpers` links the helper into the mod's shared namespace (§10.3): {diagnostics}"
+        "`import self.helpers as *` exposes the helper in this file (§10.3): {diagnostics}"
     );
 }
 

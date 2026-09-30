@@ -7,7 +7,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use cme_compiler::check::check_with_schema;
+use cme_compiler::check::prepare;
 use cme_compiler::mods::{self, LoadedModule, ModManifest, ModuleRange};
 use cme_compiler::schema::{SchemaContext, SchemaFile, SchemaIssue, SchemaSet, parse_schema_file};
 use cme_compiler::{Diagnostic, mega, parse_source};
@@ -449,13 +449,14 @@ fn build_source(
     let outcome = parse_source(&expanded);
     let mut diagnostics = outcome.diagnostics;
     diagnostics.extend(mods::standalone_import_diagnostics(&outcome.statements));
-    let (check_diagnostics, schema_declarations) = check_program(engine, &outcome.statements, None);
+    let (check_diagnostics, schema_declarations, resolved) =
+        check_program(engine, &outcome.statements, &[], None);
     diagnostics.extend(check_diagnostics);
     if !diagnostics.is_empty() {
         return Err(render_source(&diagnostics, &expanded, name));
     }
     Ok(CompiledProgram {
-        statements: outcome.statements,
+        statements: resolved,
         kind: ProgramKind::Source {
             source: expanded,
             name: name.map(str::to_string),
@@ -475,10 +476,12 @@ fn build_source(
 fn check_program(
     engine: &Engine,
     statements: &[Stmt],
+    ranges: &[mods::ModuleRange],
     targets: Option<Vec<(String, String)>>,
-) -> (Vec<Diagnostic>, Vec<Stmt>) {
+) -> (Vec<Diagnostic>, Vec<Stmt>, Vec<Stmt>) {
     let Some(schema_files) = (!engine.schemas.is_empty()).then(|| engine.schemas.clone()) else {
-        return (cme_compiler::check::check(statements), Vec::new());
+        let (resolved, diagnostics) = prepare(statements, ranges, None);
+        return (diagnostics, Vec::new(), resolved);
     };
     let set = match SchemaSet::build(schema_files) {
         Ok(set) => set,
@@ -496,6 +499,7 @@ fn check_program(
                     })
                     .collect(),
                 Vec::new(),
+                statements.to_vec(),
             );
         }
     };
@@ -514,19 +518,20 @@ fn check_program(
                         })
                         .collect(),
                     Vec::new(),
+                    statements.to_vec(),
                 );
             }
         },
         None => SchemaContext::grant_all(set),
     };
     let schema_declarations = cme_compiler::schema::declaration_statements(&context);
-    let mut diagnostics = check_with_schema(statements, Some(&context));
+    let (resolved, mut diagnostics) = prepare(statements, ranges, Some(&context));
 
     // Provider presence: every capability the program CALLS must have a
     // registered provider (§9.1 capabilities are host-provided). Imports
     // alone do not demand one — a program may compile against a capability
     // it never calls.
-    for path in called_capability_paths(statements, &context) {
+    for path in called_capability_paths(&resolved, &context) {
         if !engine.providers.contains_key(&path) {
             diagnostics.push(Diagnostic::parse(
                 format!(
@@ -537,7 +542,7 @@ fn check_program(
             ));
         }
     }
-    (diagnostics, schema_declarations)
+    (diagnostics, schema_declarations, resolved)
 }
 
 /// Every capability path (`engine.graphics`) the program calls through a
@@ -770,7 +775,8 @@ fn build_mod(engine: &Engine, root: &Path) -> Result<CompiledProgram, CompileErr
         .manifest
         .as_ref()
         .map(|manifest| manifest.schemas.clone());
-    let (check_errors, schema_declarations) = check_program(engine, &program.statements, targets);
+    let (check_errors, schema_declarations, resolved) =
+        check_program(engine, &program.statements, &program.ranges, targets);
     if !check_errors.is_empty() {
         failures.extend(render_located_diagnostics(
             &check_errors,
@@ -787,7 +793,7 @@ fn build_mod(engine: &Engine, root: &Path) -> Result<CompiledProgram, CompileErr
     }
 
     Ok(CompiledProgram {
-        statements: program.statements,
+        statements: resolved,
         kind: ProgramKind::Mod {
             root: display_root,
             assembled: program.source,

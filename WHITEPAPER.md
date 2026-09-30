@@ -70,10 +70,19 @@ Imports grant access to host-provided capability namespaces or internal files wi
 import engine.graphics
 import engine.input
 import self.gamemode.rules
+import engine.graphics as gfx
+import engine.input as *
 ```
 
 - `engine` represents a top-level host schema namespace granted by the host.
 - `self` is a reserved root referencing the current mod's internal directory tree (§11.2).
+- Without `as`, calls and types use the complete imported path. `as name`
+  binds a short prefix in the importing file; `as *` binds a capability's
+  visible members or a local module's top-level functions and types directly.
+- Import bindings are file-scoped and do not re-export transitively. Names
+  declared in another file require an import; a wildcard or alias that
+  collides with another visible top-level name is a compile error naming
+  both sources. Function-local variables retain their lexical scope.
 
 ### 2.4. Built-in Scalar Types
 
@@ -1816,6 +1825,11 @@ File paths under `src/` map directly to internal module paths:
 - `src/gamemode/rules.cm` is imported as `self.gamemode.rules`.
 - `self` is the reserved root of the local mod tree.
 - Cross-file imports within the same mod are statically linked during compilation.
+- A plain `import self.gamemode.rules` grants access as
+  `self.gamemode.rules.Name`; `as rules` permits `rules.Name`, and `as *`
+  permits bare top-level functions and types. Qualified type annotations and
+  constructors follow the same paths. Enum variants and impl members stay
+  qualified under their type or target.
 - Because Checkmate modules contain no mutable global state, multi-file mods have no static initialization order dependencies.
 
 ### 10.4. Implementing Interfaces across Files

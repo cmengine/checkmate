@@ -15,12 +15,12 @@ path is the file path with `src/` dropped and `.cm` dropped:
 | `src/gamemode/rules.cm` | `self.gamemode.rules` |
 | `src/ui/hud.cm` | `self.ui.hud` |
 
-Importing a module makes its top-level names visible at the import site:
+An alias gives a module's top-level names a short, file-local prefix:
 
 ```checkmate
 // file: src/main.cm
-import self.gamemode.rules
-import self.ui.hud
+import self.gamemode.rules as rules
+import self.ui.hud as hud
 
 str main() {
     hud.render(rules.title())
@@ -52,15 +52,15 @@ If you want the multi-file workflow, make it a mod (a `mod.toml` and a
 
 ## Cross-module linking
 
-Because the whole tree parses and checks as **one program**, cross-module
-code behaves exactly like same-file code:
+The whole tree parses and checks as **one program**, with imports controlling
+which cross-module names each file can use:
 
 - Top-level names across all modules share one namespace. Two modules both
   declaring `struct player` collide with a duplicate-name diagnostic.
 - [`impl` blocks](../language/impl-blocks.md) for one target **union** across
   files — see [Implementing Interfaces Across Files](../mods/impl-union.md).
-- Forward references work: module A may call functions declared in module
-  B regardless of file order.
+- Forward references work once the calling file imports the declaring
+  module; file order does not matter.
 - There is no static initialization, no load order, no import cycles to
   worry about — imports make names visible; nothing executes at import
   time.

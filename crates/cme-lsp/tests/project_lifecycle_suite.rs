@@ -88,7 +88,7 @@ int doubled(int value) {
 ";
 
 const MAIN: &str = "\
-import self.helpers.utils
+import self.helpers.utils as *
 
 int main() {
     int hp = clampTo(300, 0, 0xFF)
@@ -589,8 +589,7 @@ async fn deep_module_paths_navigate_through_every_segment() {
         "int sampleOctave(int x) {\nreturn x\n}\n",
     );
     let mut harness = wire::setup().await;
-    let script =
-        "import self.world.generation.terrain.noise\n\nint main() {\nreturn sampleOctave(7)\n}";
+    let script = "import self.world.generation.terrain.noise as *\n\nint main() {\nreturn sampleOctave(7)\n}";
     let publish = wire::open_and_drain(&mut harness, &project.main_uri, script).await;
     assert!(
         wire::messages(&publish).is_empty(),

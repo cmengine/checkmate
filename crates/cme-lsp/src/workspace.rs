@@ -412,12 +412,8 @@ impl ModPlan {
             }
         }
         let program = mods::assemble(&modules);
-        let check_diagnostics = match schema {
-            Some(context) => {
-                cme_compiler::check::check_with_schema(&program.statements, Some(context))
-            }
-            None => cme_compiler::check::check(&program.statements),
-        };
+        let (_, check_diagnostics) =
+            cme_compiler::check::prepare(&program.statements, &program.ranges, schema);
         Some(ModPlan {
             program,
             check_diagnostics,

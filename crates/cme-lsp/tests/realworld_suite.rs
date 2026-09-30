@@ -1009,14 +1009,14 @@ game = \"1.0.0\"
 
     // -- The project's files ------------------------------------------------
 
-    /// main.cm: capability import + calls, a cross-module call (§10.3 —
-    /// imported top-level names are called UNQUALIFIED), schema types.
+    /// main.cm: capability import + calls, an aliased cross-module call,
+    /// and schema types.
     const MAIN_CM: &str = "\
 import game.window
-import self.gamemode.rules
+import self.gamemode.rules as rules
 
 int main() {
-    Sprite hero = spawnPlayer(\"hero\")
+    Sprite hero = rules.spawnPlayer(\"hero\")
     game.window.Draw(hero)
     return hero.id
 }

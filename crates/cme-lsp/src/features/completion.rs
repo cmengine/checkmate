@@ -1120,6 +1120,38 @@ fn scope_completions(analysis: &Analysis<'_>, offset: usize) -> Vec<ls_types::Co
         items.push(entry);
     }
 
+    for import in &analysis.imports {
+        let path: Vec<&str> = import
+            .segments
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        match &import.binding {
+            Some(cme_core::ast::ImportBinding::Alias(alias)) => {
+                items.push(item(
+                    alias.clone(),
+                    ls_types::CompletionItemKind::MODULE,
+                    format!("alias for {}", path.join(".")),
+                    None,
+                ));
+            }
+            Some(cme_core::ast::ImportBinding::Glob) if path.len() == 2 => {
+                if let Some(schema) = analysis.schema.as_ref()
+                    && let Some(file) = schema.set.namespace(path[0])
+                    && let Some(contract) = file.capability(path[1])
+                    && let Some(target) = schema.target(path[0])
+                {
+                    for member in &contract.members {
+                        if member.visible_at(target) {
+                            items.push(schema_member_item(&file.namespace, contract, member));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // Built-in constructors (§2.8) and keywords.
     for (name, detail) in resolve::BUILTIN_CONSTRUCTORS {
         let mut entry = item(

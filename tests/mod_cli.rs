@@ -66,7 +66,7 @@ fn two_module_mod(tag: &str) -> TempMod {
     temp.write("mod.toml", MANIFEST);
     temp.write(
         "src/main.cm",
-        "import self.util\nint main() {\n    return double(21) + 10\n}\n",
+        "import self.util\nint main() {\n    return self.util.double(21) + 10\n}\n",
     );
     temp.write("src/util.cm", "int double(int x) {\n    return x + x\n}\n");
     temp
@@ -215,7 +215,7 @@ fn runtime_errors_point_at_the_offending_module() {
     );
     temp.write(
         "src/main.cm",
-        "import self.boom\nint main() {\n    boom()\n    return 0\n}\n",
+        "import self.boom\nint main() {\n    self.boom.boom()\n    return 0\n}\n",
     );
     let (_, stderr, code) = cme(&["run", temp.path()]);
     assert_eq!(code, Some(1));
@@ -240,7 +240,7 @@ fn megaprogram_modules_expand_before_linking() {
     );
     temp.write(
         "src/main.cm",
-        "import self.gen\nint main() {\n    return page(9)\n}\n",
+        "import self.gen\nint main() {\n    return self.gen.page(9)\n}\n",
     );
     let (stdout, stderr, code) = cme(&["run", temp.path()]);
     assert_eq!(code, Some(0), "stderr: {stderr}");

@@ -36,7 +36,8 @@ The server understands where your files live:
 - Scripts in a mod are checked **as one assembled program**
   (§10.3/§10.4): cross-module calls link, `import self.a.b` resolves
   against the real module tree, `impl` blocks union across files, and
-  every diagnostic is **re-anchored to the module it came from**.
+  every diagnostic is **re-anchored to the module it came from**. Import
+  aliases and wildcard collisions are checked per file.
 - Results cache by mtimes plus open-buffer texts, so an **unsaved**
   schema buffer drives the contract scripts see — even before saving.
 
@@ -48,6 +49,8 @@ The server understands where your files live:
 - `game.window.` completes the capability's members with their
   signatures; capability calls fill **named arguments** from the
   schema; import completion offers schema namespaces and capabilities.
+  An alias such as `import game.window as win` also completes at `win.`;
+  `as *` offers visible capability members in scope completion.
 - Inside `impl game.gamemode { ... }` the interface's missing members
   complete with their **exact signature** (§9.1/§10.4).
 

@@ -13,7 +13,7 @@ All three cover the full implemented surface: the core language, §8
 megaprogramming (`grammar`/`mega` declarations, the pattern language,
 expansion templates, brace-balanced invocation regions, heredocs), and
 §9 schema files. The tree-sitter grammar is validated against every
-fixture in the repository — `syntax.cm`, `mega.cm`, the schema files,
+fixture in the repository — `tests/fixtures/programs/syntax.cm`, `tests/fixtures/programs/mega.cm`, the schema files,
 and the mod trees all parse without error nodes (the deliberately
 damaged recovery fixtures are expected to produce them).
 

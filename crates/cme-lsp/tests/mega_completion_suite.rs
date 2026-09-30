@@ -4,7 +4,7 @@
 //! regions — driven through [`cme_lsp::features::mega_completion`], the
 //! exact function the server routes to.
 //!
-//! The fixtures reuse the shapes of `mega.cm` at the repository root, so
+//! The fixtures reuse shapes from `tests/fixtures/programs/mega.cm`, so
 //! what the tests pin is what a megaprogram author types.
 
 use cme_lsp::features::mega_completion::completions;

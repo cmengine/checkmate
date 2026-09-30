@@ -1182,8 +1182,14 @@ mod tests {
         }
     }
 
-    const BOOM_CM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../boom.cm"));
-    const BASIC_CM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../basic.cm"));
+    const BOOM_CM: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/recovery/boom.cm"
+    ));
+    const BASIC_CM: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/programs/basic.cm"
+    ));
 
     #[test]
     fn truncation_never_panics() {

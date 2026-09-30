@@ -1,6 +1,4 @@
-// mixed.cm — healthy and broken code side by side, for eyeballing `cme check`.
-// This is a demo, NOT a fixture: basic.cm stays the only zero-diagnostics pin.
-// Run: cargo run --features cli -- check mixed.cm   (expect exit code 1)
+// mixed.cm — legacy healthy and broken source used by the fixture-prefix test.
 
 // ---------- healthy ----------
 

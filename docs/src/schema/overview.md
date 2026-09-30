@@ -106,5 +106,3 @@ gate the CLI applies.
   — the full §9.6 flow over its own `schemas/game.cm` (`--schema-demo`).
 - [`apps/c_host`](https://github.com/cmengine/checkmate/tree/mom/apps/c_host)
   — the C flow including the generated header consumed for real.
-- [`host_api_test/Rust`](https://github.com/cmengine/checkmate/tree/mom/host_api_test/Rust)
-  — a schema-gated mod with cross-namespace `requires`.

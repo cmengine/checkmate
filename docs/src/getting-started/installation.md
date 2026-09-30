@@ -23,10 +23,10 @@ cargo build --features cli
 The binary lands at `target/debug/cme`. Verify it:
 
 ```sh
-cargo run --features cli -- check basic.cm
+cargo run --features cli -- check tests/fixtures/programs/basic.cm
 ```
 
-`basic.cm` is a zero-diagnostics pin fixture at the repository root; a
+`tests/fixtures/programs/basic.cm` is a zero-diagnostics pin fixture; a
 silent exit means the toolchain works.
 
 > The root `cme` package is a facade: its default build intentionally
@@ -61,16 +61,16 @@ Official editor support lives in-tree:
 
 ## Try the fixtures
 
-The repository root doubles as a test bench. Three fixtures are worth
-running on day one:
+The official Checkmate fixtures live under `tests/fixtures/`. Three are
+useful for trying the CLI:
 
 ```sh
-cargo run --features cli -- run syntax.cm      # the full language surface, self-checking
-cargo run --features cli -- run mega.cm        # megaprogramming showcase (HTML, CSS, JS, YAML, ...)
-cargo run --features cli -- check boom.cm      # error-recovery stress fixture
+cargo run --features cli -- run tests/fixtures/programs/syntax.cm
+cargo run --features cli -- run tests/fixtures/programs/mega.cm
+cargo run --features cli -- check tests/fixtures/recovery/boom.cm
 ```
 
-`cme run syntax.cm` prints a report and a final `failures=0` line — every
+`cme run tests/fixtures/programs/syntax.cm` prints a report and a final `failures=0` line — every
 language feature exercised and passing on your machine.
 
 ## Next steps

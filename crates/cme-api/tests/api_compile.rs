@@ -136,14 +136,14 @@ fn a_lex_error_refuses_the_load_with_a_precise_position() {
 fn full_language_surface_compiles_through_the_api() {
     // syntax.cm is the full-surface fixture; the API accepts everything
     // the CLI accepts.
-    let source = include_str!("../../../syntax.cm");
+    let source = include_str!("../../../tests/fixtures/programs/syntax.cm");
     let program = compile(source).expect("syntax.cm is the language fixture");
     assert!(program.entry_points().contains(&"main".to_string()));
 }
 
 #[test]
 fn basic_fixture_compiles_through_the_api() {
-    let source = include_str!("../../../basic.cm");
+    let source = include_str!("../../../tests/fixtures/programs/basic.cm");
     let program = compile(source).expect("basic.cm is clean");
     assert_eq!(
         program.entry_points(),

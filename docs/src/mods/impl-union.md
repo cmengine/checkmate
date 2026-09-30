@@ -76,13 +76,7 @@ files behaves identically (see
 [`impl` Blocks](../language/impl-blocks.md#multiple-blocks-union)). The
 dotted-path shape is simply the boundary-facing case.
 
-## A complete walkthrough
+## Host embedding
 
-The repository's host fixtures exercise this end to end:
-
-- [`host_api_test/Rust/shop_mod/`](https://github.com/cmengine/checkmate/tree/mom/host_api_test/Rust/shop_mod)
-  implements a schema interface across files, gated by its `mod.toml`
-  `[schemas]` table.
-- [`apps/rust_host`](https://github.com/cmengine/checkmate/tree/mom/apps/rust_host)
-  consumes it with generated, compile-time-verified bindings — see
-  [Schema-Driven Embedding](../embedding/schema-embedding.md).
+For schema-gated host embedding, see
+[Schema-Driven Embedding](../embedding/schema-embedding.md).

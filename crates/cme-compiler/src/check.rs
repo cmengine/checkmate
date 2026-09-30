@@ -3554,7 +3554,10 @@ mod tests {
     use cme_core::Span;
     use cme_core::ast::{Block, Expr, ExprKind, Stmt, StmtKind, Type};
 
-    const BASIC_CM: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../basic.cm"));
+    const BASIC_CM: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/programs/basic.cm"
+    ));
 
     fn check_source(source: &str) -> Vec<Diagnostic> {
         check(&parse_source(source).statements)
@@ -4109,7 +4112,7 @@ mod tests {
     fn checker_never_panics_on_the_stress_fixture() {
         let outcome = parse_source(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../boom.cm"
+            "/../../tests/fixtures/recovery/boom.cm"
         )));
         // Runs to completion on any input; output volume is not pinned.
         let _ = check(&outcome.statements);
@@ -4126,8 +4129,10 @@ mod tests {
 
     #[test]
     fn syntax_cm_type_checks_clean() {
-        const SYNTAX_CM: &str =
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../syntax.cm"));
+        const SYNTAX_CM: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/programs/syntax.cm"
+        ));
         let diagnostics = check_full(SYNTAX_CM);
         assert!(
             diagnostics.is_empty(),

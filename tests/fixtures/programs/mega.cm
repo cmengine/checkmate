@@ -5,9 +5,9 @@
 // This file is the acceptance test for the megaprogramming subsystem. It is
 // a COMPLETE Checkmate program after expansion:
 //
-//   cme expand mega.cm      →  writes mega_expanded.cm (pure Checkmate)
-//   cme check mega.cm       →  expands, then checks the expanded program
-//   cme run mega.cm         →  expands, then runs; main() returns 0 when
+//   cme expand tests/fixtures/programs/mega.cm → expands the fixture
+//   cme check tests/fixtures/programs/mega.cm  → checks the expanded program
+//   cme run tests/fixtures/programs/mega.cm    → runs; main() returns 0 when
 //                               every megaprogram expanded and verified
 //
 // Layout:

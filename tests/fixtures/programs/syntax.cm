@@ -27,7 +27,7 @@
 // Every section function returns the number of failed checks within it
 // (0 == all checks passed). main() still runs every section and counts the
 // failures, but returns a human-readable report of the actual outputs the
-// exercised functions produced, so `cme run syntax.cm` prints real results
+// exercised functions produced, so running this fixture prints real results
 // instead of just a bare failure count. The last report line is always
 // `failures=N`, where 0 == success.
 //

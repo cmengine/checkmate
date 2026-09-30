@@ -21,8 +21,8 @@
 //      statement, so recovery cannot fuse two lines into one.
 //
 // Run it (the CLI exits 1 — that is the point; zero diagnostics is a bug):
-//   cargo run --features cli -- ast boom.cm
-//   cargo run --features cli -- lex boom.cm
+//   cargo run --features cli -- ast tests/fixtures/recovery/boom.cm
+//   cargo run --features cli -- lex tests/fixtures/recovery/boom.cm
 //
 // The Rust test `boom_cm_stress_fixture` (cme-compiler/src/lib.rs) pins the
 // exact outcomes documented below. File layout notes:

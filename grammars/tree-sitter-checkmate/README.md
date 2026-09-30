@@ -31,7 +31,7 @@ tree-sitter generate
 tree-sitter test
 
 # parse a file and print the syntax tree
-tree-sitter parse ../../syntax.cm
+tree-sitter parse ../../tests/fixtures/programs/syntax.cm
 ```
 
 ## Validation against the repository fixtures
@@ -39,11 +39,11 @@ tree-sitter parse ../../syntax.cm
 Every valid fixture in the repository parses without ERROR or MISSING nodes:
 
 ```sh
-tree-sitter parse ../../syntax.cm   # the full-language surface fixture
-tree-sitter parse ../../mega.cm    # the megaprogramming fixture
+tree-sitter parse ../../tests/fixtures/programs/syntax.cm   # full-language surface fixture
+tree-sitter parse ../../tests/fixtures/programs/mega.cm    # megaprogramming fixture
 ```
 
-`boom.cm`, `broken_syntax.cm`, and `tests/fixtures/recovery/*` are
+`tests/fixtures/recovery/*` are
 *intentionally damaged* recovery fixtures — errors there are expected and
 correct behavior.
 

@@ -87,7 +87,7 @@ Files that declare or invoke megaprograms expand automatically before
 generated program:
 
 ```sh
-cme expand mega.cm
+cme expand tests/fixtures/programs/mega.cm
 ```
 
 writes `mega_expanded.cm` side by side with the original — pure Checkmate,

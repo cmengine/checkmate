@@ -962,7 +962,7 @@ async fn mod_detection_walks_up_from_nested_module_directories() {
 #[tokio::test]
 async fn the_parent_directory_schemas_layout_is_discovered() {
     // The host_app layout: schemas/ sits NEXT to the mod directory, not
-    // inside it — the shape of this repository's own host_api_test/Rust.
+    // inside it — matching a host project with schemas beside a mod.
     let root = temp_root("hostapp");
     let shop_schema = GAME_SCHEMA.replace("schema game", "schema shop");
     let manifest = MOD_MANIFEST

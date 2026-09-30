@@ -9,9 +9,8 @@
 //!    nearest `mod.toml` (§10.1). Files under that root belong to the mod.
 //! 2. **Schemas** — `.cm` schema files under the mod root (the `src/`
 //!    module tree excluded: those are scripts) and under the parent
-//!    directory's `schemas/` tree — the layout this repository's host
-//!    fixtures use (`host_api_test/Rust/schemas/shop.cm` next to
-//!    `host_api_test/Rust/shop_mod/`). Every candidate parses through the
+//!    directory's `schemas/` tree — schemas beside a mod are discovered
+//!    alongside schemas inside its root. Every candidate parses through the
 //!    real §9 front end; files with diagnostics are skipped (their own
 //!    buffer reports the defects; a broken schema must not cascade
 //!    misleading errors into scripts).

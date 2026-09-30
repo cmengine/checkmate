@@ -6,9 +6,9 @@
 use cme_compiler::check::check;
 use cme_interp::{InterpError, Interpreter, Value};
 
-const BASIC_CM: &str = include_str!("../basic.cm");
-const BOOM_CM: &str = include_str!("../boom.cm");
-const SYNTAX_CM: &str = include_str!("../syntax.cm");
+const BASIC_CM: &str = include_str!("fixtures/programs/basic.cm");
+const BOOM_CM: &str = include_str!("fixtures/recovery/boom.cm");
+const SYNTAX_CM: &str = include_str!("fixtures/programs/syntax.cm");
 
 /// The pipeline the `run` command drives. Panics on any compile-stage
 /// diagnostic so these tests only ever execute programs the gate accepts.

@@ -223,7 +223,7 @@ fn expansion_passthrough_without_mega() {
 /// (JSON, TOML, YAML, CSS, HTML, RE, JS, Python, SQL) expanded and verified.
 #[test]
 fn mega_cm_expands_checks_and_runs_clean() {
-    let source = include_str!("../mega.cm");
+    let source = include_str!("fixtures/programs/mega.cm");
     let outcome = cme_compiler::mega::expand::expand_source(source).unwrap();
 
     // Every macro in the fixture was invoked, and no invocation or
@@ -422,17 +422,18 @@ END
     assert_eq!(result, cme_interp::Value::Int(0));
 }
 
-/// `cme expand mega.cm` writes a labeled sidecar file next to the original
-/// whose parse+check is clean; `cme run mega.cm` runs the expansion.
+/// `cme expand` writes a labeled sidecar file next to the input fixture.
 #[cfg(feature = "cli")]
 #[test]
 fn cme_expand_writes_the_sidecar_file() {
     use std::process::Command;
 
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let fixture = std::path::Path::new(manifest_dir).join("mega.cm");
-    let sidecar = std::path::Path::new(manifest_dir).join("mega_expanded.cm");
-    let _ = std::fs::remove_file(&sidecar);
+    let scratch = std::env::temp_dir().join(format!("cme_mega_expand_test_{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("create temporary expansion directory");
+    let fixture = scratch.join("mega.cm");
+    let sidecar = scratch.join("mega_expanded.cm");
+    std::fs::write(&fixture, include_str!("fixtures/programs/mega.cm"))
+        .expect("write temporary mega fixture");
 
     let output = Command::new(env!("CARGO_BIN_EXE_cme"))
         .arg("expand")
@@ -457,6 +458,8 @@ fn cme_expand_writes_the_sidecar_file() {
     let type_errors = cme_compiler::check::check(&parsed.statements);
     assert!(type_errors.is_empty());
     let _ = std::fs::remove_file(&sidecar);
+    let _ = std::fs::remove_file(&fixture);
+    let _ = std::fs::remove_dir(&scratch);
 }
 
 /// The §8.7.2 complexity bound on plain grammars: matching a large region

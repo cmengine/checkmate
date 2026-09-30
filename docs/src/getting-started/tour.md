@@ -2,7 +2,7 @@
 
 This chapter sweeps the whole language in one file. Every snippet is real
 Checkmate — the tour is a condensed walk of the same ground the
-[`syntax.cm`](https://github.com/cmengine/checkmate/blob/mom/syntax.cm)
+[`syntax.cm`](https://github.com/cmengine/checkmate/blob/mom/tests/fixtures/programs/syntax.cm)
 fixture covers.
 
 ## Variables and `infer`
@@ -225,5 +225,5 @@ rest of the file with a single clean error.
 - [The Schema System](../schema/overview.md) — how hosts and scripts agree on
   contracts, versions, and capability gating.
 
-Run `cargo run --features cli -- run syntax.cm` in the repository to watch
+Run `cargo run --features cli -- run tests/fixtures/programs/syntax.cm` in the repository to watch
 all of the above execute with `failures=0`.

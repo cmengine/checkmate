@@ -53,7 +53,7 @@ The workhorse. Parses, validates, type-checks, and renders diagnostics —
 nothing executes:
 
 ```sh
-cme check syntax.cm
+cme check tests/fixtures/programs/syntax.cm
 cme check my_mod/
 ```
 
@@ -79,7 +79,7 @@ exhaustion) terminate the invocation with a clean positioned error —
 never a crash.
 
 ```sh
-cme run syntax.cm        # the self-checking full-surface fixture
+cme run tests/fixtures/programs/syntax.cm        # the self-checking full-surface fixture
 cme run my_mod/          # main may live in any module of the mod
 ```
 
@@ -89,8 +89,8 @@ Files that declare or invoke megaprograms expand automatically before
 `check`/`run`. `expand` shows the result:
 
 ```sh
-cme expand mega.cm                 # writes mega_expanded.cm next to the original
-cme expand mega.cm --provenance    # also annotates each root mega site:
+cme expand tests/fixtures/programs/mega.cm                 # writes a sidecar next to the fixture
+cme expand tests/fixtures/programs/mega.cm --provenance    # also annotates each root mega site:
                                    # // @ name! src:line:col
 ```
 
@@ -138,7 +138,7 @@ Editors that speak LSP launch it automatically (the Zed extension does).
 
 - `*_expanded.cm` outputs are generated artifacts (the repo's
   `.gitignore` excludes them).
-- The repo fixtures double as smoke tests: `cme run syntax.cm` should
-  always end with `failures=0`; `cme run mega.cm` exercises 21
+- The repo fixtures double as smoke tests: `cme run tests/fixtures/programs/syntax.cm` should
+  always end with `failures=0`; `cme run tests/fixtures/programs/mega.cm` exercises 21
   megaprogram invocations across HTML, CSS, JS, TS, Python, JSON, YAML,
   TOML, SQL, and regex.

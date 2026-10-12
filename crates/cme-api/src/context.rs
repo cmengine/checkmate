@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use cme_core::Span;
 use cme_interp::{
-    CapabilityHost, InterpError, InterpErrorKind, Interpreter, MAX_CALL_DEPTH, Value,
+    CapabilityHost, InterpError, InterpErrorKind, MAX_CALL_DEPTH, Value, bytecode::Vm,
 };
 
 use crate::engine::{CapabilityProvider, CompiledProgram, render_runtime_error};
@@ -32,9 +32,9 @@ use crate::engine::{CapabilityProvider, CompiledProgram, render_runtime_error};
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionLimits {
-    /// A deterministic operation count (§5.5 fuel metering): every
-    /// statement and expression evaluation charges one unit. `None` runs
-    /// unmetered; `Some(0)` exhausts at the first safepoint.
+    /// A deterministic bytecode instruction count (§5.5 fuel metering):
+    /// every executed instruction, including branches and returns, charges one unit.
+    /// `None` runs unmetered; `Some(0)` exhausts at the first safepoint.
     pub fuel: Option<u64>,
     /// Wall-clock budget in milliseconds, observed at safepoints only —
     /// real time is never read asynchronously (§5.5). `None` sets none;
@@ -42,9 +42,8 @@ pub struct ExecutionLimits {
     pub deadline_ms: Option<u64>,
     /// Maximum nested call frames (§5.5 call-depth limits). `0` keeps the
     /// interpreter default [`MAX_CALL_DEPTH`]. Hosts running programs that
-    /// legitimately recurse near the default must provide adequate native
-    /// stack (a dedicated thread) or lower this — the depth guard, not the
-    /// native stack, is what must stop runaway recursion.
+    /// recurse near the default use explicit VM frames, independently of the
+    /// native stack. Hosts may lower the bound for their workload.
     pub max_call_depth: usize,
 }
 
@@ -301,7 +300,7 @@ impl<'p> Context<'p> {
     /// invocations share no mutable state.
     fn run(
         &self,
-        call: impl FnOnce(&Interpreter<'_>) -> Result<Value, InterpError>,
+        call: impl FnOnce(&Vm<'_>) -> Result<Value, InterpError>,
     ) -> Result<Value, ExecutionError> {
         // Clones share identity; independent contexts have distinct IDs.
         let context_id = Arc::as_ptr(&self.identity).addr();
@@ -330,8 +329,7 @@ impl<'p> Context<'p> {
         let dispatch = ProviderDispatch {
             providers: &self.providers,
         };
-        let mut interpreter = Interpreter::new(self.program.statements())
-            .with_declarations(self.program.schema_declarations());
+        let mut interpreter = Vm::new(self.program.bytecode());
         if let Some(cell) = fuel.as_ref() {
             interpreter = interpreter.with_fuel(cell);
         }

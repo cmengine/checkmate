@@ -29,6 +29,7 @@ check any specific area at a glance.
 | Generated C headers (`cme codegen-c`) | <span class="badge badge-implemented">Implemented</span> | [Schema-Driven Embedding](embedding/schema-embedding.md) |
 | Rust host API (`Engine` / `CompiledProgram` / `Context`) | <span class="badge badge-implemented">Implemented</span> | [Embedding in Rust](embedding/rust.md) |
 | C host API (`cme.h`, `cm_*` ABI) | <span class="badge badge-implemented">Implemented</span> | [Embedding in C](embedding/c.md) |
+| Typed control-flow IR and synchronous register bytecode VM | <span class="badge badge-implemented">Implemented</span> | [Execution Engine](tooling/execution.md) |
 | Execution limits: fuel, deadline, call depth; reentrancy guard | <span class="badge badge-implemented">Implemented</span> | [Limits and Errors](appendix/limits-and-errors.md) |
 | CLI: `lex`, `ast`, `check`, `run`, `expand`, `schema`, `codegen-c`, `lsp` | <span class="badge badge-implemented">Implemented</span> | [The `cme` CLI](tooling/cli.md) |
 | Language server (stdio, incremental) with schema- and mega-aware features | <span class="badge badge-implemented">Implemented</span> | [Language Server](tooling/lsp.md) |
@@ -40,9 +41,10 @@ current code. This book mentions them only in sidebars like this one.
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Bytecode VM and AOT/LLVM compilation | <span class="badge badge-future">Future</span> | The current engine is a tree-walking interpreter. §5.5 fuel/deadline/depth limits are enforced by it today. |
+| AOT/LLVM compilation | <span class="badge badge-future">Future</span> | The current execution engine is the synchronous bytecode VM. |
 | `suspend` members and transparent async (§4) | <span class="badge badge-future">Future</span> | `suspend` is rejected at parse time. The future-polling shape of the C API is already in place. |
 | Native artifact caching (§5.4) | <span class="badge badge-future">Future</span> | Depends on the AOT backend. |
+| ARC/COW memory core (§3) | <span class="badge badge-future">Future</span> | Runtime values currently use owned deep copies; shared backing buffers are not implemented. |
 | `no_std` freestanding runtime (§6) | <span class="badge badge-future">Future</span> | `cme-runtime` is a placeholder crate. |
 | Official formatter, `--auto-crystallize` (§2.16.1) | <span class="badge badge-future">Future</span> | Not shipped. |
 | Debug Adapter Protocol (`cme-dap`) (§14) | <span class="badge badge-future">Future</span> | Not shipped. |

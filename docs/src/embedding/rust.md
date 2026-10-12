@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Create a context under §5.5 limits.
     let context = engine.create_context(&program, ExecutionLimits {
-        fuel: Some(1_000_000),      // deterministic operation budget
+        fuel: Some(1_000_000),      // deterministic bytecode instruction budget
         deadline_ms: Some(50),      // wall-clock cap, checked at safepoints
         max_call_depth: 64,         // recursion bound
     });
@@ -156,7 +156,7 @@ let context = engine.create_context(&program, limits);
 - The context **borrows** the program (`create_context(&program, ...)`)
   — the borrow checker enforces "program outlives contexts".
 - Contexts are **cheap handles**: each invocation constructs its own
-  interpreter frame, fuel cell, and deadline.
+  VM frame stack, fuel cell, and deadline.
 - Contexts are `Clone`; a clone is the same logical context (it shares
   the §5.7 reentrancy identity).
 - The context snapshots the currently registered capability providers;

@@ -7,12 +7,12 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
-use cme_compiler::check::prepare;
+use cme_compiler::check::{CheckedProgram, prepare_typed};
 use cme_compiler::mods::{self, LoadedModule, ModManifest, ModuleRange};
 use cme_compiler::schema::{SchemaContext, SchemaFile, SchemaIssue, SchemaSet, parse_schema_file};
 use cme_compiler::{Diagnostic, mega, parse_source};
 use cme_core::ast::{Stmt, StmtKind};
-use cme_interp::Value;
+use cme_interp::{Value, bytecode::Bytecode};
 
 use crate::context::{Context, ExecutionLimits};
 use crate::render::{SourceLayout, render_located};
@@ -282,11 +282,12 @@ pub enum ProgramKind {
 #[derive(Debug, Clone)]
 pub struct CompiledProgram {
     statements: Vec<Stmt>,
+    bytecode: Bytecode,
     kind: ProgramKind,
     manifest: Option<ModManifest>,
     /// The §9.3 boundary types of the ACTIVE schema, synthesized as AST
-    /// declarations so any execution engine (tree walker now, bytecode VM
-    /// and AOT later) can construct schema structs and enums.
+    /// declarations for AST tooling and the reference walker. The bytecode
+    /// lowering pipeline resolves their constructors at load time.
     schema_declarations: Vec<Stmt>,
 }
 
@@ -364,6 +365,12 @@ impl CompiledProgram {
     /// when no schema was active at load.
     pub fn schema_declarations(&self) -> &[Stmt] {
         &self.schema_declarations
+    }
+
+    /// Verified register bytecode, compiled once at load time. The retained
+    /// AST is for tooling; contexts execute this program directly.
+    pub fn bytecode(&self) -> &Bytecode {
+        &self.bytecode
     }
 
     /// The program kind and its associated text data.
@@ -449,14 +456,20 @@ fn build_source(
     let outcome = parse_source(&expanded);
     let mut diagnostics = outcome.diagnostics;
     diagnostics.extend(mods::standalone_import_diagnostics(&outcome.statements));
-    let (check_diagnostics, schema_declarations, resolved) =
-        check_program(engine, &outcome.statements, &[], None);
+    let (check_diagnostics, schema_declarations, resolved, bytecode) = check_program(
+        engine,
+        &outcome.statements,
+        &[],
+        None,
+        diagnostics.is_empty(),
+    );
     diagnostics.extend(check_diagnostics);
     if !diagnostics.is_empty() {
         return Err(render_source(&diagnostics, &expanded, name));
     }
     Ok(CompiledProgram {
         statements: resolved,
+        bytecode: bytecode.expect("clean load generated verified bytecode"),
         kind: ProgramKind::Source {
             source: expanded,
             name: name.map(str::to_string),
@@ -478,10 +491,15 @@ fn check_program(
     statements: &[Stmt],
     ranges: &[mods::ModuleRange],
     targets: Option<Vec<(String, String)>>,
-) -> (Vec<Diagnostic>, Vec<Stmt>, Vec<Stmt>) {
+    codegen: bool,
+) -> (Vec<Diagnostic>, Vec<Stmt>, Vec<Stmt>, Option<Bytecode>) {
     let Some(schema_files) = (!engine.schemas.is_empty()).then(|| engine.schemas.clone()) else {
-        let (resolved, diagnostics) = prepare(statements, ranges, None);
-        return (diagnostics, Vec::new(), resolved);
+        return compile_checked(
+            prepare_typed(statements, ranges, None),
+            Vec::new(),
+            Vec::new(),
+            codegen,
+        );
     };
     let set = match SchemaSet::build(schema_files) {
         Ok(set) => set,
@@ -500,6 +518,7 @@ fn check_program(
                     .collect(),
                 Vec::new(),
                 statements.to_vec(),
+                None,
             );
         }
     };
@@ -519,19 +538,21 @@ fn check_program(
                         .collect(),
                     Vec::new(),
                     statements.to_vec(),
+                    None,
                 );
             }
         },
         None => SchemaContext::grant_all(set),
     };
     let schema_declarations = cme_compiler::schema::declaration_statements(&context);
-    let (resolved, mut diagnostics) = prepare(statements, ranges, Some(&context));
+    let checked = prepare_typed(statements, ranges, Some(&context));
+    let mut diagnostics = Vec::new();
 
     // Provider presence: every capability the program CALLS must have a
     // registered provider (§9.1 capabilities are host-provided). Imports
     // alone do not demand one — a program may compile against a capability
     // it never calls.
-    for path in called_capability_paths(&resolved, &context) {
+    for path in called_capability_paths(checked.statements(), &context) {
         if !engine.providers.contains_key(&path) {
             diagnostics.push(Diagnostic::parse(
                 format!(
@@ -542,7 +563,31 @@ fn check_program(
             ));
         }
     }
-    (diagnostics, schema_declarations, resolved)
+    compile_checked(checked, schema_declarations, diagnostics, codegen)
+}
+
+fn compile_checked(
+    checked: CheckedProgram,
+    declarations: Vec<Stmt>,
+    mut diagnostics: Vec<Diagnostic>,
+    codegen: bool,
+) -> (Vec<Diagnostic>, Vec<Stmt>, Vec<Stmt>, Option<Bytecode>) {
+    let mut checked_errors = checked.diagnostics().to_vec();
+    checked_errors.append(&mut diagnostics);
+    diagnostics = checked_errors;
+    let bytecode = if codegen && diagnostics.is_empty() {
+        match cme_compiler::lower::compile(&checked, &declarations) {
+            Ok(code) => Some(code),
+            Err(errors) => {
+                diagnostics.extend(errors);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let (statements, _) = checked.into_parts();
+    (diagnostics, declarations, statements, bytecode)
 }
 
 /// Every capability path (`engine.graphics`) the program calls through a
@@ -775,8 +820,13 @@ fn build_mod(engine: &Engine, root: &Path) -> Result<CompiledProgram, CompileErr
         .manifest
         .as_ref()
         .map(|manifest| manifest.schemas.clone());
-    let (check_errors, schema_declarations, resolved) =
-        check_program(engine, &program.statements, &program.ranges, targets);
+    let (check_errors, schema_declarations, resolved, bytecode) = check_program(
+        engine,
+        &program.statements,
+        &program.ranges,
+        targets,
+        failures.is_empty(),
+    );
     if !check_errors.is_empty() {
         failures.extend(render_located_diagnostics(
             &check_errors,
@@ -794,6 +844,7 @@ fn build_mod(engine: &Engine, root: &Path) -> Result<CompiledProgram, CompileErr
 
     Ok(CompiledProgram {
         statements: resolved,
+        bytecode: bytecode.expect("clean load generated verified bytecode"),
         kind: ProgramKind::Mod {
             root: display_root,
             assembled: program.source,

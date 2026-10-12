@@ -86,6 +86,7 @@
 # Tooling
 
 - [The `cme` CLI](tooling/cli.md)
+- [Execution Engine](tooling/execution.md)
 - [The Language Server](tooling/lsp.md)
 - [Editor Support](tooling/editors.md)
 

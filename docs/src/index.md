@@ -43,7 +43,7 @@ that buys you.
   handles. Independent script invocations are therefore race-free by
   construction.
 - **Deterministic execution.** The host can cap every invocation with
-  [fuel](appendix/limits-and-errors.md) (a deterministic operation count), a
+  [fuel](appendix/limits-and-errors.md) (a deterministic bytecode instruction count), a
   wall-clock deadline, and a call-depth limit. Infinite loops and recursive
   blowups terminate cleanly, never a hang.
 - **Megaprogramming.** A declarative macro system lets any formal language —
@@ -86,7 +86,7 @@ that buys you.
 
 This book documents the language, the toolchain, and the host APIs as they
 are implemented today: a full front end (lexer, parser, type checker), a
-tree-walking interpreter, megaprogramming, multi-file mods, the schema
+synchronous bytecode VM, megaprogramming, multi-file mods, the schema
 system, and complete Rust and C host APIs. See
 [Status of This Documentation](status.md) for the precise boundary between
 "implemented" and "specified, not yet built".

@@ -144,6 +144,27 @@ enum Ty {
 }
 
 impl Ty {
+    fn to_ast(&self, registry: &[TypeDef]) -> Type {
+        match self {
+            Self::Int => Type::Prim(PrimitiveType::Int),
+            Self::Float => Type::Prim(PrimitiveType::Float),
+            Self::Bool => Type::Prim(PrimitiveType::Bool),
+            Self::Str => Type::Prim(PrimitiveType::Str),
+            Self::Byte => Type::Prim(PrimitiveType::Byte),
+            Self::Void => Type::Void,
+            Self::Poison | Self::Ambiguous => Type::Infer,
+            Self::Struct(id, args) | Self::Enum(id, args) => Type::Named {
+                name: registry[*id].name_str().to_string(),
+                args: args.iter().map(|arg| arg.to_ast(registry)).collect(),
+            },
+            Self::Array(elem) => Type::Array(Box::new(elem.to_ast(registry))),
+            Self::Map(key, value) => Type::Map {
+                key: Box::new(key.to_ast(registry)),
+                value: Box::new(value.to_ast(registry)),
+            },
+        }
+    }
+
     fn is_poison(&self) -> bool {
         matches!(self, Ty::Poison | Ty::Ambiguous)
     }
@@ -234,17 +255,78 @@ pub fn prepare(
     ranges: &[crate::mods::ModuleRange],
     schema: Option<&SchemaContext>,
 ) -> (Vec<Stmt>, Vec<Diagnostic>) {
+    let checked = prepare_impl(statements, ranges, schema, false);
+    (checked.statements, checked.diagnostics)
+}
+
+/// An owned, import-resolved program with checker-resolved expression types.
+/// The AST is immutable while metadata is in use: expression identity (rather
+/// than spans, which may coincide in hand-built trees) keys the type table.
+#[derive(Debug)]
+pub struct CheckedProgram {
+    statements: Vec<Stmt>,
+    diagnostics: Vec<Diagnostic>,
+    types: ResolvedTypes,
+}
+
+impl CheckedProgram {
+    pub fn statements(&self) -> &[Stmt] {
+        &self.statements
+    }
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+    pub fn expression_type(&self, expr: &Expr) -> Option<&Type> {
+        self.types.expressions.get(&(expr as *const Expr as usize))
+    }
+    pub fn lvalue_type(&self, target: &LValue) -> Option<&Type> {
+        self.types.targets.get(&(target as *const LValue as usize))
+    }
+    pub fn into_parts(self) -> (Vec<Stmt>, Vec<Diagnostic>) {
+        (self.statements, self.diagnostics)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ResolvedTypes {
+    expressions: HashMap<usize, Type>,
+    targets: HashMap<usize, Type>,
+}
+
+/// Checks and resolves a program, retaining types for backend lowering.
+/// Lowering must reject a nonempty diagnostic list, just like execution.
+pub fn prepare_typed(
+    statements: &[Stmt],
+    ranges: &[crate::mods::ModuleRange],
+    schema: Option<&SchemaContext>,
+) -> CheckedProgram {
+    prepare_impl(statements, ranges, schema, true)
+}
+
+fn prepare_impl(
+    statements: &[Stmt],
+    ranges: &[crate::mods::ModuleRange],
+    schema: Option<&SchemaContext>,
+    record_types: bool,
+) -> CheckedProgram {
     let resolution = crate::imports::resolve(statements, ranges, schema);
     let mut diagnostics = resolution.diagnostics;
-    diagnostics.extend(check_resolved_with_schema(&resolution.statements, schema));
-    (resolution.statements, diagnostics)
+    let (errors, types) = check_resolved_with_schema(&resolution.statements, schema, record_types);
+    diagnostics.extend(errors);
+    CheckedProgram {
+        statements: resolution.statements,
+        diagnostics,
+        types,
+    }
 }
 
 fn check_resolved_with_schema(
     statements: &[Stmt],
     schema: Option<&SchemaContext>,
-) -> Vec<Diagnostic> {
+    record_types: bool,
+) -> (Vec<Diagnostic>, ResolvedTypes) {
     let mut checker = Checker::new_with_schema(schema);
+    checker.record_types = record_types;
 
     // Pass 1: register every top-level declaration. Forward references and
     // recursion resolve because every signature and type is registered
@@ -344,7 +426,23 @@ fn check_resolved_with_schema(
     // picture — every impl block registered, every signature resolved.
     checker.check_schema_boundaries();
 
-    checker.diagnostics
+    let expression_types = checker
+        .expression_types
+        .iter()
+        .map(|(id, ty)| (*id, ty.to_ast(&checker.types)))
+        .collect();
+    let targets = checker
+        .lvalue_types
+        .iter()
+        .map(|(id, ty)| (*id, ty.to_ast(&checker.types)))
+        .collect();
+    (
+        checker.diagnostics,
+        ResolvedTypes {
+            expressions: expression_types,
+            targets,
+        },
+    )
 }
 
 /// The static type checker. `schema` carries the ACTIVE host contract
@@ -381,6 +479,9 @@ struct Checker<'a> {
     /// The function whose body is being checked, for `return` and `?`
     /// validation.
     current_fn: Option<(String, Ty)>,
+    record_types: bool,
+    expression_types: HashMap<usize, Ty>,
+    lvalue_types: HashMap<usize, Ty>,
 }
 
 impl<'a> Checker<'a> {
@@ -403,6 +504,9 @@ impl<'a> Checker<'a> {
             schema,
             scopes: Vec::new(),
             current_fn: None,
+            record_types: false,
+            expression_types: HashMap::new(),
+            lvalue_types: HashMap::new(),
         };
         checker.register_builtin(
             "option",
@@ -2064,6 +2168,15 @@ impl<'a> Checker<'a> {
     /// Types an assignment target's variable/field/index chain and returns
     /// the type it denotes (§2.10, §2.13, §A.7).
     fn resolve_lvalue(&mut self, target: &LValue, span: Span) -> Ty {
+        let ty = self.resolve_lvalue_inner(target, span);
+        if self.record_types {
+            self.lvalue_types
+                .insert(target as *const LValue as usize, ty.clone());
+        }
+        ty
+    }
+
+    fn resolve_lvalue_inner(&mut self, target: &LValue, span: Span) -> Ty {
         match target {
             LValue::Var { name } => match self.lookup(name) {
                 Some(ty) => ty,
@@ -2167,6 +2280,15 @@ impl<'a> Checker<'a> {
     /// constructors need it (§2.8, §2.16) and where an integer literal
     /// crystallizes as a `byte` (0–255, §2.4).
     fn type_expr(&mut self, expr: &Expr, expected: Option<&Ty>) -> Ty {
+        let ty = self.type_expr_inner(expr, expected);
+        if self.record_types {
+            self.expression_types
+                .insert(expr as *const Expr as usize, ty.clone());
+        }
+        ty
+    }
+
+    fn type_expr_inner(&mut self, expr: &Expr, expected: Option<&Ty>) -> Ty {
         match &expr.kind {
             ExprKind::IntLit(value) => match expected {
                 // An integer literal in byte position crystallizes as a

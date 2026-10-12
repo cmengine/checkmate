@@ -10,9 +10,9 @@ cell and deadline per call:
 
 | Limit | Rust field | C field | Semantics |
 | --- | --- | --- | --- |
-| **Fuel** | `fuel: Option<u64>` | `uint64_t fuel` | A deterministic **operation count** — every statement and expression evaluation charges one unit. Not wall-clock: identical programs consume identical fuel everywhere. |
+| **Fuel** | `fuel: Option<u64>` | `uint64_t fuel` | A deterministic **bytecode instruction count** — every executed instruction, including calls, branches, jumps, and returns, charges one unit. Identical bytecode and inputs consume identical fuel regardless of machine speed. |
 | **Deadline** | `deadline_ms: Option<u64>` | `uint64_t deadline_ms` | Wall-clock budget in milliseconds, evaluated **at safepoints only** — real time is never read asynchronously. |
-| **Call depth** | `max_call_depth: usize` | `size_t max_call_depth` | Maximum nested call frames. Native (Rust) recursion is guarded by the same bound, so runaway recursion terminates with a clean error, never a stack overflow. |
+| **Call depth** | `max_call_depth: usize` | `size_t max_call_depth` | Maximum nested script call frames. The VM uses an explicit frame stack, so script recursion does not recurse on the native Rust stack. |
 
 Unset conventions:
 
@@ -22,26 +22,32 @@ Unset conventions:
 | `0` (C) | unmetered | none | engine default |
 | `Some(0)` (Rust) | exhausts at first safepoint | expires immediately | — |
 
-The engine default depth is **1024** (`MAX_CALL_DEPTH`). A host running
-programs that legitimately recurse near the default must provide
-adequate native stack (e.g. a dedicated thread) or lower the limit —
-the depth guard, not the native stack, is what must stop runaway
-recursion.
+The engine default depth is **1024** (`MAX_CALL_DEPTH`). A nonzero value
+below the default lowers the bound; values at or above the default keep it.
+The VM checks the bound before pushing a script frame and reports `CallDepth`.
+
+Fuel thresholds changed with the bytecode backend: the previous tree walker
+charged statements and expressions. Recalibrate existing host budgets; the
+same numeric budget need not stop at the same source location. There is no
+legacy accounting mode. Compile-time megaprogram evaluation still uses the
+reference walker's deterministic operation meter. Instruction counts may also
+change with future compiler versions or optimizations.
 
 ## Safepoints
 
-Deadline checks (and fuel accounting) happen at safepoints — statement
-boundaries, loop backedges, and call entries. A tight loop is
-interrupted at its next backedge; a long host capability call returns
-into a safepoint check. Native execution under a future AOT backend
-will inject the same cooperative safepoints at function entries,
-backedges, and continuation splits.
+The synchronous VM checks the deadline before every bytecode instruction,
+then charges fuel. Even an empty loop executes metered branches and jumps.
+A host capability call runs synchronously and cannot be interrupted by the
+VM; the deadline is checked again before the next instruction after it returns.
+
+> **Future:** Native AOT execution will inject cooperative safepoints at
+> function entries, loop backedges, and continuation splits (§5.5).
 
 ## What a tripped limit does
 
 The invocation **terminates cleanly**: the host receives a classified
 error — never a hang, never an asynchronous thread kill, never a
-panic. Cancelling a *suspended* invocation (future VM) will drop the
+panic. Cancelling a *suspended* invocation (future async backend) will drop the
 pending continuation deterministically, decrementing refcounts on
 captured values (§5.6).
 

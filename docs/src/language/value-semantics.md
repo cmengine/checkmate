@@ -52,25 +52,18 @@ This is not boilerplate to work around — it is the model. Data flow is
 visible in the source: if a variable changed, its assignment (or a field
 assignment rooted at it) is in the code you are reading.
 
-## Copying is cheap: ARC + COW
+## Value copies today
 
-The language guarantees the *semantics* of copies; the implementation
-guarantees their *cost profile*:
+The synchronous bytecode VM and reference tree walker use owned values:
+strings, arrays, maps, struct fields, and enum payloads are copied into
+private storage. Mutation of a copy cannot affect the original. Composite
+copies currently cost time and memory proportional to their contents.
+Values are reclaimed when their owning execution storage is dropped.
 
-1. **Stack allocation bias** — values that do not escape their scope live
-   on the stack (planned aggressively in the AOT backend; the tree walker
-   allocates on the Rust heap with the same escape discipline).
-2. **Copy-on-write (COW)** — strings, arrays, maps, and heap-promoted
-   records share refcounted backing buffers. A "copy" increments a count;
-   only a *mutation* on a shared buffer materializes a private copy first.
-3. **Automatic reference counting (ARC)** — when data escapes, the
-   compiler emits balanced increments/decrements. Reclamation is
-   deterministic: no tracing GC, no stop-the-world pauses, no background
-   threads.
-
-Net effect: the semantics are "everything clones", the behavior of clones
-of unmutated data is O(1), and memory reclamation is deterministic — which
-is exactly what a host embedding untrusted scripts wants.
+> **Future:** The whitepaper's ARC/COW memory core (§3.1) will share backing
+> buffers until mutation requires a private copy. Stack allocation and
+> reference-count elision belong to future backend optimization work. The
+> current VM does not promise O(1) composite copies.
 
 ## What this buys you
 

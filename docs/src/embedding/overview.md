@@ -59,7 +59,7 @@ Entry-point metadata is discoverable on the program handle
 
 Every invocation runs under the context's limits:
 
-- **Fuel** — a deterministic operation count; exhausted ⇒ `Budget` error.
+- **Fuel** — a deterministic bytecode instruction count; exhausted ⇒ `Budget` error.
 - **Deadline** — wall-clock budget in milliseconds, checked at
   safepoints ⇒ `Deadline` error.
 - **Call depth** — maximum nested calls (default 1024) ⇒ `CallDepth`

@@ -63,3 +63,7 @@ schema-macro = ["api", "dep:cme-schema-macro"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"all\"))"] }
+
+[[bench]]
+name = "bytecode"
+harness = false

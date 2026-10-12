@@ -5,7 +5,7 @@ use cme_core::Span;
 #[cfg(feature = "cli")]
 use cme_core::ast::StmtKind;
 #[cfg(feature = "cli")]
-use cme_interp::{InterpError, Interpreter, Value};
+use cme_interp::{InterpError, Value, bytecode::Vm};
 #[cfg(feature = "cli")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "cli")]
@@ -251,7 +251,7 @@ fn mod_command(
     // With schemas registered, the mod's [schemas] manifest table narrows
     // the grant (§9.5, §10.2); a manifest listing nothing denies
     // everything — the §7.2 sandbox.
-    let (resolved, check_errors) = match schema {
+    let (checked, declarations) = match schema {
         Some(context) => {
             // A manifest listing nothing denies every namespace — the
             // §7.2 sandbox: only granted namespaces are visible.
@@ -263,9 +263,14 @@ fn mod_command(
             let grant =
                 cme_compiler::schema::SchemaContext::grant_targets(context.set.clone(), targets);
             match grant {
-                Ok(grant) => {
-                    cme_compiler::check::prepare(&program.statements, &program.ranges, Some(&grant))
-                }
+                Ok(grant) => (
+                    cme_compiler::check::prepare_typed(
+                        &program.statements,
+                        &program.ranges,
+                        Some(&grant),
+                    ),
+                    cme_compiler::schema::declaration_statements(&grant),
+                ),
                 Err(issues) => {
                     return Err(CliError::Schema(
                         issues.iter().map(|issue| issue.message.clone()).collect(),
@@ -273,13 +278,17 @@ fn mod_command(
                 }
             }
         }
-        None => cme_compiler::check::prepare(&program.statements, &program.ranges, None),
+        None => (
+            cme_compiler::check::prepare_typed(&program.statements, &program.ranges, None),
+            Vec::new(),
+        ),
     };
+    let check_errors = checked.diagnostics();
     if !check_errors.is_empty() {
         // Checker diagnostics live in virtual-text coordinates too: run
         // them through the same re-anchoring.
         failures.extend(render_located_diagnostics(
-            &check_errors,
+            check_errors,
             &program.ranges,
             &modules,
             display_root,
@@ -308,8 +317,15 @@ fn mod_command(
                     "no `main` function to run in mod {display_root}"
                 )));
             }
-            let interpreter = Interpreter::new(&resolved);
-            match interpreter.invoke("main", &[]) {
+            let code = cme_compiler::lower::compile(&checked, &declarations).map_err(|errors| {
+                CliError::Mod(render_located_diagnostics(
+                    &errors,
+                    &program.ranges,
+                    &modules,
+                    display_root,
+                ))
+            })?;
+            match Vm::new(&code).invoke("main", &[]) {
                 Ok(value) => {
                     if !matches!(value, Value::Void) {
                         println!("{value}");
@@ -510,8 +526,8 @@ fn run_program(
     let declarations = schema
         .map(cme_compiler::schema::declaration_statements)
         .unwrap_or_default();
-    let (resolved, check_errors) = cme_compiler::check::prepare(&outcome.statements, &[], schema);
-    errors.extend(check_errors);
+    let checked = cme_compiler::check::prepare_typed(&outcome.statements, &[], schema);
+    errors.extend_from_slice(checked.diagnostics());
     // Never run broken code: refuse before invoking anything.
     render_diagnostics(errors, source)?;
 
@@ -527,8 +543,9 @@ fn run_program(
         )));
     }
 
-    let interpreter = Interpreter::new(&resolved).with_declarations(&declarations);
-    match interpreter.invoke("main", &[]) {
+    let code = cme_compiler::lower::compile(&checked, &declarations)
+        .map_err(|errors| CliError::Compiler(errors, source.to_string()))?;
+    match Vm::new(&code).invoke("main", &[]) {
         Ok(value) => {
             // Void prints nothing; every other value prints via Display.
             if !matches!(value, Value::Void) {

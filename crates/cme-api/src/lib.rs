@@ -58,14 +58,14 @@
 //! providers, and schema proxies constructed through
 //! [`Context::get_interface`] give the host typed calls into the script's
 //! `impl` members (`gamemode.init_game(config)` minus the `.await`),
-//! whether the script ran on the tree walker or any future engine that
+//! whether the script ran on the bytecode VM or any future engine that
 //! honors the same [`Value`] seam.
 //!
 //! # Threads
 //!
 //! [`Engine`] and [`CompiledProgram`] are immutable and shareable
 //! (`Send + Sync`). A [`Context`] is `Send + Sync` too: invocations share
-//! nothing mutable — each creates its own fuel cell and interpreter frame
+//! nothing mutable — each creates its own fuel cell and VM frame stack
 //! — so independent invocations race with nothing (§1: concurrent
 //! execution across invocations is inherently race-free). One context used
 //! from several threads runs those invocations concurrently by design.

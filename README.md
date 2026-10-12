@@ -1,6 +1,6 @@
 # CME — Checkmate Engine
 
-CME is a statically typed, embeddable scripting language implemented in Rust. The full whitepaper language surface parses, type-checks, and runs end to end on the tree-walking interpreter, the §8 megaprogramming system (grammar-driven `mega` macros with a packrat pattern engine and compile-time function evaluation) is implemented at the source-text level with its own `cme expand` command, multi-file mods (§10) load, link, and run from a `mod.toml` + `src/` tree, and the §9 schema system gates host/script contracts with compile-time-verified bindings for Rust and C hosts. The bytecode VM and AOT compiler remain future work.
+CME is a statically typed, embeddable scripting language implemented in Rust. The full whitepaper language surface parses, type-checks, and runs end to end on the synchronous register bytecode VM, the §8 megaprogramming system (grammar-driven `mega` macros with a packrat pattern engine and compile-time function evaluation) is implemented at the source-text level with its own `cme expand` command, multi-file mods (§10) load, link, and run from a `mod.toml` + `src/` tree, and the §9 schema system gates host/script contracts with compile-time-verified bindings for Rust and C hosts. The tree walker remains the reference oracle and compile-time evaluator; async and AOT remain future work.
 
 ## Current Status
 
@@ -94,7 +94,7 @@ The server also understands where your files live, with no configuration:
 
 ## Host Embedding APIs (Rust and C)
 
-Checkmate embeds through the WHITEPAPER §13 host APIs over the shipped front end and tree-walking interpreter. Programs load from a source text, a `.cm` file, or a whole §10 mod tree; every load applies the same gate the CLI applies (megaprogram expansion when present, parse, standalone-import check, type check), so a program that produced a diagnostic is never invocable. Contexts carry the §5.5 execution limits — fuel, wall-clock deadline, call depth — per invocation, and hosts invoke top-level functions or §10.4 impl members (`engine.gamemode.OnTick`-style) — with the §9 schema system active, loads gate on the registered contract and capability calls dispatch to host providers. Invocations also enforce the §5.7 reentrancy prohibition: a capability dispatched mid-invocation cannot invoke back into the same context (the nested call fails with `ErrorKind::Reentrant`; the C ABI reports it as `CM_ERROR_INVALID_ARG`), while different contexts and other threads stay free.
+Checkmate embeds through the WHITEPAPER §13 host APIs over the shipped front end and synchronous bytecode VM. Programs load from a source text, a `.cm` file, or a whole §10 mod tree; every load applies the same gate the CLI applies (megaprogram expansion when present, parse, standalone-import check, type check), so a program that produced a diagnostic is never invocable. Contexts carry the §5.5 execution limits — fuel, wall-clock deadline, call depth — per invocation, and hosts invoke top-level functions or §10.4 impl members (`engine.gamemode.OnTick`-style) — with the §9 schema system active, loads gate on the registered contract and capability calls dispatch to host providers. Invocations also enforce the §5.7 reentrancy prohibition: a capability dispatched mid-invocation cannot invoke back into the same context (the nested call fails with `ErrorKind::Reentrant`; the C ABI reports it as `CM_ERROR_INVALID_ARG`), while different contexts and other threads stay free.
 
 The Rust shape (behind the facade's `api` feature):
 
@@ -172,7 +172,7 @@ The macro also generates typed interface proxies for host → script calls and n
 
 **C hosts get a generated header**: `cme codegen-c schemas/engine.cm` emits function-pointer typedefs per capability member, a vtable, and a registration macro whose `_Static_assert`s (via `_Generic`) verify every host implementation's signature AT COMPILE TIME — a missing member fails the preprocessor, a wrong signature fails the assert. Interface members become exact-arity invocation helpers, and schema structs/enums gain pack/unpack helpers over the `cm_value` ABI (primitives, owned `char*` strings, nested schema types by address; container shapes ride the generic accessors). One header per namespace; several headers coexist in one translation unit. The header is not just a demo: `cme-ffi`'s build generates it from `apps/c_host/engine.cm` and the C host application compiles against it, so `cargo test` exercises the full flow.
 
-A program that calls a capability with no registered provider fails the LOAD — wiring mistakes are deterministic before any invocation, and capability calls at runtime dispatch to the provider through an engine-agnostic boundary the tree walker uses today and the bytecode VM will use unchanged.
+A program that calls a capability with no registered provider fails the LOAD — wiring mistakes are deterministic before any invocation, and capability calls at runtime dispatch to the provider through the same engine-agnostic boundary used by the bytecode VM and reference walker.
 
 `apps/rust_host` is a working Rust consumer (`cme-rust-host <file.cm | mod_dir> <entry> [args...] --fuel N --deadline-ms N --depth N --schema <schema.cm>`, plus `--schema-demo` for the full §9.6 generated-bindings walkthrough over its own `schemas/game.cm` — the host implements the macro-generated capability trait, so its signatures are verified at the app's compile time), and `apps/c_host` is a working C consumer with a Makefile — the same C file also runs inside `cargo test` via cme-ffi's build script, which generates the schema header the consumer includes, so the workspace test run exercises the real C client AND its compile-time-verified bindings end to end.
 
@@ -182,9 +182,9 @@ The repository is a Cargo workspace with focused crates:
 
 | Crate | Purpose | Status |
 | --- | --- | --- |
-| `cme-core` | Shared AST and language data models | Full language surface |
-| `cme-compiler` | Lexer, parser, diagnostics, validator, type checker, `parse_source`, the `mega` megaprogram subsystem, and the `mods` multi-file mod loader | Working front-end for the full surface plus §8 megaprogramming and §10 mods |
-| `cme-interp` | Interpreter | Working tree-walking interpreter (full surface) |
+| `cme-core` | Shared AST, typed control-flow IR, and language data models | Full language surface |
+| `cme-compiler` | Lexer, parser, diagnostics, validator, type checker, typed IR lowering, `parse_source`, the `mega` megaprogram subsystem, and the `mods` multi-file mod loader | Working front-end for the full surface plus §8 megaprogramming and §10 mods |
+| `cme-interp` | Bytecode generation, register VM, and reference tree walker | Synchronous full surface, explicit VM frames, instruction-metered fuel |
 | `cme-api` | Rust host embedding API (§13.1): `Engine`, `CompiledProgram`, `Context`, `ExecutionLimits`, schema registration, capability providers | Working over source files and mod trees, schema-gated |
 | `cme-ffi` | Stable C host API (§13.2): `cme.h`, `cm_*` ABI, staticlib + cdylib, schema + provider surface | Working; the C host app runs in `cargo test` |
 | `cme-schema-macro` | `cme_schema_bindings!` — compile-time-verified Rust host bindings from `.cm` schema files (§9.6) | Working; capability traits, proxies, descriptors |

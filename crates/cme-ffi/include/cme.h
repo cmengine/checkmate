@@ -2,7 +2,7 @@
  * cme.h — the stable C host API for Checkmate (WHITEPAPER §13.2).
  *
  * The ABI mirrors the Rust host API (§13.1) over the shipped front end and
- * tree-walking interpreter: load a program (a source text, a file, or a
+ * synchronous bytecode VM: load a program (a source text, a file, or a
  * §10 mod tree), create an execution context under §5.5 limits, invoke
  * entry points, and read results or errors back.
  *
@@ -144,11 +144,12 @@ void cm_string_free(char* text);
 /**
  * §5.5 invocation constraints. Zero means "unset/default" for every field:
  * fuel 0 = unmetered, deadline 0 = none, depth 0 = the engine default
- * (1024). A host running scripts that legitimately recurse near the
- * default must provide adequate native stack or lower `max_call_depth`.
+ * (1024). Script calls use an explicit VM frame stack, independent of the
+ * native stack. Existing tree-walker fuel thresholds must be recalibrated:
+ * fuel now counts bytecode instructions, including branches and returns.
  */
 typedef struct cm_limits_t {
-    /** Deterministic operation budget (§5.5 fuel metering). */
+    /** Deterministic bytecode instruction budget (§5.5 fuel metering). */
     uint64_t fuel;
     /** Wall-clock budget in milliseconds, observed at safepoints only. */
     uint64_t deadline_ms;
@@ -265,7 +266,7 @@ cm_future_t* cm_invoke(cm_context_t* context,
 /* ------------------------------------------------------------------ */
 
 typedef enum cm_poll_result {
-    /** Invocation still running (future VMs; unreachable today). */
+    /** Invocation still running (future async backend; unreachable today). */
     CM_PENDING = 0,
     /** Finished successfully; take the value with cm_future_take_value. */
     CM_READY = 1,

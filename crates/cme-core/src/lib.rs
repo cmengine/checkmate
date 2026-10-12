@@ -1,5 +1,5 @@
-//! `cme-core` owns the language data model: the spanned AST, source spans, and
-//! diagnostic references. Recognition and parsing stay in `cme-compiler`.
+//! `cme-core` owns the language data model: the spanned AST, typed control-flow
+//! IR, source spans, and diagnostic references. Recognition and parsing stay in `cme-compiler`.
 //!
 //! A hand-built declaration looks like this:
 //!
@@ -27,6 +27,7 @@
 //! assert_eq!(stmt.span.end, 13);
 //! ```
 
+pub mod ir;
 pub mod mega;
 /// The §9 host-contract data model: versions, schema files, capabilities,
 /// interfaces, and the shared FFI boundary types. The shapes live here;

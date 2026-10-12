@@ -17,6 +17,7 @@ pub mod check;
 pub mod diagnostics;
 pub mod imports;
 pub mod lexer;
+pub mod lower;
 pub mod mega;
 /// Multi-file mod support (§10): manifest, discovery, assembly.
 pub mod mods;

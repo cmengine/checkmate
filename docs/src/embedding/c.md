@@ -162,16 +162,16 @@ void          cm_context_destroy(cm_context_t*);
 
 | Field | Meaning | Zero |
 | --- | --- | --- |
-| `fuel` | deterministic operation budget (§5.5) | unmetered |
+| `fuel` | deterministic bytecode instruction budget (§5.5) | unmetered |
 | `deadline_ms` | wall-clock budget, checked at safepoints | none |
 | `max_call_depth` | max nested call frames | engine default (1024) |
 
 Contexts are cheap; each invocation gets a **fresh** fuel cell and
 deadline, so one context can serve many invocations — including from
-multiple threads. A host running scripts that legitimately recurse near
-the default must provide adequate native stack or lower
-`max_call_depth` — the depth guard, not the native stack, is what must
-stop runaway recursion.
+multiple threads. Script calls use explicit VM frames rather than native
+recursion. `max_call_depth` bounds those frames; see
+[Execution Limits and Errors](../appendix/limits-and-errors.md) for fuel
+compatibility and safepoint behavior.
 
 ## Invocation and futures
 

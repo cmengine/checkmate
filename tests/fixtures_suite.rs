@@ -2,9 +2,9 @@
 //! full front-end pipeline (and the tree-walking interpreter where the file
 //! is a healthy program), with per-directory contracts:
 //!
-//! - `programs/*.cm` parse and check CLEAN and every one is self-checking:
-//!   `main()` returns 0 exactly when all of the fixture's internal pins
-//!   hold, so the runner asserts `Ok(Value::Int(0))`.
+//! - `programs/*.cm` expand, parse and check CLEAN. Most self-check and
+//!   return 0; basic returns 3 and syntax returns a pinned report. The
+//!   fixture registry records each intended result explicitly.
 //! - `recovery/*.cm` are damaged on purpose: the pipeline must report a
 //!   NON-EMPTY diagnostic list, never panic, and every char-boundary prefix
 //!   of every file must also survive the pipeline without panicking.
@@ -14,7 +14,10 @@
 use std::path::Path;
 
 use cme_compiler::check::check;
-use cme_interp::{InterpError, Interpreter, Value};
+use cme_interp::{InterpError, Interpreter};
+
+#[path = "support/fixtures.rs"]
+mod fixtures;
 
 const FIXTURES: &str = "tests/fixtures";
 
@@ -52,13 +55,12 @@ fn diagnose(source: &str) -> Vec<String> {
     messages
 }
 
-/// Every healthy program fixture is self-checking: clean compile, `main`
-/// returns 0.
+/// Every healthy program fixture has a clean compile and its registered
+/// intended result (including the report-producing syntax fixture).
 #[test]
 fn program_fixtures_run_and_self_verify() {
     for path in cm_files(&fixture_dir("programs")) {
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("{path:?} readable: {error}"));
+        let source = fixtures::program_source(&path);
         let messages = diagnose(&source);
         assert!(
             messages.is_empty(),
@@ -72,8 +74,8 @@ fn program_fixtures_run_and_self_verify() {
             .unwrap_or_else(|error| panic!("{path:?} must run: {error:?}"));
         assert_eq!(
             result,
-            Value::Int(0),
-            "{path:?} self-check pins failed (main returned {result:?})"
+            fixtures::expected_result(&path),
+            "{path:?} expected-result pin failed (main returned {result:?})"
         );
     }
 }
@@ -152,13 +154,13 @@ fn legacy_fixtures_keep_their_pinned_behavior() {
 #[test]
 fn program_fixture_runtime_errors_are_fixture_bugs() {
     for path in cm_files(&fixture_dir("programs")) {
-        let source = std::fs::read_to_string(&path).expect("readable");
+        let source = fixtures::program_source(&path);
         let outcome = cme_compiler::parse_source(&source);
         let diagnostics = check(&outcome.statements);
         assert!(diagnostics.is_empty(), "{path:?}: {diagnostics:?}");
         let interpreter = Interpreter::new(&outcome.statements);
         let error: Option<InterpError> = match interpreter.invoke("main", &[]) {
-            Ok(Value::Int(0)) => None,
+            Ok(value) if value == fixtures::expected_result(&path) => None,
             Ok(other) => panic!("{path:?}: main returned {other:?} — a fixture pin failed"),
             Err(error) => Some(error),
         };

@@ -1900,8 +1900,13 @@ impl<'env, 'a> Runner<'env, 'a> {
                 }
                 // A byte mixed with an int widens (lossless) and computes
                 // as int (§2.4).
-                (Value::Byte(a), Value::Int(b)) => Ok(Value::Int(a as i64 + b)),
-                (Value::Int(a), Value::Byte(b)) => Ok(Value::Int(a + b as i64)),
+                (Value::Byte(a), Value::Int(b)) => (a as i64)
+                    .checked_add(b)
+                    .map(Value::Int)
+                    .ok_or_else(overflow),
+                (Value::Int(a), Value::Byte(b)) => {
+                    a.checked_add(b as i64).map(Value::Int).ok_or_else(overflow)
+                }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
                 // §A.6: when either operand is a str, + concatenates with
                 // the other side's canonical string form.
@@ -1927,8 +1932,13 @@ impl<'env, 'a> Runner<'env, 'a> {
                 (Value::Byte(a), Value::Byte(b)) => {
                     a.checked_sub(b).map(Value::Byte).ok_or_else(overflow)
                 }
-                (Value::Byte(a), Value::Int(b)) => Ok(Value::Int(a as i64 - b)),
-                (Value::Int(a), Value::Byte(b)) => Ok(Value::Int(a - b as i64)),
+                (Value::Byte(a), Value::Int(b)) => (a as i64)
+                    .checked_sub(b)
+                    .map(Value::Int)
+                    .ok_or_else(overflow),
+                (Value::Int(a), Value::Byte(b)) => {
+                    a.checked_sub(b as i64).map(Value::Int).ok_or_else(overflow)
+                }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
                 _ => Err(mismatch()),
             },
@@ -1939,8 +1949,13 @@ impl<'env, 'a> Runner<'env, 'a> {
                 (Value::Byte(a), Value::Byte(b)) => {
                     a.checked_mul(b).map(Value::Byte).ok_or_else(overflow)
                 }
-                (Value::Byte(a), Value::Int(b)) => Ok(Value::Int(a as i64 * b)),
-                (Value::Int(a), Value::Byte(b)) => Ok(Value::Int(a * b as i64)),
+                (Value::Byte(a), Value::Int(b)) => (a as i64)
+                    .checked_mul(b)
+                    .map(Value::Int)
+                    .ok_or_else(overflow),
+                (Value::Int(a), Value::Byte(b)) => {
+                    a.checked_mul(b as i64).map(Value::Int).ok_or_else(overflow)
+                }
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                 _ => Err(mismatch()),
             },

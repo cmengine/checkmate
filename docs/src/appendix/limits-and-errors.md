@@ -51,7 +51,7 @@ captured values (§5.6).
 
 | Failure | Trigger |
 | --- | --- |
-| Integer overflow | Arithmetic outside the `int` range |
+| Integer overflow | Arithmetic outside the `int` or `byte` range; mixed `int`/`byte` operations widen to `int` and remain checked |
 | Division / remainder by zero | `a / 0`, `a % 0` on `int` |
 | Array index out of bounds | `xs[i]`, `i < 0` or `i >= xs.length` |
 | Missing map key | Reading `m[k]` for an absent `k` |

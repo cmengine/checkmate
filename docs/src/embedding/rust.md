@@ -333,7 +333,8 @@ Rules the API enforces:
 - A provider `Err(_)` fails the invocation with the message anchored at
   the script's call site.
 - **§5.7**: a provider dispatched mid-invocation cannot
-  `context.invoke(...)` back into the same context — the nested call
+  `context.invoke(...)` back into the same context, including indirectly
+  through another context — the nested call
   fails with `ErrorKind::Reentrant`; the original invocation continues.
   Different contexts and threads are unaffected.
 

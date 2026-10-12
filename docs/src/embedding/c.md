@@ -382,7 +382,8 @@ Provider contract:
   the engine — the **same** provider may run concurrently across
   contexts; guard shared state as you would in any threaded host.
 - **§5.7 reentrancy**: a provider dispatched from a running invocation
-  must not call `cm_invoke` on the **same context**; the nested call
+  must not call `cm_invoke` on the **same context**, including indirectly
+  through another context; the nested call
   yields an ERROR future (`CM_ERROR_INVALID_ARG`, message naming §5.7)
   and the original invocation is unaffected.
 

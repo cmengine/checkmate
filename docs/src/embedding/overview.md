@@ -125,7 +125,8 @@ script call ──▶ checker-verified signature (compile time)
 ## Reentrancy (§5.7)
 
 A host capability dispatched **from** a running invocation may not invoke
-back into the **same context** before the original call returns. The
+back into the **same context** before the original call returns, even
+indirectly through another context. The
 nested call fails immediately (`ErrorKind::Reentrant` in Rust;
 `CM_ERROR_INVALID_ARG` with a §5.7-naming message in C) and the original
 invocation continues untouched. Different contexts — and other threads —

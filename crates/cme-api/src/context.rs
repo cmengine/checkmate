@@ -1,7 +1,7 @@
 //! Execution contexts: §5.5 limits per invocation, the host-visible
 //! error surface, and capability dispatch (WHITEPAPER §13).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -150,24 +150,21 @@ impl fmt::Display for ExecutionError {
 
 impl std::error::Error for ExecutionError {}
 
-// The §5.7 reentrancy guard: the identity of the context currently
-// executing an invocation on THIS thread (`0` when none). Capability
-// dispatch is synchronous on the invoking thread, so a provider that
-// calls back into the same context observes its own id here — concurrent
-// invocations from other threads (legal per §5.7) never see it. (Doc
-// comments on `thread_local!` items are swallowed by the macro, so the
-// guard's contract lives in this plain comment.)
+// The §5.7 guard tracks every context executing on THIS thread, including
+// callers suspended inside a different context's capability dispatch.
+// Concurrent invocations on other threads remain independent.
 thread_local! {
-    static ACTIVE_CONTEXT: Cell<usize> = const { Cell::new(0) };
+    static ACTIVE_CONTEXTS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Restores the previous guard value even when an invocation panics, so a
-/// thread never stays poisoned after a host bug unwinds through it.
-struct RestoreActiveContext(usize);
+/// Releases the current guard even when a host provider unwinds.
+struct RestoreActiveContext;
 
 impl Drop for RestoreActiveContext {
     fn drop(&mut self) {
-        ACTIVE_CONTEXT.with(|cell| cell.set(self.0));
+        ACTIVE_CONTEXTS.with(|contexts| {
+            contexts.borrow_mut().pop();
+        });
     }
 }
 
@@ -306,11 +303,9 @@ impl<'p> Context<'p> {
         &self,
         call: impl FnOnce(&Interpreter<'_>) -> Result<Value, InterpError>,
     ) -> Result<Value, ExecutionError> {
-        // The identity is shared by clones (a clone IS the same logical
-        // context) and distinct per `create_context` call. `0` means no
-        // active invocation, and a real allocation never collides with it.
+        // Clones share identity; independent contexts have distinct IDs.
         let context_id = Arc::as_ptr(&self.identity).addr();
-        if ACTIVE_CONTEXT.get() == context_id {
+        if ACTIVE_CONTEXTS.with(|contexts| contexts.borrow().contains(&context_id)) {
             return Err(ExecutionError {
                 kind: ErrorKind::Reentrant,
                 message: "reentrant invocation rejected (§5.7): a host capability called \
@@ -323,8 +318,8 @@ impl<'p> Context<'p> {
                 span: None,
             });
         }
-        let previous = ACTIVE_CONTEXT.with(|cell| cell.replace(context_id));
-        let _restore = RestoreActiveContext(previous);
+        ACTIVE_CONTEXTS.with(|contexts| contexts.borrow_mut().push(context_id));
+        let _restore = RestoreActiveContext;
 
         let fuel = self.limits.fuel.map(Cell::new);
         let deadline = self
